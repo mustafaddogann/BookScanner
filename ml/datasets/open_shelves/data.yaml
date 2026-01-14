@@ -1,0 +1,8 @@
+path: /Users/mustafad/projects/bookseller/BookScanner/ml/datasets/open_shelves
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 1
+names:
+  0: book

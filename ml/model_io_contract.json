@@ -1,0 +1,46 @@
+{
+  "model_path": "/Users/mustafad/projects/bookseller/BookScanner/src/models/yolov8_obb.tflite",
+  "inspected_at": "1768414841.793301",
+  "inputs": [
+    {
+      "index": 0,
+      "name": "inputs_0",
+      "shape": [
+        1,
+        640,
+        640,
+        3
+      ],
+      "dtype": "<class 'numpy.float32'>",
+      "quantization": {
+        "scale": null,
+        "zero_point": null
+      }
+    }
+  ],
+  "outputs": [
+    {
+      "index": 0,
+      "name": "Identity",
+      "shape": [
+        1,
+        6,
+        8400
+      ],
+      "dtype": "<class 'numpy.float32'>",
+      "quantization": {
+        "scale": null,
+        "zero_point": null
+      }
+    }
+  ],
+  "format_analysis": [
+    "Unknown format: analyze raw output manually"
+  ],
+  "decode_notes": [
+    "IMPORTANT: Verify format_analysis by running inference on test image",
+    "Check if coordinates are normalized [0,1] or absolute pixels",
+    "Check if output needs NMS or is already post-processed",
+    "Verify angle units (radians vs degrees)"
+  ]
+}

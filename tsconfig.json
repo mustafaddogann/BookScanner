@@ -1,0 +1,30 @@
+{
+  "extends": "@react-native/typescript-config",
+  "compilerOptions": {
+    "types": ["jest"],
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
+    "declaration": true,
+    "declarationMap": true,
+    "baseUrl": ".",
+    "paths": {
+      "@/*": ["src/*"]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "src/**/*",
+    "__tests__/**/*"
+  ],
+  "exclude": [
+    "**/node_modules",
+    "**/Pods",
+    "**/android",
+    "**/ios",
+    "backend"
+  ]
+}
