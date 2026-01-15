@@ -135,6 +135,52 @@ export interface PipelineTimings {
 }
 
 /**
+ * Inference context for debug manifest (GATE 6)
+ */
+export interface InferenceContextManifest {
+  frameWidth: number;
+  frameHeight: number;
+  viewWidth?: number;
+  viewHeight?: number;
+  rotationDegrees: number;
+  mirrored: boolean;
+  resizeMode: 'letterbox' | 'stretch';
+  scaleX: number;
+  scaleY: number;
+  offsetX: number;
+  offsetY: number;
+}
+
+/**
+ * Postprocess statistics for debug manifest (GATE 6)
+ */
+export interface PostprocessStatsManifest {
+  counts: {
+    raw: number;
+    afterThreshold: number;
+    afterNms: number;
+    afterGeometricFilters: number;
+  };
+  config: {
+    confidenceThreshold: number;
+    nmsIouThreshold: number;
+    nmsMode: string;
+    minAspectRatio: number;
+    maxAreaRatio: number;
+    minScore: number;
+  };
+  timingsMs: {
+    preprocess: number;
+    inference: number;
+    decode: number;
+    nms: number;
+    geomFilters: number;
+    postprocessTotal: number;
+    total: number;
+  };
+}
+
+/**
  * Debug manifest written for each pipeline run
  */
 export interface DebugManifest {
@@ -146,7 +192,17 @@ export interface DebugManifest {
   rotationPolicy: string;
   letterboxParams: LetterboxParams;
   modelIO: ModelIOContract | string; // path or embedded
-  detectionsOriginal: OBBDetection[];
+
+  // Detection arrays in different coordinate spaces (GATE 6)
+  detectionsModelSpace?: OBBModelSpace[]; // cx,cy,w,h,angle,score in 640-space
+  detectionsFrameSpace?: OBBDetection[]; // mapped to photo pixels (same as detectionsOriginal)
+  detectionsViewSpace?: OBBDetection[]; // mapped to preview/canvas (if applicable)
+  detectionsOriginal: OBBDetection[]; // Legacy field, same as detectionsFrameSpace
+
+  // Inference context with all mapping params (GATE 6)
+  inferenceContext?: InferenceContextManifest;
+  postprocessStats?: PostprocessStatsManifest;
+
   selectedDetectionIndex?: number;
   rectification?: RectifyResult[];
   timings: PipelineTimings;

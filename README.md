@@ -200,9 +200,45 @@ Run from repo root to verify the TFLite model:
 python3 -m pip install pillow numpy tensorflow
 python3 tools/inspect_tflite.py
 python3 tools/run_one_tflite.py
+python3 tools/decode_one.py --preset spine
+python3 tools/render_overlay.py
 ```
 
-Outputs written to `debug/model_io.json` and `debug/detections_raw.json`.
+**Recommended:** Use `--preset spine` (default) for book spine detection:
+```bash
+python3 tools/decode_one.py --preset spine --profile
+```
+
+This applies optimized settings: `nms_iou=0.9`, `min_aspect=6.0`, `max_area_ratio=0.08`, `min_score=0.6`.
+
+Outputs written to:
+- `debug/model_io.json` - Model input/output specifications
+- `debug/detections_raw.json` - Raw inference output
+- `debug/debug_manifest.json` - Decoded detections with pipeline metadata and timings
+- `debug/overlay_all.png` - All detections after NMS
+- `debug/overlay_filtered.png` - Filtered detections (spine candidates)
+
+**Presets:**
+| Preset | nms_iou | min_aspect | max_area_ratio | min_score | Use case |
+|--------|---------|------------|----------------|-----------|----------|
+| spine  | 0.90    | 6.0        | 0.08           | 0.60      | Book spine detection (default) |
+| general| 0.50    | 1.0        | 0.50           | 0.50      | General object detection |
+
+**Advanced Options:**
+```bash
+# Show timing breakdown
+python3 tools/decode_one.py --preset spine --profile
+
+# Debug IoU stats (runs sanity tests)
+python3 tools/decode_one.py --preset spine --nms_debug
+
+# Override preset values
+python3 tools/decode_one.py --preset spine --min_aspect 4.0
+```
+
+**NMS Mode Comparison:**
+- `--nms_mode obb`: Polygon IoU (accurate for rotated boxes)
+- `--nms_mode aabb`: Axis-aligned IoU (faster, fallback for device)
 
 ## Testing
 

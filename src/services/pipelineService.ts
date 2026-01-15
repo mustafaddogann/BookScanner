@@ -46,7 +46,7 @@ import {
 } from './debugArtifacts';
 import { buildImageMetaFromUri } from './imageService';
 import { useAppStore } from '../store/useAppStore';
-import { generateCoordinateTestArtifact } from '../utils/__tests__/letterbox.test';
+import { generateCoordinateTestArtifact } from '../utils/letterbox';
 
 // DEBUG FLAG: Set to true ONLY to bypass model requirement during UI development
 // MUST be false for any real testing or production

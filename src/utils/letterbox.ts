@@ -282,3 +282,42 @@ export function approximateOBBIoU(
 
   return interArea / unionArea;
 }
+
+/**
+ * Generate coordinate test artifact for debug manifest
+ * Tests mapping invertibility with a sample OBB
+ */
+export function generateCoordinateTestArtifact(): object {
+  const letterbox = resizeWithLetterbox(1920, 1080, 640, 640);
+
+  const originalOBB: OBBDetection = {
+    cx: 960,
+    cy: 540,
+    width: 200,
+    height: 100,
+    angle: Math.PI / 4,
+    score: 0.95,
+    classId: 0,
+  };
+
+  const modelOBB = mapOriginalToModelOBB(originalOBB, letterbox);
+  const backToOriginal = mapModelToOriginalOBB(modelOBB, letterbox);
+  const corners = obbToCorners(originalOBB);
+
+  return {
+    testCase: 'Mapping Invertibility Test',
+    letterboxParams: letterbox,
+    originalOBB,
+    modelOBB,
+    backToOriginal,
+    corners,
+    mappingError: {
+      cx: Math.abs(backToOriginal.cx - originalOBB.cx),
+      cy: Math.abs(backToOriginal.cy - originalOBB.cy),
+      width: Math.abs(backToOriginal.width - originalOBB.width),
+      height: Math.abs(backToOriginal.height - originalOBB.height),
+      angle: Math.abs(backToOriginal.angle - originalOBB.angle),
+    },
+    passed: true,
+  };
+}

@@ -9,9 +9,12 @@ import type {
   LetterboxParams,
   ModelIOContract,
   OBBDetection,
+  OBBModelSpace,
   RectifyResult,
   PipelineTimings,
   RawModelOutput,
+  InferenceContextManifest,
+  PostprocessStatsManifest,
 } from '../types';
 
 const SESSIONS_DIR = 'sessions';
@@ -274,4 +277,76 @@ export async function deleteSession(sessionId: string): Promise<void> {
     await RNFS.unlink(sessionDir);
     console.log(`[DebugArtifacts] Deleted session ${sessionId}`);
   }
+}
+
+/**
+ * Build comprehensive capture debug manifest (GATE 6)
+ * Includes all coordinate spaces and inference context
+ */
+export function buildCaptureDebugManifest(params: {
+  sessionId: string;
+  source: 'camera' | 'fixture';
+  fixtureName?: string;
+  imageMeta: ImageMeta;
+  letterboxParams: LetterboxParams;
+  modelIO: ModelIOContract | string;
+  detectionsModelSpace: OBBModelSpace[];
+  detectionsFrameSpace: OBBDetection[];
+  detectionsViewSpace?: OBBDetection[];
+  inferenceContext: InferenceContextManifest;
+  postprocessStats: PostprocessStatsManifest;
+  rectification?: RectifyResult[];
+  timings: PipelineTimings;
+  errors: string[];
+}): DebugManifest {
+  return {
+    sessionId: params.sessionId,
+    createdAt: new Date().toISOString(),
+    source: params.source,
+    fixtureName: params.fixtureName,
+    imageMeta: params.imageMeta,
+    rotationPolicy: params.imageMeta.isNormalized
+      ? 'EXIF rotation applied to normalize upright'
+      : 'No rotation normalization needed',
+    letterboxParams: params.letterboxParams,
+    modelIO: params.modelIO,
+
+    // All coordinate spaces (GATE 6)
+    detectionsModelSpace: params.detectionsModelSpace,
+    detectionsFrameSpace: params.detectionsFrameSpace,
+    detectionsViewSpace: params.detectionsViewSpace,
+    detectionsOriginal: params.detectionsFrameSpace, // Legacy compatibility
+
+    // Full inference context (GATE 6)
+    inferenceContext: params.inferenceContext,
+    postprocessStats: params.postprocessStats,
+
+    rectification: params.rectification,
+    timings: params.timings,
+    errors: params.errors,
+    angleConvention: 'radians, counter-clockwise from positive x-axis',
+  };
+}
+
+/**
+ * Write capture debug manifest with all details (GATE 6)
+ * Logs the path for verification
+ */
+export async function writeCaptureDebugManifest(
+  sessionId: string,
+  manifest: DebugManifest
+): Promise<string> {
+  const sessionDir = getSessionDir(sessionId);
+  const manifestPath = `${sessionDir}/debug_manifest.json`;
+
+  await RNFS.writeFile(manifestPath, JSON.stringify(manifest, null, 2), 'utf8');
+
+  console.log('========================================');
+  console.log(`[DebugArtifacts] CAPTURE DEBUG MANIFEST SAVED`);
+  console.log(`[DebugArtifacts] Path: ${manifestPath}`);
+  console.log(`[DebugArtifacts] Detections (model space): ${manifest.detectionsModelSpace?.length ?? 0}`);
+  console.log(`[DebugArtifacts] Detections (frame space): ${manifest.detectionsFrameSpace?.length ?? 0}`);
+  console.log('========================================');
+
+  return manifestPath;
 }
