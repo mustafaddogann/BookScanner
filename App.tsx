@@ -6,7 +6,7 @@
  */
 
 import React, { useEffect } from 'react';
-import { StatusBar, LogBox } from 'react-native';
+import { StatusBar, LogBox, NativeModules, Platform } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
@@ -20,6 +20,15 @@ import type { RootStackParamList } from './src/types';
 LogBox.ignoreLogs([
   'Non-serializable values were found in the navigation state',
 ]);
+
+// Debug: Log native modules at startup (dev only)
+if (__DEV__) {
+  console.log('[App] Platform:', Platform.OS);
+  console.log('[App] Native modules available:', Object.keys(NativeModules).join(', '));
+  // Check specifically for PushNotificationManager (should NOT be present)
+  const hasPushNotification = 'PushNotificationManager' in NativeModules;
+  console.log('[App] PushNotificationManager linked:', hasPushNotification);
+}
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
 

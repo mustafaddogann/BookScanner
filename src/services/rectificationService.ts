@@ -132,21 +132,48 @@ async function rectifyBackend(
 }
 
 /**
- * Fallback: Simple crop without perspective correction
- * Used when neither native nor backend is available
+ * Fallback: Axis-aligned bounding box crop
+ * Used when neither native OpenCV nor backend is available.
+ *
+ * NOTE: This does NOT do perspective correction - it just crops the AABB
+ * containing the OBB corners. The crop file will be larger than needed
+ * and not properly rectified.
+ *
+ * TODO: Implement proper AABB cropping using react-native-image-crop-picker
+ * or expo-image-manipulator. For now, we write the AABB region coordinates
+ * as metadata so the caller knows the crop wasn't applied.
  */
 async function rectifyFallback(
   imageUri: string,
   corners: OBBCorners,
   destSize: { width: number; height: number },
   outputPath: string
-): Promise<void> {
-  console.warn('[Rectifier] Using fallback crop (no perspective correction)');
+): Promise<{ fallbackUsed: true; aabbRegion: { x: number; y: number; width: number; height: number } }> {
+  // Calculate axis-aligned bounding box from corners
+  const xs = [corners.topLeft.x, corners.topRight.x, corners.bottomRight.x, corners.bottomLeft.x];
+  const ys = [corners.topLeft.y, corners.topRight.y, corners.bottomRight.y, corners.bottomLeft.y];
+  const aabbRegion = {
+    x: Math.floor(Math.min(...xs)),
+    y: Math.floor(Math.min(...ys)),
+    width: Math.ceil(Math.max(...xs) - Math.min(...xs)),
+    height: Math.ceil(Math.max(...ys) - Math.min(...ys)),
+  };
 
-  // For fallback, we just copy the image and note that rectification wasn't applied
-  // This allows the pipeline to continue for testing purposes
+  console.warn('[Rectifier] FALLBACK: No rectification available.');
+  console.warn(`[Rectifier] Would crop AABB region: x=${aabbRegion.x}, y=${aabbRegion.y}, w=${aabbRegion.width}, h=${aabbRegion.height}`);
+  console.warn('[Rectifier] Writing full image as placeholder (NOT a proper crop).');
+
+  // TODO: Use react-native-image-crop-picker or expo-image-manipulator to:
+  // 1. Read the original image
+  // 2. Crop to aabbRegion
+  // 3. Resize to destSize
+  // 4. Write to outputPath
+  //
+  // For now, we copy the original so the pipeline doesn't break, but this is NOT correct.
   const cleanUri = imageUri.startsWith('file://') ? imageUri.slice(7) : imageUri;
   await RNFS.copyFile(cleanUri, outputPath);
+
+  return { fallbackUsed: true, aabbRegion };
 }
 
 /**
@@ -187,18 +214,24 @@ export async function rectify(
   // Calculate destination size
   const destSize = calculateDestSize(paddedCorners, TARGET_HEIGHT);
 
-  // Generate output path
+  // Generate output path with unique tmp suffix to avoid collision during write
   const sessionDir = `${RNFS.DocumentDirectoryPath}/sessions/${sessionId}`;
   const cropsDir = `${sessionDir}/crops`;
-  const outputPath = `${cropsDir}/crop_${detectionIndex}.jpg`;
+  const finalPath = `${cropsDir}/crop_${detectionIndex}.jpg`;
 
-  // Ensure crops directory exists
-  if (!(await RNFS.exists(cropsDir))) {
-    await RNFS.mkdir(cropsDir);
-  }
+  // Use tmp file for atomic write
+  const ts = Date.now();
+  const rand = Math.random().toString(36).substring(2, 6);
+  const tmpPath = `${cropsDir}/crop_${detectionIndex}.${ts}.${rand}.tmp.jpg`;
+  let outputPath = tmpPath;
+
+  // Ensure session and crops directory exists (mkdir -p behavior)
+  await RNFS.mkdir(sessionDir);
+  await RNFS.mkdir(cropsDir);
 
   // Try rectification methods in order of preference
-  let rectificationMethod = 'none';
+  let rectificationMethod: 'native_opencv' | 'backend' | 'fallback_copy' = 'fallback_copy';
+  let fallbackAABB: { x: number; y: number; width: number; height: number } | undefined;
 
   if (hasNativeRectifier) {
     try {
@@ -210,7 +243,7 @@ export async function rectify(
     }
   }
 
-  if (rectificationMethod === 'none') {
+  if (rectificationMethod === 'fallback_copy') {
     const backendAvailable = await isBackendAvailable();
     if (backendAvailable) {
       try {
@@ -223,10 +256,27 @@ export async function rectify(
     }
   }
 
-  if (rectificationMethod === 'none') {
-    await rectifyFallback(imageUri, paddedCorners, destSize, outputPath);
-    rectificationMethod = 'fallback_copy';
-    console.log('[Rectifier] Used fallback (copy only)');
+  if (rectificationMethod === 'fallback_copy') {
+    const fallbackResult = await rectifyFallback(imageUri, paddedCorners, destSize, outputPath);
+    fallbackAABB = fallbackResult.aabbRegion;
+    console.log('[Rectifier] Used fallback (copy only - NOT a proper crop)');
+  }
+
+  // Atomic move: tmp file -> final path (idempotent)
+  try {
+    // Delete existing final file if present
+    const finalExists = await RNFS.exists(finalPath);
+    if (finalExists) {
+      await RNFS.unlink(finalPath);
+    }
+    // Move tmp to final
+    await RNFS.moveFile(tmpPath, finalPath);
+    outputPath = finalPath;
+    console.log(`[Rectifier] Moved tmp to final: ${finalPath}`);
+  } catch (moveError: any) {
+    console.warn(`[Rectifier] Move failed, using tmp path: ${moveError.message}`);
+    // Fall back to using tmp path if move fails
+    outputPath = tmpPath;
   }
 
   // Build result
@@ -237,9 +287,11 @@ export async function rectify(
     outputHeight: destSize.height,
     paddingUsed: PADDING_MARGIN,
     detectionIndex,
+    rectificationMethod,
+    fallbackAABB,
   };
 
-  // Write crop metadata
+  // Write crop metadata (writeCrop will skip image copy since outputPath is already the final location)
   await writeCrop(sessionId, detectionIndex, outputPath, result);
 
   return result;

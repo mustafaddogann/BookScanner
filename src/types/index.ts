@@ -36,7 +36,8 @@ export interface OBBDetection {
   width: number;   // box width in original pixels
   height: number;  // box height in original pixels
   angle: number;   // rotation angle in RADIANS
-  score: number;   // confidence score [0-1]
+  score: number;   // confidence probability [0-1] (sigmoid applied)
+  rawScore?: number; // raw logit score before sigmoid
   classId: number; // class index
   className?: string;
 }
@@ -50,7 +51,8 @@ export interface OBBModelSpace {
   width: number;
   height: number;
   angle: number;
-  score: number;
+  score: number;    // probability [0-1] (sigmoid applied)
+  rawScore?: number; // raw logit score before sigmoid
   classId: number;
 }
 
@@ -85,6 +87,10 @@ export interface RectifyResult {
   outputHeight: number;
   paddingUsed: number;
   detectionIndex: number;
+  /** Method used for rectification */
+  rectificationMethod?: 'native_opencv' | 'backend' | 'fallback_copy';
+  /** If fallback was used, this is the AABB region that SHOULD have been cropped */
+  fallbackAABB?: { x: number; y: number; width: number; height: number };
 }
 
 /**
@@ -181,6 +187,50 @@ export interface PostprocessStatsManifest {
 }
 
 /**
+ * Serialized FrameGeo for manifest storage
+ */
+export interface SerializedFrameGeo {
+  normalizedUri: string;
+  pixelW: number;
+  pixelH: number;
+  rotationDeg: number;
+  mirrored: boolean;
+  exifOrientation: number;
+  modelSize: number;
+  letterbox: {
+    scale: number;
+    padX: number;
+    padY: number;
+    srcWidth: number;
+    srcHeight: number;
+    dstWidth: number;
+    dstHeight: number;
+  };
+  createdAt: number;
+  paddingAxis: 'horizontal' | 'vertical';
+}
+
+/**
+ * Input tensor preprocessing metadata for manifest
+ */
+export interface InputTensorMeta {
+  /** Path to input_tensor_stats.json */
+  inputTensorStatsPath?: string;
+  /** Path to input_tensor_preview.ppm */
+  inputTensorPreviewPath?: string;
+  /** Padding fill value (normalized, e.g., 114/255 ≈ 0.447) */
+  paddingFillValue: number;
+  /** Channel order: RGB or BGR */
+  channelOrder: 'RGB' | 'BGR';
+  /** Normalization mode (e.g., 'divide_255') */
+  normalizationMethod: string;
+  /** Tensor shape [1, H, W, C] or [1, C, H, W] */
+  tensorShape: number[];
+  /** Tensor format: NHWC or NCHW */
+  tensorFormat: string;
+}
+
+/**
  * Debug manifest written for each pipeline run
  */
 export interface DebugManifest {
@@ -202,6 +252,12 @@ export interface DebugManifest {
   // Inference context with all mapping params (GATE 6)
   inferenceContext?: InferenceContextManifest;
   postprocessStats?: PostprocessStatsManifest;
+
+  /** FrameGeo - single source of truth for all geometry (serialized) */
+  frameGeo?: SerializedFrameGeo | object;
+
+  /** Input tensor preprocessing metadata */
+  inputTensorMeta?: InputTensorMeta;
 
   selectedDetectionIndex?: number;
   rectification?: RectifyResult[];

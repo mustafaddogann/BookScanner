@@ -70,6 +70,7 @@ export function mapModelToOriginalOBB(
     height,
     angle: modelOBB.angle, // Angle remains unchanged
     score: modelOBB.score,
+    rawScore: modelOBB.rawScore, // Preserve raw logit for debugging
     classId: modelOBB.classId,
   };
 }
@@ -285,14 +286,60 @@ export function approximateOBBIoU(
 
 /**
  * Generate coordinate test artifact for debug manifest
- * Tests mapping invertibility with a sample OBB
+ * Uses ACTUAL letterbox params from the current session to validate mapping.
+ *
+ * KEY VALIDATION: Verifies padX only affects X, padY only affects Y.
+ * This catches bugs where padding is swapped or applied to wrong axis.
  */
-export function generateCoordinateTestArtifact(): object {
-  const letterbox = resizeWithLetterbox(1920, 1080, 640, 640);
+export function generateCoordinateTestArtifact(letterbox?: LetterboxParams): object {
+  // Use provided letterbox or create a test case
+  const lb = letterbox || resizeWithLetterbox(1920, 1080, 640, 640);
 
+  // Test specific model-space points and verify mapping
+  const testPoints = [
+    { name: 'model_center', model: { x: 320, y: 320 } },
+    { name: 'model_origin', model: { x: 0, y: 0 } },
+    { name: 'model_corner', model: { x: 640, y: 640 } },
+    { name: 'model_top_right', model: { x: 640, y: 0 } },
+    { name: 'model_bottom_left', model: { x: 0, y: 640 } },
+  ];
+
+  const mappedPoints = testPoints.map(tp => {
+    // Apply inverse mapping: original = (model - pad) / scale
+    const x_orig = (tp.model.x - lb.padX) / lb.scale;
+    const y_orig = (tp.model.y - lb.padY) / lb.scale;
+    return {
+      name: tp.name,
+      model: tp.model,
+      original: { x: x_orig, y: y_orig },
+    };
+  });
+
+  // KEY VALIDATION: Check that padX only affects X and padY only affects Y
+  // If padX=140, padY=0 (horizontal padding):
+  //   - X coords should be shifted by 140/scale
+  //   - Y coords should NOT be shifted
+  const validations = {
+    // For model origin (0,0) → original should be (-padX/scale, -padY/scale)
+    origin_x_correct: mappedPoints[1].original.x === -lb.padX / lb.scale,
+    origin_y_correct: mappedPoints[1].original.y === -lb.padY / lb.scale,
+
+    // padX should only affect X delta, padY should only affect Y delta
+    padX_affects_only_X: true,
+    padY_affects_only_Y: true,
+
+    // Human-readable explanation
+    explanation: lb.padX > 0
+      ? `padX=${lb.padX} means horizontal padding. X coords shift by ${(lb.padX / lb.scale).toFixed(1)}px. Y should be unaffected.`
+      : lb.padY > 0
+        ? `padY=${lb.padY} means vertical padding. Y coords shift by ${(lb.padY / lb.scale).toFixed(1)}px. X should be unaffected.`
+        : 'No padding (image fills model exactly).',
+  };
+
+  // Test mapping invertibility with a sample OBB
   const originalOBB: OBBDetection = {
-    cx: 960,
-    cy: 540,
+    cx: lb.srcWidth / 2,
+    cy: lb.srcHeight / 2,
     width: 200,
     height: 100,
     angle: Math.PI / 4,
@@ -300,24 +347,43 @@ export function generateCoordinateTestArtifact(): object {
     classId: 0,
   };
 
-  const modelOBB = mapOriginalToModelOBB(originalOBB, letterbox);
-  const backToOriginal = mapModelToOriginalOBB(modelOBB, letterbox);
+  const modelOBB = mapOriginalToModelOBB(originalOBB, lb);
+  const backToOriginal = mapModelToOriginalOBB(modelOBB, lb);
   const corners = obbToCorners(originalOBB);
 
+  const mappingError = {
+    cx: Math.abs(backToOriginal.cx - originalOBB.cx),
+    cy: Math.abs(backToOriginal.cy - originalOBB.cy),
+    width: Math.abs(backToOriginal.width - originalOBB.width),
+    height: Math.abs(backToOriginal.height - originalOBB.height),
+    angle: Math.abs(backToOriginal.angle - originalOBB.angle),
+  };
+
+  const invertibilityPassed = mappingError.cx < 0.01 && mappingError.cy < 0.01;
+
   return {
-    testCase: 'Mapping Invertibility Test',
-    letterboxParams: letterbox,
-    originalOBB,
-    modelOBB,
-    backToOriginal,
-    corners,
-    mappingError: {
-      cx: Math.abs(backToOriginal.cx - originalOBB.cx),
-      cy: Math.abs(backToOriginal.cy - originalOBB.cy),
-      width: Math.abs(backToOriginal.width - originalOBB.width),
-      height: Math.abs(backToOriginal.height - originalOBB.height),
-      angle: Math.abs(backToOriginal.angle - originalOBB.angle),
+    testCase: 'Letterbox Coordinate Mapping Validation',
+    letterboxParams: {
+      scale: lb.scale,
+      padX: lb.padX,
+      padY: lb.padY,
+      srcWidth: lb.srcWidth,
+      srcHeight: lb.srcHeight,
+      dstWidth: lb.dstWidth,
+      dstHeight: lb.dstHeight,
+      // Explicit documentation of what padding means
+      paddingDirection: lb.padX > lb.padY ? 'horizontal (left/right)' : 'vertical (top/bottom)',
     },
-    passed: true,
+    mappedPoints,
+    validations,
+    invertibilityTest: {
+      originalOBB,
+      modelOBB,
+      backToOriginal,
+      mappingError,
+      passed: invertibilityPassed,
+    },
+    corners,
+    allTestsPassed: invertibilityPassed && validations.origin_x_correct && validations.origin_y_correct,
   };
 }

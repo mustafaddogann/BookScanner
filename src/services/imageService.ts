@@ -1,5 +1,9 @@
 /**
  * Image service - handles capture, metadata extraction, and storage
+ *
+ * SINGLE SOURCE OF TRUTH:
+ * This module creates FrameGeo objects that capture all geometry info at capture time.
+ * All subsequent operations should use the FrameGeo instead of re-reading dimensions.
  */
 
 import { Platform, Image } from 'react-native';
@@ -8,6 +12,13 @@ import type { PhotoFile } from 'react-native-vision-camera';
 import type { ImageMeta, ScanSession } from '../types';
 import { generateSessionId, createSessionDir, copyOriginalImage } from './debugArtifacts';
 import { useAppStore, storage } from '../store/useAppStore';
+import {
+  type FrameGeo,
+  normalizeFileUri,
+  uriToPath,
+  buildFrameGeo,
+  getDisplayDimensions,
+} from '../utils/frameGeo';
 
 /**
  * Extract EXIF orientation value (1-8)
@@ -50,13 +61,15 @@ function getCorrectedDimensions(
 
 /**
  * Build ImageMeta from captured photo
+ * Uses normalized URI and EXIF-corrected dimensions
  */
 export async function buildImageMeta(photo: PhotoFile): Promise<ImageMeta> {
-  const uri = photo.path;
-  const cleanPath = uri.startsWith('file://') ? uri : `file://${uri}`;
+  // NORMALIZE URI - single format everywhere
+  const normalizedUri = normalizeFileUri(photo.path);
+  const filePath = uriToPath(normalizedUri);
 
-  // Get file stats
-  const stats = await RNFS.stat(uri.startsWith('file://') ? uri.slice(7) : uri);
+  // Get file stats using clean path
+  const stats = await RNFS.stat(filePath);
   const fileSize = typeof stats.size === 'string' ? parseInt(stats.size, 10) : stats.size;
 
   // Extract orientation from metadata if available
@@ -64,24 +77,46 @@ export async function buildImageMeta(photo: PhotoFile): Promise<ImageMeta> {
     ? getOrientationFromMetadata(photo.metadata)
     : 1;
 
-  // Get dimensions - may need correction based on orientation
+  // Get EXIF-corrected dimensions (this is the DISPLAY size)
   const rawWidth = photo.width;
   const rawHeight = photo.height;
-  const { width, height } = getCorrectedDimensions(rawWidth, rawHeight, orientation);
+  const { pixelW, pixelH } = getDisplayDimensions(rawWidth, rawHeight, orientation);
 
   // For now, we mark as not normalized - actual normalization would require
   // image processing which we handle in preprocessing
   const isNormalized = orientation === 1;
 
+  console.log(`[ImageService] buildImageMeta: raw=${rawWidth}x${rawHeight}, EXIF=${orientation}, display=${pixelW}x${pixelH}`);
+
   return {
-    uri: cleanPath,
-    width,
-    height,
+    uri: normalizedUri,
+    width: pixelW,
+    height: pixelH,
     fileSize,
     timestamp: Date.now(),
     orientation,
     isNormalized,
   };
+}
+
+/**
+ * Build FrameGeo from captured photo - SINGLE SOURCE OF TRUTH
+ *
+ * This creates the geometry object that should be used for ALL coordinate
+ * mapping in the session. Do not re-read image dimensions after this.
+ */
+export function buildFrameGeoFromPhoto(photo: PhotoFile, modelSize: number = 640): FrameGeo {
+  const orientation = photo.metadata
+    ? getOrientationFromMetadata(photo.metadata)
+    : 1;
+
+  return buildFrameGeo(
+    photo.path,
+    photo.width,
+    photo.height,
+    orientation,
+    modelSize
+  );
 }
 
 /**

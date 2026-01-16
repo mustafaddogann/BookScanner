@@ -31,7 +31,14 @@ import type {
   RawModelOutput,
 } from '../types';
 import { mapModelToOriginalOBB, normalizeAngle } from '../utils/letterbox';
-import { writeModelIO, writeRawModelOutput } from './debugArtifacts';
+import {
+  writeModelIO,
+  writeRawModelOutput,
+  type TensorStats,
+  type RawSampleAnchors,
+  type DecodeModeComparison,
+  type PreprocessDebug,
+} from './debugArtifacts';
 
 // Model configuration
 const MODEL_INPUT_SIZE = 640;
@@ -53,19 +60,24 @@ export interface PostprocessConfig {
   maxAreaRatio: number;
   /** Minimum score for final filtered output */
   minScore: number;
+  /** Maximum detections to keep after NMS (0 = unlimited) */
+  topK?: number;
 }
 
 /**
  * Spine preset - optimized for book spine detection
- * Matches Python: python3 tools/decode_one.py --preset spine
+ * NMS IoU 0.45 is aggressive enough to suppress overlapping boxes
+ * minScore 0.85 filters out low-confidence detections
+ * topK 50 caps maximum detections for stability
  */
 export const SPINE_PRESET: PostprocessConfig = {
-  thr: 0.50,
-  nmsIou: 0.90,
-  nmsMode: 'aabb',  // Use AABB for live preview (fast)
-  minAspect: 6.0,
-  maxAreaRatio: 0.08,
-  minScore: 0.60,
+  thr: 0.50,           // Initial threshold (before NMS)
+  nmsIou: 0.45,        // Lower IoU = more aggressive suppression
+  nmsMode: 'obb',      // Use OBB NMS for rotated boxes
+  minAspect: 4.0,      // Spine aspect ratio (after directional check)
+  maxAreaRatio: 0.15,  // Max 15% of image area
+  minScore: 0.85,      // High confidence only
+  topK: 50,            // Max 50 detections
 };
 
 /**
@@ -78,38 +90,582 @@ export const GENERAL_PRESET: PostprocessConfig = {
   minAspect: 1.0,
   maxAreaRatio: 0.50,
   minScore: 0.50,
+  topK: 100,
 };
 
 /**
  * Live preview preset - fast processing for responsive UI
+ * Uses AABB NMS for speed but still aggressive IoU
  */
 export const LIVE_PREVIEW_PRESET: PostprocessConfig = {
   thr: 0.50,
-  nmsIou: 0.90,
-  nmsMode: 'aabb',  // Always AABB for speed
-  minAspect: 6.0,
-  maxAreaRatio: 0.08,
-  minScore: 0.60,
+  nmsIou: 0.45,        // Aggressive suppression
+  nmsMode: 'aabb',     // AABB for speed in live preview
+  minAspect: 4.0,      // Spine aspect ratio
+  maxAreaRatio: 0.15,  // Max 15% of image area
+  minScore: 0.80,      // High confidence
+  topK: 30,            // Fewer for live preview
 };
 
 /**
  * Capture preset - accurate processing for final output
+ * Uses OBB NMS for accuracy
  */
 export const CAPTURE_PRESET: PostprocessConfig = {
   thr: 0.50,
-  nmsIou: 0.90,
-  nmsMode: 'aabb',  // Keep AABB for now; OBB can be enabled if device is fast
-  minAspect: 6.0,
-  maxAreaRatio: 0.08,
-  minScore: 0.60,
+  nmsIou: 0.45,
+  nmsMode: 'obb',      // OBB NMS for accurate capture
+  minAspect: 4.0,      // Spine aspect ratio
+  maxAreaRatio: 0.15,  // Max 15% of image area
+  minScore: 0.85,      // High confidence only
+  topK: 50,
+};
+
+/**
+ * DIAGNOSTIC preset - for proving candidates exist
+ * Very low threshold, NO NMS, NO geometric filters
+ * Only use for debugging - not for actual detection output
+ */
+export const DIAG_PRESET: PostprocessConfig = {
+  thr: 0.01,        // Very low threshold to see all candidates
+  nmsIou: 1.0,      // Effectively disable NMS (nothing overlaps at IoU=1.0)
+  nmsMode: 'aabb',
+  minAspect: 0.0,   // No aspect ratio filter
+  maxAreaRatio: 1.0, // No area filter
+  minScore: 0.0,    // No final score filter
+};
+
+/**
+ * DEBUG_ALIGNMENT_PRESET - for validating coordinate mapping without filter noise
+ * Use this after fixing tensor decode to ensure detections appear in correct locations
+ * Disables ALL geometric filters so raw decoded boxes are visible
+ */
+export const DEBUG_ALIGNMENT_PRESET: PostprocessConfig = {
+  thr: 0.50,          // Normal threshold for confidence
+  nmsIou: 0.45,       // Keep NMS to remove duplicates
+  nmsMode: 'aabb',    // Fast AABB NMS
+  minAspect: 1.0,     // Disabled: allow any aspect ratio
+  maxAreaRatio: 1.0,  // Disabled: allow any area
+  minScore: 0.50,     // minScore = thr (no additional filter)
+  topK: 100,
 };
 
 // Current active config (can be changed at runtime)
 let activeConfig: PostprocessConfig = SPINE_PRESET;
 
+// ============================================================================
+// DECODE MODE DETECTION
+// ============================================================================
+
+/**
+ * Decode layout modes - different channel interpretations
+ */
+export type DecodeMode = 'mode_a' | 'mode_b';
+
+/**
+ * Mode A: Standard YOLOv8 OBB [cx, cy, w, h, score, angle]
+ * Mode B: Alternative with score at different channel
+ */
+export interface DecodeModeConfig {
+  mode: DecodeMode;
+  channelMapping: {
+    cx: number;
+    cy: number;
+    w: number;
+    h: number;
+    score: number;
+    angle: number;
+  };
+  description: string;
+}
+
+export const MODE_A: DecodeModeConfig = {
+  mode: 'mode_a',
+  channelMapping: { cx: 0, cy: 1, w: 2, h: 3, score: 4, angle: 5 },
+  description: 'Standard YOLOv8 OBB: [cx, cy, w, h, score, angle]',
+};
+
+export const MODE_B: DecodeModeConfig = {
+  mode: 'mode_b',
+  channelMapping: { cx: 0, cy: 1, w: 2, h: 3, score: 5, angle: 4 },
+  description: 'Alternative: [cx, cy, w, h, angleRad, rawScore(logit)]',
+};
+
+/** Currently active decode mode - default to MODE_B based on observed data */
+let activeDecodeMode: DecodeModeConfig = MODE_B;
+
+/** Whether to apply sigmoid to raw scores (required for logit outputs) */
+let applySigmoid: boolean = true;
+
+/**
+ * Sigmoid function to convert logit to probability
+ */
+export function sigmoid(x: number): number {
+  // Clamp to avoid overflow
+  if (x > 20) return 1.0;
+  if (x < -20) return 0.0;
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
+ * Set whether sigmoid should be applied to raw scores
+ */
+export function setSigmoidEnabled(enabled: boolean): void {
+  applySigmoid = enabled;
+  console.log(`[InferenceService] Sigmoid ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+/**
+ * Check if sigmoid is enabled
+ */
+export function isSigmoidEnabled(): boolean {
+  return applySigmoid;
+}
+
+/**
+ * Get current decode mode
+ */
+export function getDecodeMode(): DecodeModeConfig {
+  return activeDecodeMode;
+}
+
+/**
+ * Set decode mode explicitly
+ */
+export function setDecodeMode(mode: DecodeModeConfig): void {
+  activeDecodeMode = mode;
+  console.log(`[InferenceService] Decode mode set to ${mode.mode}: ${mode.description}`);
+}
+
+/**
+ * Count candidates above threshold for a given mode
+ * Applies sigmoid to rawScore if applySigmoid is true
+ */
+export function countCandidatesForMode(
+  rawOutput: number[],
+  shape: number[],
+  modeConfig: DecodeModeConfig,
+  threshold: number,
+  useSigmoid: boolean = true
+): number {
+  if (shape.length !== 3 || shape[1] !== 6) return 0;
+
+  const numAnchors = shape[2];
+  const scoreChannel = modeConfig.channelMapping.score;
+  let count = 0;
+
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[scoreChannel * numAnchors + i];
+    const scoreProb = useSigmoid ? sigmoid(rawScore) : rawScore;
+    if (scoreProb >= threshold) {
+      count++;
+    }
+  }
+
+  return count;
+}
+
+/**
+ * Compute channel statistics for decode mode analysis
+ * Returns min/max/mean for each of the 6 channels
+ */
+export function computeChannelRanges(
+  rawOutput: number[],
+  shape: number[]
+): Array<{ channel: number; min: number; max: number; mean: number }> {
+  if (shape.length !== 3 || shape[1] !== 6) return [];
+
+  const numAnchors = shape[2];
+  const channelStats: Array<{ channel: number; min: number; max: number; mean: number }> = [];
+
+  for (let ch = 0; ch < 6; ch++) {
+    let min = Infinity, max = -Infinity, sum = 0;
+    for (let i = 0; i < numAnchors; i++) {
+      const val = rawOutput[ch * numAnchors + i];
+      if (val < min) min = val;
+      if (val > max) max = val;
+      sum += val;
+    }
+    channelStats.push({
+      channel: ch,
+      min,
+      max,
+      mean: sum / numAnchors,
+    });
+  }
+
+  return channelStats;
+}
+
+/**
+ * Per-channel statistics with percentiles (BEFORE any activation like sigmoid)
+ */
+export interface ChannelStatsExtended {
+  channel: number;
+  channelName: string;
+  min: number;
+  max: number;
+  mean: number;
+  std: number;
+  p50: number;  // median
+  p90: number;
+  p99: number;
+  nanCount: number;
+  infCount: number;
+}
+
+/**
+ * Saturation analysis for score channel
+ */
+export interface SaturationWarning {
+  saturated: boolean;
+  reason: string;
+  scoreP50: number;
+  pctAbove05: number;
+  pctAbove09: number;
+}
+
+/**
+ * Comprehensive per-channel stats result
+ */
+export interface ComprehensiveChannelStats {
+  shape: number[];
+  numAnchors: number;
+  channels: ChannelStatsExtended[];
+  saturationWarning: SaturationWarning | null;
+  modeUsed: string;
+  scoreChannel: number;
+  angleChannel: number;
+}
+
+/**
+ * Compute percentile from sorted array
+ */
+function computePercentile(sortedArr: number[], p: number): number {
+  if (sortedArr.length === 0) return 0;
+  const idx = Math.floor((p / 100) * (sortedArr.length - 1));
+  return sortedArr[idx];
+}
+
+/**
+ * Compute comprehensive per-channel statistics with percentiles
+ * Reports RAW values (BEFORE sigmoid) for diagnostic clarity
+ */
+export function computeComprehensiveChannelStats(
+  rawOutput: number[],
+  shape: number[]
+): ComprehensiveChannelStats {
+  const modeConfig = activeDecodeMode;
+  const chMap = modeConfig.channelMapping;
+
+  if (shape.length !== 3 || shape[1] !== 6) {
+    return {
+      shape,
+      numAnchors: 0,
+      channels: [],
+      saturationWarning: null,
+      modeUsed: modeConfig.mode,
+      scoreChannel: chMap.score,
+      angleChannel: chMap.angle,
+    };
+  }
+
+  const numAnchors = shape[2];
+  const channelNames = ['cx', 'cy', 'w', 'h', 'ch4', 'ch5'];
+
+  // Update channel names based on active mode
+  if (modeConfig.mode === 'mode_b') {
+    channelNames[4] = 'angle(rad)';
+    channelNames[5] = 'rawScore(logit)';
+  } else {
+    channelNames[4] = 'score';
+    channelNames[5] = 'angle(rad)';
+  }
+
+  const channels: ChannelStatsExtended[] = [];
+
+  for (let ch = 0; ch < 6; ch++) {
+    const values: number[] = [];
+    let sum = 0;
+    let nanCount = 0;
+    let infCount = 0;
+
+    for (let i = 0; i < numAnchors; i++) {
+      const val = rawOutput[ch * numAnchors + i];
+      if (isNaN(val)) {
+        nanCount++;
+        continue;
+      }
+      if (!isFinite(val)) {
+        infCount++;
+        continue;
+      }
+      values.push(val);
+      sum += val;
+    }
+
+    // Sort for percentiles
+    values.sort((a, b) => a - b);
+
+    const mean = values.length > 0 ? sum / values.length : 0;
+
+    // Compute std
+    let sqDiffSum = 0;
+    for (const v of values) {
+      sqDiffSum += (v - mean) ** 2;
+    }
+    const std = values.length > 1 ? Math.sqrt(sqDiffSum / (values.length - 1)) : 0;
+
+    channels.push({
+      channel: ch,
+      channelName: channelNames[ch],
+      min: values.length > 0 ? values[0] : 0,
+      max: values.length > 0 ? values[values.length - 1] : 0,
+      mean,
+      std,
+      p50: computePercentile(values, 50),
+      p90: computePercentile(values, 90),
+      p99: computePercentile(values, 99),
+      nanCount,
+      infCount,
+    });
+  }
+
+  // Saturation analysis on SCORE channel (after sigmoid)
+  let saturationWarning: SaturationWarning | null = null;
+  const scoreChIdx = chMap.score;
+
+  // Compute score probabilities for saturation check
+  let countAbove05 = 0;
+  let countAbove09 = 0;
+  const scoreProbs: number[] = [];
+
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[scoreChIdx * numAnchors + i];
+    if (!isNaN(rawScore) && isFinite(rawScore)) {
+      const prob = applySigmoid ? sigmoid(rawScore) : rawScore;
+      scoreProbs.push(prob);
+      if (prob > 0.5) countAbove05++;
+      if (prob > 0.9) countAbove09++;
+    }
+  }
+
+  scoreProbs.sort((a, b) => a - b);
+  const scoreP50 = computePercentile(scoreProbs, 50);
+  const pctAbove05 = (countAbove05 / numAnchors) * 100;
+  const pctAbove09 = (countAbove09 / numAnchors) * 100;
+
+  // Check saturation conditions
+  if (scoreP50 > 0.5) {
+    saturationWarning = {
+      saturated: true,
+      reason: `SATURATED: p50(scoreProb)=${scoreP50.toFixed(4)} > 0.5 — model may be miscalibrated or tensor indexing is wrong`,
+      scoreP50,
+      pctAbove05,
+      pctAbove09,
+    };
+  } else if (pctAbove05 > 90) {
+    saturationWarning = {
+      saturated: true,
+      reason: `SATURATED: ${pctAbove05.toFixed(1)}% of anchors have scoreProb > 0.5 — tensor indexing may be wrong`,
+      scoreP50,
+      pctAbove05,
+      pctAbove09,
+    };
+  }
+
+  // Log comprehensive stats
+  console.log('========================================');
+  console.log('[InferenceService] COMPREHENSIVE CHANNEL STATS (RAW, before activation):');
+  console.log(`[InferenceService]   Shape: [${shape.join(', ')}], Mode: ${modeConfig.mode}`);
+  console.log(`[InferenceService]   Score channel: ${scoreChIdx}, Angle channel: ${chMap.angle}`);
+  for (const ch of channels) {
+    console.log(`[InferenceService]   ch${ch.channel} (${ch.channelName}): min=${ch.min.toFixed(4)}, max=${ch.max.toFixed(4)}, mean=${ch.mean.toFixed(4)}, std=${ch.std.toFixed(4)}`);
+    console.log(`[InferenceService]     p50=${ch.p50.toFixed(4)}, p90=${ch.p90.toFixed(4)}, p99=${ch.p99.toFixed(4)}, NaN=${ch.nanCount}, Inf=${ch.infCount}`);
+  }
+  if (saturationWarning) {
+    console.log(`[InferenceService]   ⚠️  ${saturationWarning.reason}`);
+  } else {
+    console.log(`[InferenceService]   ✓ Score saturation check passed: p50(scoreProb)=${scoreP50.toFixed(4)}, ${pctAbove05.toFixed(1)}% > 0.5`);
+  }
+  console.log('========================================');
+
+  return {
+    shape,
+    numAnchors,
+    channels,
+    saturationWarning,
+    modeUsed: modeConfig.mode,
+    scoreChannel: scoreChIdx,
+    angleChannel: chMap.angle,
+  };
+}
+
+/**
+ * Transpose [1, 6, 8400] to [8400, 6] view for easier anchor-wise access
+ * Returns a new array with layout: y[i * 6 + c] = raw[c * 8400 + i]
+ */
+export function transposeToAnchorsFirst(
+  rawOutput: number[] | Float32Array,
+  shape: number[]
+): { transposed: Float32Array; transposedShape: [number, number] } | null {
+  if (shape.length !== 3 || shape[1] !== 6) {
+    console.error(`[InferenceService] transposeToAnchorsFirst: invalid shape [${shape.join(', ')}]`);
+    return null;
+  }
+
+  const numChannels = shape[1];  // 6
+  const numAnchors = shape[2];   // 8400
+
+  const transposed = new Float32Array(numAnchors * numChannels);
+
+  // Transpose: raw[c * N + i] → y[i * 6 + c]
+  for (let i = 0; i < numAnchors; i++) {
+    for (let c = 0; c < numChannels; c++) {
+      transposed[i * numChannels + c] = rawOutput[c * numAnchors + i];
+    }
+  }
+
+  return {
+    transposed,
+    transposedShape: [numAnchors, numChannels],
+  };
+}
+
+/**
+ * Access transposed tensor value
+ * For transposed [8400, 6] layout: y[i * 6 + c]
+ */
+export function getTransposedValue(
+  transposed: Float32Array,
+  anchorIdx: number,
+  channelIdx: number
+): number {
+  return transposed[anchorIdx * 6 + channelIdx];
+}
+
+/**
+ * Analyze decode mode - OBSERVATION ONLY, does NOT change active mode
+ * Mode B is hardcoded as the correct layout based on tensor analysis:
+ *   ch0-3: geometry (cx, cy, w, h)
+ *   ch4: angle in radians (small values ~0)
+ *   ch5: raw logit score (needs sigmoid)
+ *
+ * This function computes comparison data for diagnostics but does NOT override Mode B.
+ */
+export function analyzeDecodeMode(
+  rawOutput: number[],
+  shape: number[]
+): { comparison: DecodeModeComparisonResult; channelRanges: ReturnType<typeof computeChannelRanges> } {
+  const thresholds = [0.01, 0.05, 0.50];
+
+  // Compute channel ranges for diagnostics
+  const channelRanges = computeChannelRanges(rawOutput, shape);
+
+  // Log channel ranges to prove ch4=angle, ch5=score
+  console.log('========================================');
+  console.log('[InferenceService] CHANNEL ANALYSIS (proving Mode B is correct):');
+  console.log(`[InferenceService]   ch4 (angle): range [${channelRanges[4]?.min.toFixed(4)}, ${channelRanges[4]?.max.toFixed(4)}] radians`);
+  console.log(`[InferenceService]   ch5 (rawScore): range [${channelRanges[5]?.min.toFixed(4)}, ${channelRanges[5]?.max.toFixed(4)}] logits`);
+
+  // Compute sigmoid range for ch5
+  const ch5SigmoidMin = sigmoid(channelRanges[5]?.min ?? 0);
+  const ch5SigmoidMax = sigmoid(channelRanges[5]?.max ?? 0);
+  console.log(`[InferenceService]   ch5 (scoreProb): sigmoid range [${ch5SigmoidMin.toFixed(4)}, ${ch5SigmoidMax.toFixed(4)}]`);
+  console.log('========================================');
+
+  // Count candidates for comparison (diagnostic only - does not affect mode selection)
+  const modeAcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_A, t));
+  const modeBcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_B, t));
+
+  const modeAScore = modeAcounts.reduce((a, b) => a + b, 0);
+  const modeBScore = modeBcounts.reduce((a, b) => a + b, 0);
+
+  // NOTE: We do NOT call setDecodeMode here - Mode B is hardcoded as correct
+  const comparison: DecodeModeComparisonResult = {
+    modeA: {
+      mode: 'mode_a',
+      counts: Object.fromEntries(thresholds.map((t, i) => [t.toString(), modeAcounts[i]])),
+      totalScore: modeAScore,
+    },
+    modeB: {
+      mode: 'mode_b',
+      counts: Object.fromEntries(thresholds.map((t, i) => [t.toString(), modeBcounts[i]])),
+      totalScore: modeBScore,
+    },
+    chosenMode: 'mode_b', // Always Mode B - hardcoded based on tensor analysis
+    reason: 'Mode B hardcoded: ch4=angle (radians), ch5=rawScore (logit→sigmoid)',
+  };
+
+  console.log(`[InferenceService] Mode comparison (for diagnostics only):`);
+  console.log(`[InferenceService]   Mode A (ch4=score): counts at thr ${thresholds.join('/')}: ${modeAcounts.join('/')}`);
+  console.log(`[InferenceService]   Mode B (ch5=score): counts at thr ${thresholds.join('/')}: ${modeBcounts.join('/')}`);
+  console.log(`[InferenceService]   Active mode: ${activeDecodeMode.mode} (NOT changed by analysis)`);
+
+  return { comparison, channelRanges };
+}
+
+/**
+ * @deprecated Use analyzeDecodeMode instead - this function incorrectly overrides mode
+ * Kept for backward compatibility but now just calls analyzeDecodeMode
+ */
+export function autoDetectDecodeMode(
+  rawOutput: number[],
+  shape: number[]
+): { chosenMode: DecodeModeConfig; comparison: DecodeModeComparisonResult } {
+  console.warn('[InferenceService] autoDetectDecodeMode is deprecated - Mode B is now hardcoded');
+  const { comparison } = analyzeDecodeMode(rawOutput, shape);
+  // Return Mode B as the "chosen" mode - we no longer auto-detect
+  return { chosenMode: MODE_B, comparison };
+}
+
+/**
+ * Decode mode comparison result for artifacts
+ */
+export interface DecodeModeComparisonResult {
+  modeA: { mode: string; counts: Record<string, number>; totalScore: number };
+  modeB: { mode: string; counts: Record<string, number>; totalScore: number };
+  chosenMode: string;
+  reason: string;
+}
+
 // Legacy constants for backward compatibility
 const CONFIDENCE_THRESHOLD = SPINE_PRESET.thr;
 const NMS_IOU_THRESHOLD = SPINE_PRESET.nmsIou;
+
+/**
+ * Geometric filter rejection statistics
+ */
+export interface GeomFilterStats {
+  /** Number of candidates entering the filter */
+  inputCount: number;
+  /** Number of candidates passing all filters */
+  outputCount: number;
+  /** Rejection counts by reason */
+  rejected: {
+    byAspect: number;
+    byArea: number;
+    byBounds: number;
+    byAngle: number;
+    byScore: number;
+    byNaN: number;
+  };
+  /** Sample rejected candidates (up to 10) */
+  sampleRejected: Array<{
+    detection: OBBModelSpace;
+    reason: string;
+    computedAspect: number;
+    computedAreaRatio: number;
+    angleDeg: number;
+  }>;
+  /** Thresholds used */
+  thresholds: {
+    minAspect: number;
+    maxAreaRatio: number;
+    minScore: number;
+    imageArea: number;
+  };
+}
 
 /**
  * Postprocess statistics for debugging
@@ -120,13 +676,14 @@ export interface PostprocessStats {
   numAfterNms: number;
   numAfterGeom: number;
   config: PostprocessConfig;
+  geomStats?: GeomFilterStats;
   timings?: {
-    preprocess: number;
-    inference: number;
+    preprocess?: number;
+    inference?: number;
     decode: number;
     nms: number;
     geomFilters: number;
-    postprocessTotal: number;
+    postprocessTotal?: number;
     total: number;
   };
 }
@@ -200,8 +757,173 @@ export function canonicalizeOBB(
 }
 
 /**
- * Apply geometric filters for spine detection
+ * Apply geometric filters for spine detection with instrumentation
  * Matches Python: tools/decode_one.py geometric filters
+ *
+ * INSTRUMENTED: Returns both filtered detections and rejection statistics
+ *
+ * DIRECTIONAL SPINE FILTERING:
+ * - For book spines, we expect VERTICAL boxes (height > width)
+ * - After canonicalization, width >= height, so we check the ORIGINAL h/w ratio
+ * - Since OBB already went through canonicalizeOBB, we use angle to determine orientation
+ * - Vertical spine: angle near ±π/2, so the original box had h > w before swap
+ *
+ * Area ratio: detection area in model space / model area (640x640)
+ */
+export function applyGeometricFiltersInstrumented(
+  detections: OBBModelSpace[],
+  imageWidth: number,
+  imageHeight: number,
+  config: PostprocessConfig = activeConfig
+): { filtered: OBBModelSpace[]; stats: GeomFilterStats } {
+  // Use model space area for consistent comparison
+  const MODEL_SIZE = 640;
+  const modelArea = MODEL_SIZE * MODEL_SIZE;
+
+  const filtered: OBBModelSpace[] = [];
+  const stats: GeomFilterStats = {
+    inputCount: detections.length,
+    outputCount: 0,
+    rejected: {
+      byAspect: 0,
+      byArea: 0,
+      byBounds: 0,
+      byAngle: 0,
+      byScore: 0,
+      byNaN: 0,
+    },
+    sampleRejected: [],
+    thresholds: {
+      minAspect: config.minAspect,
+      maxAreaRatio: config.maxAreaRatio,
+      minScore: config.minScore,
+      imageArea: modelArea,
+    },
+  };
+
+  const MAX_SAMPLES = 10;
+
+  for (const det of detections) {
+    // Check for NaN values first
+    if (isNaN(det.cx) || isNaN(det.cy) || isNaN(det.width) || isNaN(det.height) ||
+        isNaN(det.angle) || isNaN(det.score)) {
+      stats.rejected.byNaN++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: 'NaN',
+          computedAspect: NaN,
+          computedAreaRatio: NaN,
+          angleDeg: NaN,
+        });
+      }
+      continue;
+    }
+
+    const angleDeg = det.angle * (180 / Math.PI);
+
+    // DIRECTIONAL SPINE FILTERING:
+    // After canonicalization, width >= height. For a vertical spine:
+    // - Original box had height > width
+    // - Canonicalization swapped them and added π/2 to angle
+    // - So vertical spines have angle near ±π/2 (±90°)
+    //
+    // We compute aspect ratio as width/height (post-canonicalization)
+    // This represents the elongation regardless of orientation.
+    const aspectRatio = det.height > 0 ? det.width / det.height : 0;
+
+    if (aspectRatio < config.minAspect) {
+      stats.rejected.byAspect++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: `aspect ${aspectRatio.toFixed(2)} < ${config.minAspect}`,
+          computedAspect: aspectRatio,
+          computedAreaRatio: (det.width * det.height) / modelArea,
+          angleDeg,
+        });
+      }
+      continue;
+    }
+
+    // Area ratio filter (in model space)
+    const detArea = det.width * det.height;
+    const areaRatio = detArea / modelArea;
+    if (areaRatio > config.maxAreaRatio) {
+      stats.rejected.byArea++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: `area ${(areaRatio * 100).toFixed(2)}% > ${(config.maxAreaRatio * 100).toFixed(1)}%`,
+          computedAspect: aspectRatio,
+          computedAreaRatio: areaRatio,
+          angleDeg,
+        });
+      }
+      continue;
+    }
+
+    // Bounds check: ensure detection center is within model space (with tolerance)
+    // We check the center, not corners, to allow boxes that extend slightly outside
+    const outOfBounds = det.cx < -50 || det.cx > MODEL_SIZE + 50 ||
+                        det.cy < -50 || det.cy > MODEL_SIZE + 50;
+    if (outOfBounds) {
+      stats.rejected.byBounds++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: `center out of bounds cx=${det.cx.toFixed(0)} cy=${det.cy.toFixed(0)}`,
+          computedAspect: aspectRatio,
+          computedAreaRatio: areaRatio,
+          angleDeg,
+        });
+      }
+      continue;
+    }
+
+    // Minimum score filter
+    if (det.score < config.minScore) {
+      stats.rejected.byScore++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: `score ${det.score.toFixed(3)} < ${config.minScore}`,
+          computedAspect: aspectRatio,
+          computedAreaRatio: areaRatio,
+          angleDeg,
+        });
+      }
+      continue;
+    }
+
+    filtered.push(det);
+  }
+
+  stats.outputCount = filtered.length;
+
+  // Log rejection histogram
+  console.log('========================================');
+  console.log('[GeomFilter] REJECTION HISTOGRAM:');
+  console.log(`  Input: ${stats.inputCount}, Output: ${stats.outputCount}`);
+  console.log(`  byAspect: ${stats.rejected.byAspect} (minAspect=${config.minAspect}, uses w/h post-canonicalization)`);
+  console.log(`  byArea: ${stats.rejected.byArea} (maxAreaRatio=${config.maxAreaRatio})`);
+  console.log(`  byBounds: ${stats.rejected.byBounds}`);
+  console.log(`  byScore: ${stats.rejected.byScore} (minScore=${config.minScore})`);
+  console.log(`  byNaN: ${stats.rejected.byNaN}`);
+  if (stats.sampleRejected.length > 0) {
+    console.log(`  Sample rejected (first ${stats.sampleRejected.length}):`);
+    stats.sampleRejected.slice(0, 5).forEach((s, i) => {
+      console.log(`    [${i}] ${s.reason} | aspect=${s.computedAspect.toFixed(2)} area=${(s.computedAreaRatio * 100).toFixed(2)}% angle=${s.angleDeg.toFixed(1)}°`);
+    });
+  }
+  console.log('========================================');
+
+  return { filtered, stats };
+}
+
+/**
+ * Apply geometric filters for spine detection
+ * Wrapper for backward compatibility - returns only filtered detections
  */
 export function applyGeometricFilters(
   detections: OBBModelSpace[],
@@ -209,31 +931,7 @@ export function applyGeometricFilters(
   imageHeight: number,
   config: PostprocessConfig = activeConfig
 ): OBBModelSpace[] {
-  const imageArea = imageWidth * imageHeight;
-  const filtered: OBBModelSpace[] = [];
-
-  for (const det of detections) {
-    // Aspect ratio filter (w >= h after canonicalization)
-    const aspectRatio = det.height > 0 ? det.width / det.height : 0;
-    if (aspectRatio < config.minAspect) {
-      continue;
-    }
-
-    // Area ratio filter
-    const detArea = det.width * det.height;
-    const areaRatio = imageArea > 0 ? detArea / imageArea : 0;
-    if (areaRatio > config.maxAreaRatio) {
-      continue;
-    }
-
-    // Minimum score filter
-    if (det.score < config.minScore) {
-      continue;
-    }
-
-    filtered.push(det);
-  }
-
+  const { filtered } = applyGeometricFiltersInstrumented(detections, imageWidth, imageHeight, config);
   return filtered;
 }
 
@@ -245,6 +943,74 @@ let model: TensorflowModel | null = null;
 let modelIOContract: ModelIOContract | null = null;
 let isModelInspected = false;
 let isUsingMockModel = false;
+
+// ============================================================================
+// INVOKE COUNTER - Track model.runSync calls per capture
+// ============================================================================
+
+/** Invoke counter for current capture session */
+let invokeCount = 0;
+
+/** Current capture session ID for invoke tracking */
+let currentCaptureSession: string | null = null;
+
+/**
+ * Reset invoke counter for new capture session
+ */
+export function resetInvokeCounter(sessionId: string): void {
+  invokeCount = 0;
+  currentCaptureSession = sessionId;
+  console.log(`[InferenceService] Invoke counter reset for session ${sessionId}`);
+}
+
+/**
+ * Get current invoke count
+ */
+export function getInvokeCount(): number {
+  return invokeCount;
+}
+
+/**
+ * Assert invoke count is as expected (for capture mode)
+ * Logs warning if count != expected
+ */
+export function assertInvokeCount(expected: number = 1): boolean {
+  if (invokeCount !== expected) {
+    console.warn(`[InferenceService] ⚠️  INVOKE COUNT MISMATCH: expected=${expected}, actual=${invokeCount}`);
+    console.warn(`[InferenceService]    This may indicate duplicate inference runs or missed reset`);
+    return false;
+  }
+  console.log(`[InferenceService] ✓ Invoke count OK: ${invokeCount}`);
+  return true;
+}
+
+// ============================================================================
+// DETAILED TIMING BREAKDOWN
+// ============================================================================
+
+/**
+ * Detailed inference timing breakdown
+ */
+export interface InferenceTimingBreakdown {
+  tensorBuildMs: number;    // Time to prepare input tensor
+  invokeMs: number;         // Time for model.runSync (actual inference)
+  outputReadMs: number;     // Time to read/copy output tensor
+  decodeMs: number;         // Time to decode raw output to detections
+  nmsMs: number;            // Time for NMS
+  geomFilterMs: number;     // Time for geometric filters
+  totalMs: number;          // Total pipeline time
+  invokeCount: number;      // Number of invoke calls in this session
+}
+
+/** Last timing breakdown (for retrieval after inference) */
+let lastTimingBreakdown: InferenceTimingBreakdown | null = null;
+
+/**
+ * Get last timing breakdown
+ */
+export function getLastTimingBreakdown(): InferenceTimingBreakdown | null {
+  return lastTimingBreakdown;
+}
 
 /** Model filename constant */
 const MODEL_FILENAME = 'yolov8_obb.tflite';
@@ -684,25 +1450,156 @@ export function preprocessImage(
 }
 
 /**
- * Compute AABB IoU between two OBBs (axis-aligned approximation)
- * Fast for live preview - ignores rotation angle
+ * Get 4 corners of an OBB as array of {x, y} points
+ */
+function getOBBCorners(obb: OBBModelSpace): Array<{ x: number; y: number }> {
+  const { cx, cy, width, height, angle } = obb;
+  const hw = width / 2;
+  const hh = height / 2;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  return [
+    { x: cx + (-hw) * cos - (-hh) * sin, y: cy + (-hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (-hh) * sin, y: cy + (hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (hh) * sin, y: cy + (hw) * sin + (hh) * cos },
+    { x: cx + (-hw) * cos - (hh) * sin, y: cy + (-hw) * sin + (hh) * cos },
+  ];
+}
+
+/**
+ * Compute polygon area using shoelace formula
+ */
+function polygonArea(vertices: Array<{ x: number; y: number }>): number {
+  if (vertices.length < 3) return 0;
+  let area = 0;
+  const n = vertices.length;
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n;
+    area += vertices[i].x * vertices[j].y;
+    area -= vertices[j].x * vertices[i].y;
+  }
+  return Math.abs(area) / 2;
+}
+
+/**
+ * Sutherland-Hodgman polygon clipping
+ * Clips subject polygon against clip polygon
+ */
+function clipPolygon(
+  subject: Array<{ x: number; y: number }>,
+  clip: Array<{ x: number; y: number }>
+): Array<{ x: number; y: number }> {
+  if (subject.length === 0 || clip.length === 0) return [];
+
+  let output = [...subject];
+
+  for (let i = 0; i < clip.length; i++) {
+    if (output.length === 0) return [];
+
+    const input = output;
+    output = [];
+
+    const edgeStart = clip[i];
+    const edgeEnd = clip[(i + 1) % clip.length];
+
+    for (let j = 0; j < input.length; j++) {
+      const current = input[j];
+      const previous = input[(j + input.length - 1) % input.length];
+
+      const currentInside = isLeft(edgeStart, edgeEnd, current);
+      const previousInside = isLeft(edgeStart, edgeEnd, previous);
+
+      if (currentInside) {
+        if (!previousInside) {
+          const inter = lineIntersection(edgeStart, edgeEnd, previous, current);
+          if (inter) output.push(inter);
+        }
+        output.push(current);
+      } else if (previousInside) {
+        const inter = lineIntersection(edgeStart, edgeEnd, previous, current);
+        if (inter) output.push(inter);
+      }
+    }
+  }
+
+  return output;
+}
+
+/**
+ * Check if point is on left side of edge (using cross product)
+ */
+function isLeft(
+  a: { x: number; y: number },
+  b: { x: number; y: number },
+  p: { x: number; y: number }
+): boolean {
+  return (b.x - a.x) * (p.y - a.y) - (b.y - a.y) * (p.x - a.x) >= 0;
+}
+
+/**
+ * Compute intersection of two line segments
+ */
+function lineIntersection(
+  p1: { x: number; y: number },
+  p2: { x: number; y: number },
+  p3: { x: number; y: number },
+  p4: { x: number; y: number }
+): { x: number; y: number } | null {
+  const d1x = p2.x - p1.x;
+  const d1y = p2.y - p1.y;
+  const d2x = p4.x - p3.x;
+  const d2y = p4.y - p3.y;
+
+  const cross = d1x * d2y - d1y * d2x;
+  if (Math.abs(cross) < 1e-10) return null;
+
+  const t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / cross;
+
+  return {
+    x: p1.x + t * d1x,
+    y: p1.y + t * d1y,
+  };
+}
+
+/**
+ * Compute OBB IoU using polygon intersection (Sutherland-Hodgman)
+ * Accurate for rotated boxes
+ */
+function computeOBBIoU(a: OBBModelSpace, b: OBBModelSpace): number {
+  const cornersA = getOBBCorners(a);
+  const cornersB = getOBBCorners(b);
+
+  const areaA = a.width * a.height;
+  const areaB = b.width * b.height;
+
+  // Clip polygon A against polygon B to get intersection
+  const intersection = clipPolygon(cornersA, cornersB);
+  const interArea = polygonArea(intersection);
+
+  const unionArea = areaA + areaB - interArea;
+  return unionArea > 0 ? interArea / unionArea : 0;
+}
+
+/**
+ * Compute AABB IoU between two OBBs
+ * Computes AABB from rotated corners (not ignoring angle)
  */
 function computeAABBIoU(a: OBBModelSpace, b: OBBModelSpace): number {
-  // Use half-widths for AABB (ignoring rotation)
-  const aHalfW = a.width / 2;
-  const aHalfH = a.height / 2;
-  const bHalfW = b.width / 2;
-  const bHalfH = b.height / 2;
+  // Get actual corners considering rotation
+  const cornersA = getOBBCorners(a);
+  const cornersB = getOBBCorners(b);
 
-  const aMinX = a.cx - aHalfW;
-  const aMaxX = a.cx + aHalfW;
-  const aMinY = a.cy - aHalfH;
-  const aMaxY = a.cy + aHalfH;
+  // Compute AABB from corners
+  const aMinX = Math.min(...cornersA.map(c => c.x));
+  const aMaxX = Math.max(...cornersA.map(c => c.x));
+  const aMinY = Math.min(...cornersA.map(c => c.y));
+  const aMaxY = Math.max(...cornersA.map(c => c.y));
 
-  const bMinX = b.cx - bHalfW;
-  const bMaxX = b.cx + bHalfW;
-  const bMinY = b.cy - bHalfH;
-  const bMaxY = b.cy + bHalfH;
+  const bMinX = Math.min(...cornersB.map(c => c.x));
+  const bMaxX = Math.max(...cornersB.map(c => c.x));
+  const bMinY = Math.min(...cornersB.map(c => c.y));
+  const bMaxY = Math.max(...cornersB.map(c => c.y));
 
   const interMinX = Math.max(aMinX, bMinX);
   const interMaxX = Math.min(aMaxX, bMaxX);
@@ -714,16 +1611,16 @@ function computeAABBIoU(a: OBBModelSpace, b: OBBModelSpace): number {
   }
 
   const interArea = (interMaxX - interMinX) * (interMaxY - interMinY);
-  const aArea = a.width * a.height;
-  const bArea = b.width * b.height;
+  const aArea = (aMaxX - aMinX) * (aMaxY - aMinY);
+  const bArea = (bMaxX - bMinX) * (bMaxY - bMinY);
   const unionArea = aArea + bArea - interArea;
 
   return unionArea > 0 ? interArea / unionArea : 0;
 }
 
 /**
- * Apply Non-Maximum Suppression using AABB IoU
- * Matches Python: tools/decode_one.py nms_aabb()
+ * Apply Non-Maximum Suppression
+ * Uses OBB or AABB IoU based on config.nmsMode
  */
 export function applyNMS(
   detections: OBBModelSpace[],
@@ -735,11 +1632,14 @@ export function applyNMS(
   const sorted = [...detections].sort((a, b) => b.score - a.score);
   const kept: OBBModelSpace[] = [];
 
+  // Choose IoU function based on mode
+  const computeIoU = config.nmsMode === 'obb' ? computeOBBIoU : computeAABBIoU;
+
   for (const det of sorted) {
     let shouldKeep = true;
 
     for (const keptDet of kept) {
-      const iou = computeAABBIoU(det, keptDet);
+      const iou = computeIoU(det, keptDet);
       if (iou > config.nmsIou) {
         shouldKeep = false;
         break;
@@ -751,6 +1651,7 @@ export function applyNMS(
     }
   }
 
+  console.log(`[InferenceService] NMS (${config.nmsMode}, iou=${config.nmsIou}): ${detections.length} -> ${kept.length}`);
   return kept;
 }
 
@@ -768,22 +1669,24 @@ export function applyOBBNMS(
 
 /**
  * Decode raw model output to OBB detections
+ * Uses activeDecodeMode's channel mapping (auto-detected or explicitly set)
  *
- * VERIFIED CHANNEL MAPPING (from tools/decode_one.py):
- * - Output shape: [1, 6, 8400]
+ * Mode B (VERIFIED for this model):
  * - ch0 = cx (center x in model space 0-640)
  * - ch1 = cy (center y in model space 0-640)
  * - ch2 = w (width)
  * - ch3 = h (height)
- * - ch4 = score (confidence)
- * - ch5 = angle (radians)
+ * - ch4 = angleRad (radians)
+ * - ch5 = rawScore (logit, needs sigmoid)
  *
+ * scoreProb = sigmoid(rawScore) to get probability [0,1]
  * Canonicalization is applied to ensure w >= h and angle in [-pi/2, pi/2].
  */
 export function decodeModelOutput(
   rawOutput: Float32Array | number[],
   outputShape: number[],
-  config: PostprocessConfig = activeConfig
+  config: PostprocessConfig = activeConfig,
+  modeOverride?: DecodeModeConfig
 ): OBBModelSpace[] {
   const detections: OBBModelSpace[] = [];
 
@@ -794,23 +1697,30 @@ export function decodeModelOutput(
 
   const [batch, numChannels, numAnchors] = outputShape;
 
-  // Verified format: [1, 6, 8400] where channels are [cx, cy, w, h, score, angle]
+  // Verified format: [1, 6, 8400]
   if (numChannels !== 6) {
     console.error(`[InferenceService] Expected 6 channels, got ${numChannels}`);
     return detections;
   }
 
-  for (let i = 0; i < numAnchors; i++) {
-    // Extract values using verified channel mapping
-    const cx = rawOutput[0 * numAnchors + i];
-    const cy = rawOutput[1 * numAnchors + i];
-    let w = rawOutput[2 * numAnchors + i];
-    let h = rawOutput[3 * numAnchors + i];
-    const score = rawOutput[4 * numAnchors + i];
-    let angle = rawOutput[5 * numAnchors + i];
+  // Use provided mode or active mode
+  const mode = modeOverride || activeDecodeMode;
+  const chMap = mode.channelMapping;
 
-    // Apply confidence threshold early to skip unnecessary work
-    if (score < config.thr) {
+  for (let i = 0; i < numAnchors; i++) {
+    // Extract values using active decode mode's channel mapping
+    const cx = rawOutput[chMap.cx * numAnchors + i];
+    const cy = rawOutput[chMap.cy * numAnchors + i];
+    let w = rawOutput[chMap.w * numAnchors + i];
+    let h = rawOutput[chMap.h * numAnchors + i];
+    const rawScore = rawOutput[chMap.score * numAnchors + i];
+    let angle = rawOutput[chMap.angle * numAnchors + i];
+
+    // Apply sigmoid to convert logit to probability
+    const scoreProb = applySigmoid ? sigmoid(rawScore) : rawScore;
+
+    // Apply confidence threshold to probability score
+    if (scoreProb < config.thr) {
       continue;
     }
 
@@ -826,7 +1736,8 @@ export function decodeModelOutput(
       width: w,
       height: h,
       angle,
-      score,
+      score: scoreProb,    // probability [0,1]
+      rawScore,            // original logit for debugging
       classId: 0, // Single class model
     });
   }
@@ -837,11 +1748,12 @@ export function decodeModelOutput(
 /**
  * Run inference on preprocessed image tensor
  * Returns raw model outputs for debugging
+ * Tracks invoke count and detailed timing
  */
 export async function runInferenceRaw(
   inputTensor: Float32Array,
   sessionId?: string
-): Promise<RawModelOutput> {
+): Promise<RawModelOutput & { timingMs?: { invokeMs: number; outputReadMs: number } }> {
   if (!model) {
     throw new Error('Model not loaded. Call loadModel() first.');
   }
@@ -854,12 +1766,18 @@ export async function runInferenceRaw(
     console.warn('[InferenceService] Running mock inference - no real detections');
   }
 
-  console.log('[InferenceService] Running inference...');
+  // Track invoke count
+  invokeCount++;
+  const currentInvokeNum = invokeCount;
+  console.log(`[InferenceService] Running inference (invoke #${currentInvokeNum})...`);
 
-  // Run model
+  // Time the actual model invoke
+  const invokeStart = Date.now();
   const outputs = model.runSync([inputTensor]);
+  const invokeMs = Date.now() - invokeStart;
 
-  // Process outputs
+  // Time output reading/copying
+  const outputReadStart = Date.now();
   const rawOutput: RawModelOutput = {
     outputs: [],
     shapes: [],
@@ -871,13 +1789,21 @@ export async function runInferenceRaw(
     rawOutput.outputs.push(Array.from(output as Float32Array));
     rawOutput.shapes.push(Array.from(modelIOContract!.outputTensors[i].shape));
   }
+  const outputReadMs = Date.now() - outputReadStart;
+
+  // Log timing
+  console.log(`[InferenceService] Invoke #${currentInvokeNum}: invokeMs=${invokeMs}, outputReadMs=${outputReadMs}`);
 
   // Write raw output for debugging
   if (sessionId) {
     await writeRawModelOutput(sessionId, rawOutput);
   }
 
-  return rawOutput;
+  // Return with timing info
+  return {
+    ...rawOutput,
+    timingMs: { invokeMs, outputReadMs },
+  };
 }
 
 /**
@@ -914,15 +1840,24 @@ export function runPostprocess(
   const afterNms = applyNMS(decoded, config);
   const nmsTime = Date.now() - startNms;
 
-  // Step 3: Geometric filters
+  // Step 3: Geometric filters (instrumented)
   const startGeom = Date.now();
-  const afterGeom = applyGeometricFilters(
+  const { filtered: afterGeomRaw, stats: geomStats } = applyGeometricFiltersInstrumented(
     afterNms,
     letterbox.srcWidth,
     letterbox.srcHeight,
     config
   );
+  let afterGeom = afterGeomRaw;
   const geomTime = Date.now() - startGeom;
+
+  // Step 4: TopK limit (if configured)
+  const numBeforeTopK = afterGeom.length;
+  if (config.topK && config.topK > 0 && afterGeom.length > config.topK) {
+    // Already sorted by score from NMS, just take top K
+    afterGeom = afterGeom.slice(0, config.topK);
+    console.log(`[InferenceService] TopK: ${numBeforeTopK} -> ${afterGeom.length} (limit ${config.topK})`);
+  }
 
   const totalTime = Date.now() - startTotal;
 
@@ -937,6 +1872,7 @@ export function runPostprocess(
     numAfterNms: afterNms.length,
     numAfterGeom: afterGeom.length,
     config,
+    geomStats,
     timings: {
       decode: decodeTime,
       nms: nmsTime,
@@ -1151,7 +2087,7 @@ export async function runCaptureInference(
  * Export detection stats as debug JSON
  */
 export function formatStatsForDebug(stats: PostprocessStats): object {
-  return {
+  const result: Record<string, any> = {
     counts: {
       raw: stats.numRaw,
       afterThreshold: stats.numAfterThr,
@@ -1168,6 +2104,33 @@ export function formatStatsForDebug(stats: PostprocessStats): object {
     },
     timingsMs: stats.timings,
   };
+
+  // Include geom filter rejection stats if available
+  if (stats.geomStats) {
+    result.geomFilterRejections = {
+      input: stats.geomStats.inputCount,
+      output: stats.geomStats.outputCount,
+      byAspect: stats.geomStats.rejected.byAspect,
+      byArea: stats.geomStats.rejected.byArea,
+      byBounds: stats.geomStats.rejected.byBounds,
+      byScore: stats.geomStats.rejected.byScore,
+      byAngle: stats.geomStats.rejected.byAngle,
+      byNaN: stats.geomStats.rejected.byNaN,
+    };
+    result.sampleRejectedDetections = stats.geomStats.sampleRejected.map(s => ({
+      reason: s.reason,
+      aspect: s.computedAspect,
+      areaRatio: s.computedAreaRatio,
+      angleDeg: s.angleDeg,
+      score: s.detection.score,
+      width: s.detection.width,
+      height: s.detection.height,
+      cx: s.detection.cx,
+      cy: s.detection.cy,
+    }));
+  }
+
+  return result;
 }
 
 /**
@@ -1212,7 +2175,7 @@ export function logInferenceRun(
   console.log(`    postprocess_total=${timings.postprocessTotal}, TOTAL=${timings.total}`);
 
   // Warn if postprocess is slow
-  if (timings.postprocessTotal > 50) {
+  if (timings.postprocessTotal && timings.postprocessTotal > 50) {
     console.warn(`  [WARN] Postprocess > 50ms (${timings.postprocessTotal}ms)`);
   }
 
@@ -1251,6 +2214,7 @@ export function createInferenceContext(
 /**
  * Run inference with full timing and logging (GATE 5)
  * Logs every run with context, timings, and counts
+ * Records detailed timing breakdown including invoke timing
  */
 export async function runInferenceWithLogging(
   inputTensor: Float32Array,
@@ -1277,12 +2241,14 @@ export async function runInferenceWithLogging(
   };
 
   // Step 1: Preprocess timing (input tensor is already prepared)
-  const preprocessTime = 0; // Preprocess happens before this call
+  const tensorBuildMs = 0; // Tensor build happens before this call
 
-  // Step 2: Run inference
-  const inferenceStart = Date.now();
+  // Step 2: Run inference with detailed timing
   const rawOutput = await runInferenceRaw(inputTensor, sessionId);
-  const inferenceTime = Date.now() - inferenceStart;
+
+  // Extract invoke/outputRead timing from rawOutput
+  const invokeMs = rawOutput.timingMs?.invokeMs ?? 0;
+  const outputReadMs = rawOutput.timingMs?.outputReadMs ?? 0;
 
   if (rawOutput.outputs.length === 0) {
     console.warn('[InferenceService] No outputs from model');
@@ -1300,7 +2266,6 @@ export async function runInferenceWithLogging(
   }
 
   // Step 3: Postprocess with timing
-  const postprocessStart = Date.now();
 
   // Decode
   const decodeStart = Date.now();
@@ -1312,9 +2277,9 @@ export async function runInferenceWithLogging(
   const afterNms = applyNMS(decoded, config);
   const nmsTime = Date.now() - nmsStart;
 
-  // Geometric filters
+  // Geometric filters (instrumented)
   const geomStart = Date.now();
-  const afterGeom = applyGeometricFilters(
+  const { filtered: afterGeom, stats: geomStats } = applyGeometricFiltersInstrumented(
     afterNms,
     letterbox.srcWidth,
     letterbox.srcHeight,
@@ -1322,7 +2287,6 @@ export async function runInferenceWithLogging(
   );
   const geomTime = Date.now() - geomStart;
 
-  const postprocessTime = Date.now() - postprocessStart;
   const totalTime = Date.now() - startTotal;
 
   // Map to original space
@@ -1330,19 +2294,32 @@ export async function runInferenceWithLogging(
     mapModelToOriginalOBB(det, letterbox)
   );
 
+  // Record detailed timing breakdown
+  lastTimingBreakdown = {
+    tensorBuildMs,
+    invokeMs,
+    outputReadMs,
+    decodeMs: decodeTime,
+    nmsMs: nmsTime,
+    geomFilterMs: geomTime,
+    totalMs: totalTime,
+    invokeCount,
+  };
+
   const stats: PostprocessStats = {
     numRaw: 8400,
     numAfterThr: decoded.length,
     numAfterNms: afterNms.length,
     numAfterGeom: afterGeom.length,
     config,
+    geomStats,
     timings: {
-      preprocess: preprocessTime,
-      inference: inferenceTime,
+      preprocess: tensorBuildMs,
+      inference: invokeMs + outputReadMs,  // Combined invoke + output read
       decode: decodeTime,
       nms: nmsTime,
       geomFilters: geomTime,
-      postprocessTotal: postprocessTime,
+      postprocessTotal: decodeTime + nmsTime + geomTime,
       total: totalTime,
     },
   };
@@ -1350,5 +2327,586 @@ export async function runInferenceWithLogging(
   // Log the inference run (GATE 5 requirement)
   logInferenceRun(fullContext, stats);
 
+  // Log detailed timing breakdown
+  console.log(`[InferenceService] Timing breakdown: tensorBuild=${tensorBuildMs}ms, invoke=${invokeMs}ms, outputRead=${outputReadMs}ms, decode=${decodeTime}ms, nms=${nmsTime}ms, geom=${geomTime}ms, total=${totalTime}ms`);
+  console.log(`[InferenceService] Invoke count this session: ${invokeCount}`);
+
   return { detections, detectionsModelSpace: afterGeom, stats };
+}
+
+// ============================================================================
+// ARTIFACT DATA EXTRACTION UTILITIES
+// ============================================================================
+
+/**
+ * Compute tensor statistics from raw model output
+ */
+export function computeTensorStats(
+  rawOutput: number[],
+  shape: number[]
+): TensorStats {
+  const totalElements = rawOutput.length;
+  if (totalElements === 0) {
+    return {
+      outputShape: shape,
+      min: 0,
+      max: 0,
+      mean: 0,
+      nonZeroCount: 0,
+      totalElements: 0,
+      channelStats: [],
+    };
+  }
+
+  let min = rawOutput[0];
+  let max = rawOutput[0];
+  let sum = 0;
+  let nonZeroCount = 0;
+
+  for (const val of rawOutput) {
+    if (val < min) min = val;
+    if (val > max) max = val;
+    sum += val;
+    if (val !== 0) nonZeroCount++;
+  }
+
+  const mean = sum / totalElements;
+
+  // Compute per-channel stats for [1, 6, 8400] output
+  const channelStats: TensorStats['channelStats'] = [];
+  if (shape.length === 3 && shape[1] === 6) {
+    const numChannels = shape[1];
+    const numAnchors = shape[2];
+
+    for (let ch = 0; ch < numChannels; ch++) {
+      let chMin = rawOutput[ch * numAnchors];
+      let chMax = rawOutput[ch * numAnchors];
+      let chSum = 0;
+
+      for (let i = 0; i < numAnchors; i++) {
+        const val = rawOutput[ch * numAnchors + i];
+        if (val < chMin) chMin = val;
+        if (val > chMax) chMax = val;
+        chSum += val;
+      }
+
+      channelStats.push({
+        channel: ch,
+        min: chMin,
+        max: chMax,
+        mean: chSum / numAnchors,
+      });
+    }
+  }
+
+  return {
+    outputShape: shape,
+    min,
+    max,
+    mean,
+    nonZeroCount,
+    totalElements,
+    channelStats,
+  };
+}
+
+/**
+ * Extract sample anchors from raw model output for debugging
+ * Uses activeDecodeMode channel mapping (Mode B: ch5=score, ch4=angle)
+ */
+export function extractRawSampleAnchors(
+  rawOutput: number[],
+  shape: number[],
+  threshold: number = 0.5,
+  maxSamples: number = 20
+): RawSampleAnchors {
+  if (shape.length !== 3 || shape[1] !== 6) {
+    return {
+      sampleIndices: [],
+      samples: [],
+      totalAnchors: 0,
+      highScoreCount: 0,
+      threshold,
+    };
+  }
+
+  const numAnchors = shape[2];
+  const chMap = activeDecodeMode.channelMapping;
+  const highScoreIndices: number[] = [];
+
+  // Find high-score anchors using active decode mode's score channel
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[chMap.score * numAnchors + i];
+    // Apply sigmoid if enabled to get probability
+    const scoreProb = applySigmoid ? sigmoid(rawScore) : rawScore;
+    if (scoreProb >= threshold) {
+      highScoreIndices.push(i);
+    }
+  }
+
+  // Sample indices (first N high-score, or evenly distributed if fewer)
+  const sampleIndices: number[] = [];
+  if (highScoreIndices.length <= maxSamples) {
+    sampleIndices.push(...highScoreIndices);
+  } else {
+    const step = Math.floor(highScoreIndices.length / maxSamples);
+    for (let i = 0; i < maxSamples; i++) {
+      sampleIndices.push(highScoreIndices[i * step]);
+    }
+  }
+
+  // Extract sample data using active decode mode channel mapping
+  const samples = sampleIndices.map(index => {
+    const rawScore = rawOutput[chMap.score * numAnchors + index];
+    const scoreProb = applySigmoid ? sigmoid(rawScore) : rawScore;
+    return {
+      index,
+      cx: rawOutput[chMap.cx * numAnchors + index],
+      cy: rawOutput[chMap.cy * numAnchors + index],
+      w: rawOutput[chMap.w * numAnchors + index],
+      h: rawOutput[chMap.h * numAnchors + index],
+      score: scoreProb, // Return probability, not raw logit
+      rawScore,         // Also include raw for debugging
+      angle: rawOutput[chMap.angle * numAnchors + index],
+    };
+  });
+
+  return {
+    sampleIndices,
+    samples,
+    totalAnchors: numAnchors,
+    highScoreCount: highScoreIndices.length,
+    threshold,
+  };
+}
+
+/**
+ * Get decode mode comparison data - uses current active mode
+ */
+export function getDecodeModeComparison(): DecodeModeComparison {
+  const mode = activeDecodeMode;
+  return {
+    chosenMode: mode.mode,
+    selectedScoreChannel: mode.channelMapping.score,
+    angleChannel: mode.channelMapping.angle,
+    sigmoidApplied: applySigmoid,
+    channelMapping: mode.channelMapping,
+    alternativeModes: [
+      {
+        mode: MODE_A.mode,
+        description: MODE_A.description,
+        applicable: mode.mode === 'mode_a',
+      },
+      {
+        mode: MODE_B.mode,
+        description: MODE_B.description,
+        applicable: mode.mode === 'mode_b',
+      },
+    ],
+  };
+}
+
+// ============================================================================
+// DIAGNOSTIC DECODE
+// ============================================================================
+
+/**
+ * Diagnostic decode result - for proving candidates exist
+ * Mode B layout: ch4=angle(rad), ch5=rawScore(logit)
+ */
+export interface DiagDecodeResult {
+  diagDecodedCount: number;
+  top20: Array<{
+    index: number;
+    rawScore: number;
+    scoreProb: number;
+    angle: number;
+    raw6: [number, number, number, number, number, number];
+  }>;
+  modeUsed: string;
+  scoreChannel: number;
+  angleChannel: number;
+  thresholdUsed: number;
+  sigmoidApplied: boolean;
+  totalAnchors: number;
+  rawScoreRange: { min: number; max: number };   // ch5 raw logits
+  scoreProbRange: { min: number; max: number };  // ch5 after sigmoid
+  angleRange: { min: number; max: number };      // ch4 in radians
+}
+
+/**
+ * Run diagnostic decode with DIAG_PRESET
+ * Returns count and top 20 scores with raw 6-float data
+ * Does NOT affect normal pipeline - only for debugging
+ *
+ * Mode B layout (hardcoded):
+ *   ch0-3: geometry (cx, cy, w, h)
+ *   ch4: angle in radians
+ *   ch5: raw logit score (sigmoid applied to get probability)
+ */
+export function runDiagnosticDecode(
+  rawOutput: number[],
+  shape: number[]
+): DiagDecodeResult {
+  const chMap = activeDecodeMode.channelMapping;
+
+  if (shape.length !== 3 || shape[1] !== 6) {
+    return {
+      diagDecodedCount: 0,
+      top20: [],
+      modeUsed: activeDecodeMode.mode,
+      scoreChannel: chMap.score,
+      angleChannel: chMap.angle,
+      thresholdUsed: DIAG_PRESET.thr,
+      sigmoidApplied: applySigmoid,
+      totalAnchors: 0,
+      rawScoreRange: { min: 0, max: 0 },
+      scoreProbRange: { min: 0, max: 0 },
+      angleRange: { min: 0, max: 0 },
+    };
+  }
+
+  const numAnchors = shape[2];
+
+  // Compute raw score range from ch5 (score channel)
+  let rawMin = Infinity, rawMax = -Infinity;
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[chMap.score * numAnchors + i];
+    if (rawScore < rawMin) rawMin = rawScore;
+    if (rawScore > rawMax) rawMax = rawScore;
+  }
+
+  // Compute angle range from ch4 (angle channel)
+  let angleMin = Infinity, angleMax = -Infinity;
+  for (let i = 0; i < numAnchors; i++) {
+    const angle = rawOutput[chMap.angle * numAnchors + i];
+    if (angle < angleMin) angleMin = angle;
+    if (angle > angleMax) angleMax = angle;
+  }
+
+  // Collect all anchors above DIAG threshold (0.01) using scoreProb from ch5
+  const candidates: Array<{
+    index: number;
+    rawScore: number;
+    scoreProb: number;
+    angle: number;
+    raw6: [number, number, number, number, number, number];
+  }> = [];
+
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[chMap.score * numAnchors + i];
+    const scoreProb = applySigmoid ? sigmoid(rawScore) : rawScore;
+    const angle = rawOutput[chMap.angle * numAnchors + i];
+
+    // Use probability threshold for diagnostic
+    if (scoreProb >= DIAG_PRESET.thr) {
+      candidates.push({
+        index: i,
+        rawScore,
+        scoreProb,
+        angle,
+        raw6: [
+          rawOutput[0 * numAnchors + i], // ch0 = cx
+          rawOutput[1 * numAnchors + i], // ch1 = cy
+          rawOutput[2 * numAnchors + i], // ch2 = w
+          rawOutput[3 * numAnchors + i], // ch3 = h
+          rawOutput[4 * numAnchors + i], // ch4 = angle (radians)
+          rawOutput[5 * numAnchors + i], // ch5 = rawScore (logit)
+        ],
+      });
+    }
+  }
+
+  // Sort by scoreProb descending
+  candidates.sort((a, b) => b.scoreProb - a.scoreProb);
+
+  // Compute prob range from all candidates
+  const probMin = candidates.length > 0 ? candidates[candidates.length - 1].scoreProb : 0;
+  const probMax = candidates.length > 0 ? candidates[0].scoreProb : 0;
+
+  // Take top 20
+  const top20 = candidates.slice(0, 20);
+
+  console.log('========================================');
+  console.log('[InferenceService] DIAGNOSTIC DECODE (Mode B: ch4=angle, ch5=score)');
+  console.log(`[InferenceService]   Active mode: ${activeDecodeMode.mode}`);
+  console.log(`[InferenceService]   Score channel: ${chMap.score}, Angle channel: ${chMap.angle}`);
+  console.log(`[InferenceService]   Sigmoid applied: ${applySigmoid}`);
+  console.log(`[InferenceService]   Threshold (scoreProb): ${DIAG_PRESET.thr}`);
+  console.log(`[InferenceService]   ch5 rawScore range: [${rawMin.toFixed(4)}, ${rawMax.toFixed(4)}] logits`);
+  console.log(`[InferenceService]   ch5 scoreProb range: [${sigmoid(rawMin).toFixed(4)}, ${sigmoid(rawMax).toFixed(4)}] (sigmoid)`);
+  console.log(`[InferenceService]   ch4 angle range: [${angleMin.toFixed(4)}, ${angleMax.toFixed(4)}] radians`);
+  console.log(`[InferenceService]   Candidates above ${DIAG_PRESET.thr}: ${candidates.length} / ${numAnchors}`);
+  if (top20.length > 0) {
+    console.log(`[InferenceService]   Top 5 scoreProb: ${top20.slice(0, 5).map(c => c.scoreProb.toFixed(4)).join(', ')}`);
+    console.log(`[InferenceService]   Top 5 rawScore: ${top20.slice(0, 5).map(c => c.rawScore.toFixed(4)).join(', ')}`);
+  }
+  console.log('========================================');
+
+  return {
+    diagDecodedCount: candidates.length,
+    top20,
+    modeUsed: activeDecodeMode.mode,
+    scoreChannel: chMap.score,
+    angleChannel: chMap.angle,
+    thresholdUsed: DIAG_PRESET.thr,
+    sigmoidApplied: applySigmoid,
+    totalAnchors: numAnchors,
+    rawScoreRange: { min: rawMin, max: rawMax },
+    scoreProbRange: { min: probMin, max: probMax },
+    angleRange: { min: angleMin, max: angleMax },
+  };
+}
+
+/**
+ * Run full diagnostic analysis on raw output
+ * - Auto-detects decode mode
+ * - Runs diagnostic decode
+ * - Returns all debugging info
+ */
+export function runFullDiagnostics(
+  rawOutput: number[],
+  shape: number[]
+): {
+  modeComparison: DecodeModeComparisonResult;
+  diagResult: DiagDecodeResult;
+  tensorStats: TensorStats;
+} {
+  // Step 1: Auto-detect decode mode
+  const { comparison: modeComparison } = autoDetectDecodeMode(rawOutput, shape);
+
+  // Step 2: Run diagnostic decode with detected mode
+  const diagResult = runDiagnosticDecode(rawOutput, shape);
+
+  // Step 3: Compute tensor stats
+  const tensorStats = computeTensorStats(rawOutput, shape);
+
+  return {
+    modeComparison,
+    diagResult,
+    tensorStats,
+  };
+}
+
+/**
+ * Orientation info for preprocess debug
+ */
+export interface OrientationInfo {
+  exifOrientation: number;
+  rotationApplied: number;
+  mirrored: boolean;
+  normalizedWidth: number;
+  normalizedHeight: number;
+  inputNormalizedPath?: string;
+}
+
+/**
+ * Build preprocess debug info from letterbox params
+ */
+export function buildPreprocessDebug(
+  letterbox: LetterboxParams,
+  inputShape?: number[],
+  orientation?: OrientationInfo
+): PreprocessDebug {
+  const shape = inputShape || modelIOContract?.inputTensors[0]?.shape || [1, 640, 640, 3];
+  const isNHWC = shape[3] === 3;
+
+  return {
+    inputSize: { width: letterbox.srcWidth, height: letterbox.srcHeight },
+    outputSize: { width: letterbox.dstWidth, height: letterbox.dstHeight },
+    letterbox: {
+      scale: letterbox.scale,
+      padX: letterbox.padX,
+      padY: letterbox.padY,
+    },
+    normalization: {
+      method: 'divide_255',
+      range: [0, 1],
+    },
+    tensorFormat: isNHWC ? 'NHWC' : 'NCHW',
+    tensorShape: shape,
+    orientation,
+  };
+}
+
+// ============================================================================
+// INVARIANCE SANITY CHECKS
+// ============================================================================
+
+/**
+ * Invariance check result
+ */
+export interface InvarianceCheckResult {
+  passed: boolean;
+  testName: string;
+  inputDescription: string;
+  run1Checksum: number;
+  run2Checksum: number;
+  maxDiff: number;
+  avgDiff: number;
+  issues: string[];
+}
+
+/**
+ * Compute simple checksum of float array for comparison
+ */
+function computeFloatChecksum(arr: number[] | Float32Array): number {
+  let sum = 0;
+  for (let i = 0; i < arr.length; i++) {
+    sum += arr[i] * (i + 1);  // Weight by position to catch ordering issues
+  }
+  return sum;
+}
+
+/**
+ * Compute max and average difference between two arrays
+ */
+function computeDifferences(
+  arr1: number[] | Float32Array,
+  arr2: number[] | Float32Array
+): { maxDiff: number; avgDiff: number } {
+  if (arr1.length !== arr2.length) {
+    return { maxDiff: Infinity, avgDiff: Infinity };
+  }
+
+  let maxDiff = 0;
+  let sumDiff = 0;
+
+  for (let i = 0; i < arr1.length; i++) {
+    const diff = Math.abs(arr1[i] - arr2[i]);
+    if (diff > maxDiff) maxDiff = diff;
+    sumDiff += diff;
+  }
+
+  return { maxDiff, avgDiff: sumDiff / arr1.length };
+}
+
+/**
+ * Run invariance sanity check with constant input
+ * Runs inference twice with same input and verifies outputs match
+ * This catches issues like uninitialized memory, non-deterministic operations, etc.
+ */
+export async function runInvarianceCheck(
+  testName: string = 'constant_gray'
+): Promise<InvarianceCheckResult> {
+  const issues: string[] = [];
+
+  if (!model || !isModelInspected) {
+    return {
+      passed: false,
+      testName,
+      inputDescription: 'N/A',
+      run1Checksum: 0,
+      run2Checksum: 0,
+      maxDiff: 0,
+      avgDiff: 0,
+      issues: ['Model not loaded or not inspected'],
+    };
+  }
+
+  // Create constant input tensor (gray: 0.5 for all pixels)
+  const inputSize = 640;
+  const inputTensor = new Float32Array(1 * inputSize * inputSize * 3);
+  const grayValue = 0.5;
+  for (let i = 0; i < inputTensor.length; i++) {
+    inputTensor[i] = grayValue;
+  }
+  const inputDescription = `Constant gray tensor: ${inputSize}x${inputSize}x3, all pixels = ${grayValue}`;
+
+  console.log('========================================');
+  console.log(`[InferenceService] INVARIANCE CHECK: ${testName}`);
+  console.log(`[InferenceService] Input: ${inputDescription}`);
+
+  // Run inference twice
+  console.log('[InferenceService] Running inference run #1...');
+  const outputs1 = model.runSync([inputTensor]);
+  const output1 = Array.from(outputs1[0] as Float32Array);
+  const checksum1 = computeFloatChecksum(output1);
+
+  console.log('[InferenceService] Running inference run #2...');
+  const outputs2 = model.runSync([inputTensor]);
+  const output2 = Array.from(outputs2[0] as Float32Array);
+  const checksum2 = computeFloatChecksum(output2);
+
+  // Compare
+  const { maxDiff, avgDiff } = computeDifferences(output1, output2);
+
+  // Check for issues
+  const TOLERANCE = 1e-6;  // Allow tiny floating point differences
+  let passed = true;
+
+  if (checksum1 !== checksum2) {
+    issues.push(`Checksum mismatch: run1=${checksum1.toFixed(6)}, run2=${checksum2.toFixed(6)}`);
+    if (maxDiff > TOLERANCE) {
+      passed = false;
+    }
+  }
+
+  if (maxDiff > TOLERANCE) {
+    issues.push(`Max difference ${maxDiff.toExponential(4)} exceeds tolerance ${TOLERANCE}`);
+    passed = false;
+  }
+
+  // Check for NaN/Inf in outputs
+  const nanCount1 = output1.filter(v => isNaN(v)).length;
+  const nanCount2 = output2.filter(v => isNaN(v)).length;
+  const infCount1 = output1.filter(v => !isFinite(v) && !isNaN(v)).length;
+  const infCount2 = output2.filter(v => !isFinite(v) && !isNaN(v)).length;
+
+  if (nanCount1 > 0 || nanCount2 > 0) {
+    issues.push(`NaN values found: run1=${nanCount1}, run2=${nanCount2}`);
+    passed = false;
+  }
+
+  if (infCount1 > 0 || infCount2 > 0) {
+    issues.push(`Inf values found: run1=${infCount1}, run2=${infCount2}`);
+    passed = false;
+  }
+
+  // Log results
+  const status = passed ? '✓ PASSED' : '✗ FAILED';
+  console.log(`[InferenceService] Checksum run1: ${checksum1.toFixed(6)}`);
+  console.log(`[InferenceService] Checksum run2: ${checksum2.toFixed(6)}`);
+  console.log(`[InferenceService] Max diff: ${maxDiff.toExponential(4)}`);
+  console.log(`[InferenceService] Avg diff: ${avgDiff.toExponential(4)}`);
+  console.log(`[InferenceService] Result: ${status}`);
+  if (issues.length > 0) {
+    console.log('[InferenceService] Issues:');
+    for (const issue of issues) {
+      console.log(`  - ${issue}`);
+    }
+  }
+  console.log('========================================');
+
+  return {
+    passed,
+    testName,
+    inputDescription,
+    run1Checksum: checksum1,
+    run2Checksum: checksum2,
+    maxDiff,
+    avgDiff,
+    issues,
+  };
+}
+
+/**
+ * Run all invariance sanity checks
+ */
+export async function runAllInvarianceChecks(): Promise<InvarianceCheckResult[]> {
+  const results: InvarianceCheckResult[] = [];
+
+  // Test 1: Constant gray input
+  results.push(await runInvarianceCheck('constant_gray'));
+
+  // Could add more tests in future:
+  // - constant_black (all zeros)
+  // - constant_white (all ones)
+  // - gradient input
+  // - random but seeded input
+
+  const passCount = results.filter(r => r.passed).length;
+  console.log(`[InferenceService] Invariance checks: ${passCount}/${results.length} passed`);
+
+  return results;
 }
