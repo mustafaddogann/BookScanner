@@ -41,6 +41,12 @@
 	<string></string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>BookScanner needs photo library access to save scanned images</string>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>BookScanner needs local network access to connect to the development server during debugging</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_http._tcp.</string>
+	</array>
 	<key>RCTNewArchEnabled</key>
 	<true/>
 	<key>UILaunchStoryboardName</key>

@@ -108,15 +108,20 @@ export function ScannerScreen(): React.JSX.Element {
     );
   }
 
+  // Camera stability: Keep camera ALWAYS active to avoid AVFoundation reconfiguration errors
+  // Toggling isActive causes FigXPCUtilities err=-17281 and session restart issues
+  // The processing overlay handles UI blocking - camera session should remain stable
+  const isCameraActive = true;
+
   return (
     <View style={styles.container}>
       <Camera
         ref={camera}
         style={StyleSheet.absoluteFill}
         device={device}
-        isActive={true}
+        isActive={isCameraActive}
         photo={true}
-        enableZoomGesture={true}
+        enableZoomGesture={!isCapturing}
       />
 
       {/* Processing overlay */}

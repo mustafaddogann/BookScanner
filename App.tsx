@@ -14,6 +14,7 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
 import { ScannerScreen, ResultsScreen, DebugScreen } from './src/screens';
 import { useAppStore } from './src/store/useAppStore';
+import { warmupModel } from './src/services/inferenceService';
 import type { RootStackParamList } from './src/types';
 
 // Suppress specific warnings in development
@@ -37,7 +38,17 @@ function App(): React.JSX.Element {
   const loadSessions = useAppStore((state) => state.loadSessions);
 
   useEffect(() => {
+    // Load saved sessions
     loadSessions();
+
+    // Warm up TFLite model for fast first-scan performance
+    warmupModel().then((result) => {
+      if (result.success) {
+        console.log(`[App] Model warmed up in ${result.durationMs.toFixed(0)}ms`);
+      } else {
+        console.warn('[App] Model warmup failed - first scan may be slow');
+      }
+    });
   }, [loadSessions]);
 
   return (

@@ -17,8 +17,24 @@ import { writeCrop } from './debugArtifacts';
 const TARGET_HEIGHT = 768;
 const PADDING_MARGIN = 0.05; // 5% padding
 
-// Backend endpoint for fallback rectification
-const BACKEND_URL = 'http://localhost:8000';
+// Backend endpoint for fallback rectification - configurable at runtime
+let backendUrl = 'http://localhost:8000';
+
+/**
+ * Get current rectifier backend URL
+ */
+export function getRectifierUrl(): string {
+  return backendUrl;
+}
+
+/**
+ * Set rectifier backend URL at runtime
+ * Use this for device testing with a remote server
+ */
+export function setRectifierUrl(url: string): void {
+  backendUrl = url;
+  console.log(`[Rectifier] Backend URL set to: ${url}`);
+}
 
 // Check if native OpenCV module is available
 const OpenCVModule = NativeModules.OpenCVRectifier;
@@ -109,7 +125,7 @@ async function rectifyBackend(
 
   // Call backend
   const response = await axios.post(
-    `${BACKEND_URL}/rectify`,
+    `${backendUrl}/rectify`,
     {
       image_base64: imageBase64,
       src_points: [
@@ -181,7 +197,7 @@ async function rectifyFallback(
  */
 export async function isBackendAvailable(): Promise<boolean> {
   try {
-    const response = await axios.get(`${BACKEND_URL}/health`, { timeout: 2000 });
+    const response = await axios.get(`${backendUrl}/health`, { timeout: 2000 });
     return response.status === 200;
   } catch {
     return false;
@@ -195,7 +211,7 @@ export async function isBackendAvailable(): Promise<boolean> {
  * @param obb - OBB detection in original pixel coordinates
  * @param detectionIndex - Index of this detection (for naming)
  * @param sessionId - Session ID for artifact storage
- * @returns RectifyResult with crop path and metadata
+ * @returns RectifyResult with crop path and metadata, or skipped status
  */
 export async function rectify(
   imageUri: string,
@@ -204,6 +220,23 @@ export async function rectify(
   sessionId: string
 ): Promise<RectifyResult> {
   console.log(`[Rectifier] Rectifying detection ${detectionIndex}`);
+
+  // EARLY EXIT: If native OpenCV is not available, skip rectification entirely
+  // Do NOT attempt localhost backend calls on device - they will always fail
+  if (!hasNativeRectifier) {
+    console.log('[Rectifier] Native OpenCV unavailable - skipping rectification (no network fallback)');
+    const corners = computeCorners(obb);
+    return {
+      cropUri: '',
+      sourceCorners: corners,
+      outputWidth: 0,
+      outputHeight: 0,
+      paddingUsed: PADDING_MARGIN,
+      detectionIndex,
+      rectificationMethod: 'skipped',
+      skippedReason: 'native_opencv_unavailable',
+    };
+  }
 
   // Compute corners
   const corners = computeCorners(obb);
@@ -229,37 +262,26 @@ export async function rectify(
   await RNFS.mkdir(sessionDir);
   await RNFS.mkdir(cropsDir);
 
-  // Try rectification methods in order of preference
-  let rectificationMethod: 'native_opencv' | 'backend' | 'fallback_copy' = 'fallback_copy';
-  let fallbackAABB: { x: number; y: number; width: number; height: number } | undefined;
+  // Try native rectification
+  let rectificationMethod: 'native_opencv' | 'skipped' = 'skipped';
 
-  if (hasNativeRectifier) {
-    try {
-      await rectifyNative(imageUri, paddedCorners, destSize, outputPath);
-      rectificationMethod = 'native_opencv';
-      console.log('[Rectifier] Used native OpenCV rectification');
-    } catch (error) {
-      console.warn('[Rectifier] Native rectification failed:', error);
-    }
-  }
-
-  if (rectificationMethod === 'fallback_copy') {
-    const backendAvailable = await isBackendAvailable();
-    if (backendAvailable) {
-      try {
-        await rectifyBackend(imageUri, paddedCorners, destSize, outputPath);
-        rectificationMethod = 'backend';
-        console.log('[Rectifier] Used backend rectification');
-      } catch (error) {
-        console.warn('[Rectifier] Backend rectification failed:', error);
-      }
-    }
-  }
-
-  if (rectificationMethod === 'fallback_copy') {
-    const fallbackResult = await rectifyFallback(imageUri, paddedCorners, destSize, outputPath);
-    fallbackAABB = fallbackResult.aabbRegion;
-    console.log('[Rectifier] Used fallback (copy only - NOT a proper crop)');
+  try {
+    await rectifyNative(imageUri, paddedCorners, destSize, outputPath);
+    rectificationMethod = 'native_opencv';
+    console.log('[Rectifier] Used native OpenCV rectification');
+  } catch (error) {
+    console.warn('[Rectifier] Native rectification failed:', error);
+    // Return skipped status instead of trying fallbacks
+    return {
+      cropUri: '',
+      sourceCorners: corners,
+      outputWidth: destSize.width,
+      outputHeight: destSize.height,
+      paddingUsed: PADDING_MARGIN,
+      detectionIndex,
+      rectificationMethod: 'skipped',
+      skippedReason: 'native_opencv_failed',
+    };
   }
 
   // Atomic move: tmp file -> final path (idempotent)
@@ -288,7 +310,6 @@ export async function rectify(
     paddingUsed: PADDING_MARGIN,
     detectionIndex,
     rectificationMethod,
-    fallbackAABB,
   };
 
   // Write crop metadata (writeCrop will skip image copy since outputPath is already the final location)

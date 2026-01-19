@@ -19,8 +19,9 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo } from '../types';
 import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../utils/letterbox';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, type SessionMeta } from '../store/useAppStore';
 import { readDebugManifest, getSessionDir } from '../services/debugArtifacts';
+import RNFS from 'react-native-fs';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Results'>;
 type ResultsRouteProp = RouteProp<RootStackParamList, 'Results'>;
@@ -37,6 +38,7 @@ export function ResultsScreen(): React.JSX.Element {
     selectedDetectionIndex,
     setSelectedDetection,
     currentSession,
+    sessionMeta,
   } = useAppStore();
 
   const [imageUri, setImageUri] = useState<string | null>(null);
@@ -48,24 +50,58 @@ export function ResultsScreen(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Load session data with robust guards
+  // PRIORITY: 1) Store sessionMeta (in-memory) 2) debug_manifest.json (legacy fallback)
   useEffect(() => {
     async function loadSession() {
       try {
         const sessionDir = getSessionDir(sessionId);
-        const manifest = await readDebugManifest(sessionId);
 
-        // Priority order for display image:
-        // 1. input_normalized.jpg (EXIF-corrected, matches detection coordinates)
-        // 2. original.jpg (raw camera output)
-        // 3. original.png (alternative format)
+        // ================================================================
+        // STEP 1: Try to get geometry from in-memory store (PREFERRED)
+        // ================================================================
         let foundImageUri: string | null = null;
-        const normalizedPath = `${sessionDir}/input_normalized.jpg`;
-        const jpgPath = `${sessionDir}/original.jpg`;
-        const pngPath = `${sessionDir}/original.png`;
+        let foundDimensions: { width: number; height: number } | null = null;
+        let usedStore = false;
 
-        // Check which image exists (prefer normalized)
-        try {
-          const { default: RNFS } = await import('react-native-fs');
+        if (sessionMeta) {
+          console.log('[Results] Using sessionMeta from store (single source of truth)');
+
+          // Get dimensions from store
+          if (sessionMeta.imageDimensions) {
+            foundDimensions = sessionMeta.imageDimensions;
+            console.log(`[Results] Store dimensions: ${foundDimensions.width}x${foundDimensions.height}`);
+          } else if (sessionMeta.frameGeo) {
+            foundDimensions = {
+              width: sessionMeta.frameGeo.pixelW,
+              height: sessionMeta.frameGeo.pixelH,
+            };
+            console.log(`[Results] Store frameGeo dimensions: ${foundDimensions.width}x${foundDimensions.height}`);
+          }
+
+          // Get image path from store
+          if (sessionMeta.normalizedImagePath) {
+            const normalizedExists = await RNFS.exists(sessionMeta.normalizedImagePath);
+            if (normalizedExists) {
+              foundImageUri = `file://${sessionMeta.normalizedImagePath}`;
+              console.log('[Results] Using normalizedImagePath from store');
+            }
+          }
+
+          usedStore = !!foundDimensions;
+        }
+
+        // ================================================================
+        // STEP 2: Find display image (if not found from store)
+        // ================================================================
+        if (!foundImageUri) {
+          // Priority order for display image:
+          // 1. input_normalized.jpg (EXIF-corrected, matches detection coordinates)
+          // 2. original.jpg (raw camera output)
+          // 3. original.png (alternative format)
+          const normalizedPath = `${sessionDir}/input_normalized.jpg`;
+          const jpgPath = `${sessionDir}/original.jpg`;
+          const pngPath = `${sessionDir}/original.png`;
+
           if (await RNFS.exists(normalizedPath)) {
             foundImageUri = `file://${normalizedPath}`;
             console.log('[Results] Using input_normalized.jpg for display');
@@ -76,93 +112,83 @@ export function ResultsScreen(): React.JSX.Element {
             foundImageUri = `file://${pngPath}`;
             console.log('[Results] Falling back to original.png');
           }
-        } catch {
-          // Fall back to normalized path
-          foundImageUri = `file://${normalizedPath}`;
         }
 
         setImageUri(foundImageUri);
 
-        // SINGLE SOURCE OF TRUTH: Use FrameGeo dimensions from manifest
-        // This ensures overlay coordinates match exactly what the pipeline used
-        const frameGeo = manifest?.frameGeo as SerializedFrameGeo | undefined;
+        // ================================================================
+        // STEP 3: Fall back to debug_manifest.json for legacy sessions
+        // ================================================================
+        if (!foundDimensions) {
+          console.log('[Results] Store empty, falling back to debug_manifest.json');
 
-        if (frameGeo && typeof frameGeo.pixelW === 'number' && typeof frameGeo.pixelH === 'number') {
-          // Use FrameGeo as authoritative source
-          console.log(`[Results] Using FrameGeo dimensions: ${frameGeo.pixelW}x${frameGeo.pixelH}`);
-          console.log(`[Results] FrameGeo letterbox: scale=${frameGeo.letterbox?.scale?.toFixed(4)}, pad=(${frameGeo.letterbox?.padX}, ${frameGeo.letterbox?.padY})`);
-          setImageDimensions({
-            width: frameGeo.pixelW,
-            height: frameGeo.pixelH,
-          });
+          try {
+            const manifest = await readDebugManifest(sessionId);
 
-          // Verify with Image.getSize for debugging (but don't use the result)
-          if (foundImageUri) {
-            try {
-              const { Image: RNImage } = await import('react-native');
-              RNImage.getSize(
-                foundImageUri,
-                (w, h) => {
-                  if (w !== frameGeo.pixelW || h !== frameGeo.pixelH) {
-                    console.warn(`[Results] WARNING: Image.getSize returned ${w}x${h}, but FrameGeo says ${frameGeo.pixelW}x${frameGeo.pixelH}`);
-                    console.warn('[Results] Using FrameGeo dimensions (single source of truth)');
-                  } else {
-                    console.log('[Results] Image.getSize matches FrameGeo - dimensions verified');
-                  }
-                },
-                () => { /* ignore errors in verification */ }
-              );
-            } catch { /* ignore */ }
-          }
-        } else if (manifest && manifest.imageMeta && typeof manifest.imageMeta.width === 'number') {
-          // Fallback to imageMeta if FrameGeo not available (legacy manifests)
-          console.warn('[Results] FrameGeo not in manifest, using imageMeta (legacy fallback)');
-          setImageDimensions({
-            width: manifest.imageMeta.width,
-            height: manifest.imageMeta.height,
-          });
-        } else {
-          // Last resort: Try to get dimensions from Image.getSize
-          console.warn('[Results] No dimension source in manifest, using Image.getSize fallback');
-          if (foundImageUri) {
-            try {
-              const { Image: RNImage } = await import('react-native');
-              await new Promise<void>((resolve, reject) => {
-                RNImage.getSize(
-                  foundImageUri!,
-                  (w, h) => {
-                    console.warn(`[Results] Image.getSize returned ${w}x${h} - coordinates may not match!`);
-                    setImageDimensions({ width: w, height: h });
-                    resolve();
-                  },
-                  (err) => {
-                    console.error('[Results] Image.getSize failed:', err);
-                    reject(err);
-                  }
-                );
-              });
-            } catch {
-              console.warn('[Results] Could not determine image dimensions');
+            if (manifest) {
+              // Try FrameGeo first
+              const frameGeo = manifest.frameGeo as SerializedFrameGeo | undefined;
+              if (frameGeo && typeof frameGeo.pixelW === 'number' && typeof frameGeo.pixelH === 'number') {
+                foundDimensions = { width: frameGeo.pixelW, height: frameGeo.pixelH };
+                console.log(`[Results] Manifest frameGeo dimensions: ${foundDimensions.width}x${foundDimensions.height}`);
+              } else if (manifest.imageMeta && typeof manifest.imageMeta.width === 'number') {
+                foundDimensions = { width: manifest.imageMeta.width, height: manifest.imageMeta.height };
+                console.log(`[Results] Manifest imageMeta dimensions: ${foundDimensions.width}x${foundDimensions.height}`);
+              }
+
+              // Load detections from manifest if store is empty
+              if (detections.length === 0) {
+                const manifestDetections = manifest.detectionsOriginal || manifest.detectionsFrameSpace || [];
+                console.log(`[Results] Loading ${manifestDetections.length} detections from manifest`);
+                if (Array.isArray(manifestDetections)) {
+                  useAppStore.getState().setDetections(manifestDetections);
+                }
+              }
             }
+          } catch (manifestError: any) {
+            // debug_manifest.json may not exist if DEBUG_ARTIFACTS_ENABLED=false
+            // This is expected - not an error
+            console.log(`[Results] No debug_manifest.json (artifacts disabled): ${manifestError.message}`);
           }
         }
 
-        // Guard: Check if detections exist and update store
-        // NOTE: detections should be FILTERED (post NMS + geometric filters)
-        // Diagnostic decode results are saved to diag_decode.json but NOT displayed
-        if (detections.length === 0 && manifest) {
-          const manifestDetections = manifest.detectionsOriginal || manifest.detectionsFrameSpace || [];
-          console.log(`[Results] Store empty, loading ${manifestDetections.length} filtered detections from manifest`);
-          if (Array.isArray(manifestDetections)) {
-            useAppStore.getState().setDetections(manifestDetections);
+        // ================================================================
+        // STEP 4: Last resort - use Image.getSize
+        // ================================================================
+        if (!foundDimensions && foundImageUri) {
+          console.warn('[Results] No dimensions from store or manifest, using Image.getSize fallback');
+          try {
+            const { Image: RNImage } = await import('react-native');
+            await new Promise<void>((resolve, reject) => {
+              RNImage.getSize(
+                foundImageUri!,
+                (w, h) => {
+                  console.warn(`[Results] Image.getSize: ${w}x${h} - coordinates may not match detections!`);
+                  foundDimensions = { width: w, height: h };
+                  resolve();
+                },
+                (err) => {
+                  console.error('[Results] Image.getSize failed:', err);
+                  reject(err);
+                }
+              );
+            });
+          } catch {
+            console.warn('[Results] Could not determine image dimensions');
           }
-        } else {
-          console.log(`[Results] Using ${detections.length} filtered detections from store`);
         }
 
-        // If no manifest at all, show warning but don't crash
-        if (!manifest) {
-          setLoadError('Session manifest not found. Results may be incomplete.');
+        // Set dimensions
+        if (foundDimensions) {
+          setImageDimensions(foundDimensions);
+        }
+
+        // Log detection count
+        console.log(`[Results] ${detections.length} detections available for rendering`);
+
+        // Show warning if no dimensions found
+        if (!foundDimensions && !foundImageUri) {
+          setLoadError('Session data not found. The session may have been deleted.');
         }
       } catch (error: any) {
         console.error('[Results] Failed to load session:', error);
@@ -173,7 +199,7 @@ export function ResultsScreen(): React.JSX.Element {
     }
 
     loadSession();
-  }, [sessionId]);
+  }, [sessionId, sessionMeta]);
 
   // Calculate screen mapping when container layout changes
   useEffect(() => {

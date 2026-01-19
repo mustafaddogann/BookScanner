@@ -5,6 +5,10 @@
  * - All JSON artifacts use atomic writes (temp + move + verify)
  * - Errors are logged to write_errors.log in session dir
  * - debug_manifest.json tracks all artifacts with exists/bytes verification
+ *
+ * PERFORMANCE NOTE:
+ * - Debug artifacts are DISABLED by default (DEBUG_ARTIFACTS_ENABLED = false)
+ * - Enable in src/config/debug.ts when debugging is needed
  */
 
 import RNFS from 'react-native-fs';
@@ -22,8 +26,58 @@ import type {
   PostprocessStatsManifest,
   InputTensorMeta,
 } from '../types';
+import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 
 const SESSIONS_DIR = 'sessions';
+
+// ============================================================================
+// ARTIFACT WRITING CONTROL
+// ============================================================================
+
+/**
+ * Global flag to enable/disable artifact writing
+ * Default: DEBUG_ARTIFACTS_ENABLED from config (false for production)
+ * Use setArtifactWritingEnabled() to override at runtime
+ */
+let artifactWritingEnabled = DEBUG_ARTIFACTS_ENABLED;
+
+/**
+ * Check if artifact writing is currently enabled
+ */
+export function isArtifactWritingEnabled(): boolean {
+  return artifactWritingEnabled;
+}
+
+/**
+ * Enable or disable artifact writing globally
+ * Disabling improves performance in preview mode
+ */
+export function setArtifactWritingEnabled(enabled: boolean): void {
+  artifactWritingEnabled = enabled;
+  console.log(`[DebugArtifacts] Artifact writing ${enabled ? 'enabled' : 'disabled'}`);
+}
+
+/**
+ * Check if artifacts should be written, log skip message if not
+ * Returns true if write should proceed, false if it should be skipped
+ */
+function shouldWriteArtifact(artifactName: string): boolean {
+  if (!artifactWritingEnabled) {
+    // Only log once per unique artifact to reduce noise
+    return false;
+  }
+  return true;
+}
+
+/**
+ * Return value for skipped artifact writes
+ */
+const SKIPPED_WRITE_RESULT: WriteResult = {
+  success: true,
+  path: '',
+  bytes: 0,
+  error: 'Artifact writing disabled',
+};
 
 // ============================================================================
 // ARTIFACT INFO TYPES
@@ -233,6 +287,11 @@ export async function writeDebugManifest(
   sessionId: string,
   manifest: DebugManifest
 ): Promise<string> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('debug_manifest.json')) {
+    return '';
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const manifestPath = `${sessionDir}/debug_manifest.json`;
 
@@ -253,6 +312,11 @@ export async function writeModelIO(
   sessionId: string,
   modelIO: ModelIOContract
 ): Promise<string> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('model_io.json')) {
+    return '';
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const modelIOPath = `${sessionDir}/model_io.json`;
 
@@ -273,6 +337,11 @@ export async function writeRawModelOutput(
   sessionId: string,
   rawOutput: RawModelOutput
 ): Promise<string> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('detections_raw.json')) {
+    return '';
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const rawOutputPath = `${sessionDir}/detections_raw.json`;
 
@@ -377,6 +446,11 @@ export async function writeCoordinateTest(
   sessionId: string,
   testData: object
 ): Promise<string> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('coordinate_test.json')) {
+    return '';
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const testPath = `${sessionDir}/coordinate_test.json`;
 
@@ -395,6 +469,11 @@ export async function writeAngleTest(
   sessionId: string,
   testData: object
 ): Promise<string> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('angle_test.json')) {
+    return '';
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const testPath = `${sessionDir}/angle_test.json`;
 
@@ -435,6 +514,11 @@ export async function writeTensorStats(
   sessionId: string,
   stats: TensorStats
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('tensor_stats.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const statsPath = `${sessionDir}/tensor_stats.json`;
 
@@ -469,6 +553,11 @@ export async function writeRawSampleAnchors(
   sessionId: string,
   data: RawSampleAnchors
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('raw_sample_anchors.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const anchorsPath = `${sessionDir}/raw_sample_anchors.json`;
 
@@ -508,6 +597,11 @@ export async function writeDecodeModeComparison(
   sessionId: string,
   data: DecodeModeComparison
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('decode_mode_comparison.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const comparePath = `${sessionDir}/decode_mode_comparison.json`;
 
@@ -881,8 +975,17 @@ export interface AllArtifactsData {
 /**
  * Write all session artifacts and update manifest with verification
  * Guaranteed to write all files even if detections=0
+ *
+ * If artifact writing is disabled via setArtifactWritingEnabled(false),
+ * this function returns an empty array without writing anything.
  */
 export async function writeAllArtifacts(data: AllArtifactsData): Promise<ArtifactInfo[]> {
+  // Early return if artifact writing is disabled (e.g., in preview mode)
+  if (!artifactWritingEnabled) {
+    console.log('[DebugArtifacts] Artifact writing disabled, skipping writeAllArtifacts');
+    return [];
+  }
+
   const { sessionId } = data;
   const sessionDir = getSessionDir(sessionId);
   const artifacts: ArtifactInfo[] = [];
@@ -1043,15 +1146,15 @@ export async function writeAllArtifacts(data: AllArtifactsData): Promise<Artifac
       bytes: result.bytes,
     });
   } else {
-    // Write empty diag result (Mode B: ch4=angle, ch5=score)
+    // Write empty diag result (Mode A: ch4=score, ch5=angle - matches Python decode_one.py)
     const emptyDiag: DiagDecodeResult = {
       diagDecodedCount: 0,
       top20: [],
-      modeUsed: 'mode_b',
-      scoreChannel: 5,
-      angleChannel: 4,
+      modeUsed: 'mode_a',
+      scoreChannel: 4,
+      angleChannel: 5,
       thresholdUsed: 0.01,
-      sigmoidApplied: true,
+      sigmoidApplied: false,
       totalAnchors: 0,
       rawScoreRange: { min: 0, max: 0 },
       scoreProbRange: { min: 0, max: 0 },
@@ -1180,6 +1283,11 @@ export async function writeSourceDecodeStats(
   sessionId: string,
   stats: SourceDecodeStats
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('source_decode_stats.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const statsPath = `${sessionDir}/source_decode_stats.json`;
 
@@ -1471,6 +1579,11 @@ export async function writeInputTensorStats(
   sessionId: string,
   stats: InputTensorStats
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('input_tensor_stats.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const statsPath = `${sessionDir}/input_tensor_stats.json`;
 
@@ -1498,6 +1611,11 @@ export async function writeLetterboxMeta(
   sessionId: string,
   meta: LetterboxMeta
 ): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('letterbox_meta.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
   const sessionDir = getSessionDir(sessionId);
   const metaPath = `${sessionDir}/letterbox_meta.json`;
 
@@ -1682,6 +1800,802 @@ export async function writeInputTensorPreview(
   }
 }
 
+// ============================================================================
+// SCORE SANITY ARTIFACTS
+// ============================================================================
+
+/**
+ * Score sanity statistics for validating model output
+ */
+export interface ScoreSanityStats {
+  // Raw score stats (before sigmoid)
+  rawScore: {
+    min: number;
+    p1: number;
+    p5: number;
+    p50: number;
+    p95: number;
+    p99: number;
+    max: number;
+    mean: number;
+    std: number;
+  };
+  // Score probability stats (after sigmoid)
+  scoreProb: {
+    min: number;
+    p1: number;
+    p5: number;
+    p50: number;
+    p95: number;
+    p99: number;
+    max: number;
+    mean: number;
+    std: number;
+  };
+  // Counts above threshold
+  countsAboveThreshold: {
+    '0.01': number;
+    '0.05': number;
+    '0.10': number;
+    '0.30': number;
+    '0.50': number;
+    '0.70': number;
+    '0.90': number;
+  };
+  totalAnchors: number;
+  // Whether sigmoid was applied (must match decode path)
+  sigmoidApplied: boolean;
+  // Validity check
+  valid: boolean;
+  failureReason?: string;
+  // Hard gate conditions
+  hardGateConditions: {
+    p5ScoreProbAbove03: boolean;  // FAIL if p5(scoreProb) > 0.3
+    stdScoreProbBelow005: boolean; // FAIL if std(scoreProb) < 0.05
+  };
+}
+
+/**
+ * Compute percentile from sorted array
+ */
+function computePercentileFromSortedArray(sortedArr: number[], p: number): number {
+  if (sortedArr.length === 0) return 0;
+  const idx = Math.floor((p / 100) * (sortedArr.length - 1));
+  return sortedArr[Math.min(idx, sortedArr.length - 1)];
+}
+
+/**
+ * Sigmoid function for score conversion
+ */
+function sigmoidValue(x: number): number {
+  if (x > 20) return 1.0;
+  if (x < -20) return 0.0;
+  return 1 / (1 + Math.exp(-x));
+}
+
+/**
+ * Compute score sanity statistics from raw model output
+ * @param rawOutput - Raw model output array [1, 6, 8400] flattened
+ * @param shape - Output tensor shape
+ * @param scoreChannel - Which channel contains raw scores (default 4 for Mode A)
+ * @param applySigmoid - Whether to apply sigmoid to convert logits to probabilities (must match decode path)
+ */
+export function computeScoreSanityStats(
+  rawOutput: number[],
+  shape: number[],
+  scoreChannel: number = 4,
+  applySigmoid: boolean = false
+): ScoreSanityStats {
+  if (shape.length !== 3 || shape[1] !== 6) {
+    return {
+      rawScore: { min: 0, p1: 0, p5: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0, std: 0 },
+      scoreProb: { min: 0, p1: 0, p5: 0, p50: 0, p95: 0, p99: 0, max: 0, mean: 0, std: 0 },
+      countsAboveThreshold: { '0.01': 0, '0.05': 0, '0.10': 0, '0.30': 0, '0.50': 0, '0.70': 0, '0.90': 0 },
+      totalAnchors: 0,
+      sigmoidApplied: applySigmoid,
+      valid: false,
+      failureReason: 'Invalid output shape',
+      hardGateConditions: { p5ScoreProbAbove03: false, stdScoreProbBelow005: true },
+    };
+  }
+
+  const numAnchors = shape[2];
+  const rawScores: number[] = [];
+  const scoreProbs: number[] = [];
+
+  // Extract raw scores and compute probabilities
+  // Use applySigmoid flag to match decode path behavior
+  for (let i = 0; i < numAnchors; i++) {
+    const rawScore = rawOutput[scoreChannel * numAnchors + i];
+    if (!isNaN(rawScore) && isFinite(rawScore)) {
+      rawScores.push(rawScore);
+      // Only apply sigmoid if the decode path uses sigmoid (logit -> probability)
+      // If applySigmoid=false, rawScore IS already a probability
+      scoreProbs.push(applySigmoid ? sigmoidValue(rawScore) : rawScore);
+    }
+  }
+
+  // Sort for percentiles
+  const sortedRaw = [...rawScores].sort((a, b) => a - b);
+  const sortedProb = [...scoreProbs].sort((a, b) => a - b);
+
+  // Compute raw score stats
+  const rawMin = sortedRaw.length > 0 ? sortedRaw[0] : 0;
+  const rawMax = sortedRaw.length > 0 ? sortedRaw[sortedRaw.length - 1] : 0;
+  const rawSum = rawScores.reduce((a, b) => a + b, 0);
+  const rawMean = rawScores.length > 0 ? rawSum / rawScores.length : 0;
+  let rawSqDiffSum = 0;
+  for (const v of rawScores) rawSqDiffSum += (v - rawMean) ** 2;
+  const rawStd = rawScores.length > 1 ? Math.sqrt(rawSqDiffSum / (rawScores.length - 1)) : 0;
+
+  // Compute prob stats
+  const probMin = sortedProb.length > 0 ? sortedProb[0] : 0;
+  const probMax = sortedProb.length > 0 ? sortedProb[sortedProb.length - 1] : 0;
+  const probSum = scoreProbs.reduce((a, b) => a + b, 0);
+  const probMean = scoreProbs.length > 0 ? probSum / scoreProbs.length : 0;
+  let probSqDiffSum = 0;
+  for (const v of scoreProbs) probSqDiffSum += (v - probMean) ** 2;
+  const probStd = scoreProbs.length > 1 ? Math.sqrt(probSqDiffSum / (scoreProbs.length - 1)) : 0;
+
+  // Percentiles
+  const rawP1 = computePercentileFromSortedArray(sortedRaw, 1);
+  const rawP5 = computePercentileFromSortedArray(sortedRaw, 5);
+  const rawP50 = computePercentileFromSortedArray(sortedRaw, 50);
+  const rawP95 = computePercentileFromSortedArray(sortedRaw, 95);
+  const rawP99 = computePercentileFromSortedArray(sortedRaw, 99);
+
+  const probP1 = computePercentileFromSortedArray(sortedProb, 1);
+  const probP5 = computePercentileFromSortedArray(sortedProb, 5);
+  const probP50 = computePercentileFromSortedArray(sortedProb, 50);
+  const probP95 = computePercentileFromSortedArray(sortedProb, 95);
+  const probP99 = computePercentileFromSortedArray(sortedProb, 99);
+
+  // Counts above thresholds
+  const thresholds = [0.01, 0.05, 0.10, 0.30, 0.50, 0.70, 0.90];
+  const counts: Record<string, number> = {};
+  for (const t of thresholds) {
+    counts[t.toFixed(2)] = scoreProbs.filter(p => p >= t).length;
+  }
+
+  // Hard gate conditions
+  const p5ScoreProbAbove03 = probP5 > 0.3;
+  const stdScoreProbBelow005 = probStd < 0.05;
+
+  // Determine validity
+  let valid = true;
+  let failureReason: string | undefined;
+
+  if (p5ScoreProbAbove03) {
+    valid = false;
+    failureReason = `SCORE_CHANNEL_INVALID_OR_MODEL_COLLAPSED: p5(scoreProb)=${probP5.toFixed(4)} > 0.3`;
+  } else if (stdScoreProbBelow005 && rawScores.length > 0) {
+    valid = false;
+    failureReason = `SCORE_CHANNEL_INVALID_OR_MODEL_COLLAPSED: std(scoreProb)=${probStd.toFixed(4)} < 0.05`;
+  }
+
+  return {
+    rawScore: {
+      min: rawMin,
+      p1: rawP1,
+      p5: rawP5,
+      p50: rawP50,
+      p95: rawP95,
+      p99: rawP99,
+      max: rawMax,
+      mean: rawMean,
+      std: rawStd,
+    },
+    scoreProb: {
+      min: probMin,
+      p1: probP1,
+      p5: probP5,
+      p50: probP50,
+      p95: probP95,
+      p99: probP99,
+      max: probMax,
+      mean: probMean,
+      std: probStd,
+    },
+    countsAboveThreshold: counts as ScoreSanityStats['countsAboveThreshold'],
+    totalAnchors: numAnchors,
+    sigmoidApplied: applySigmoid,
+    valid,
+    failureReason,
+    hardGateConditions: {
+      p5ScoreProbAbove03,
+      stdScoreProbBelow005,
+    },
+  };
+}
+
+/**
+ * Write score_sanity.json - validates score channel data
+ */
+export async function writeScoreSanity(
+  sessionId: string,
+  stats: ScoreSanityStats
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('score_sanity.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const sanityPath = `${sessionDir}/score_sanity.json`;
+
+  await RNFS.mkdir(sessionDir);
+
+  // Log score sanity results
+  console.log('========================================');
+  console.log('[DebugArtifacts] SCORE SANITY CHECK:');
+  console.log(`[DebugArtifacts]   Total anchors: ${stats.totalAnchors}`);
+  console.log(`[DebugArtifacts]   Sigmoid applied: ${stats.sigmoidApplied}`);
+  console.log(`[DebugArtifacts]   rawScore: min=${stats.rawScore.min.toFixed(4)}, p50=${stats.rawScore.p50.toFixed(4)}, max=${stats.rawScore.max.toFixed(4)}, std=${stats.rawScore.std.toFixed(4)}`);
+  console.log(`[DebugArtifacts]   scoreProb: min=${stats.scoreProb.min.toFixed(4)}, p5=${stats.scoreProb.p5.toFixed(4)}, p50=${stats.scoreProb.p50.toFixed(4)}, max=${stats.scoreProb.max.toFixed(4)}, std=${stats.scoreProb.std.toFixed(4)}`);
+  console.log(`[DebugArtifacts]   Counts: >0.01=${stats.countsAboveThreshold['0.01']}, >0.30=${stats.countsAboveThreshold['0.30']}, >0.50=${stats.countsAboveThreshold['0.50']}, >0.90=${stats.countsAboveThreshold['0.90']}`);
+  if (stats.valid) {
+    console.log('[DebugArtifacts]   ✓ Score channel VALID');
+  } else {
+    console.log(`[DebugArtifacts]   ⚠️  ${stats.failureReason}`);
+  }
+  console.log('========================================');
+
+  return writeJsonAtomic(sanityPath, stats, sessionDir);
+}
+
+// ============================================================================
+// NMS WITNESS ARTIFACTS
+// ============================================================================
+
+/**
+ * OBB detection for NMS witness (model space)
+ */
+export interface NMSWitnessDetection {
+  index: number;
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+  angle: number;
+  score: number;
+  aabb: { minX: number; minY: number; maxX: number; maxY: number };
+}
+
+/**
+ * Overlapping pair information for NMS witness
+ */
+export interface NMSOverlappingPair {
+  indexA: number;
+  indexB: number;
+  scoreA: number;
+  scoreB: number;
+  iou: number;
+  detA: NMSWitnessDetection;
+  detB: NMSWitnessDetection;
+  // Which was suppressed (B has lower score, so B should be suppressed if IoU > threshold)
+  bShouldBeSuppressed: boolean;
+}
+
+/**
+ * NMS witness data
+ */
+export interface NMSWitnessData {
+  // Top 50 detections by score (before NMS)
+  topByScore: NMSWitnessDetection[];
+  // Max IoU for each detection (against higher-scoring detections)
+  maxIoUPerBox: Array<{ index: number; maxIoU: number; maxIoUPairIndex: number }>;
+  // Top 10 overlapping pairs (highest IoU pairs)
+  topOverlappingPairs: NMSOverlappingPair[];
+  // Summary
+  summary: {
+    totalBeforeNMS: number;
+    totalAfterNMS: number;
+    numSuppressed: number;
+    numPairsWithIoUAbove05: number;
+    numPairsWithIoUAbove03: number;
+    nmsIouThreshold: number;
+    nmsMode: string;
+  };
+}
+
+/**
+ * Get 4 corners of an OBB
+ */
+function getOBBCornersForWitness(
+  cx: number, cy: number, width: number, height: number, angle: number
+): Array<{ x: number; y: number }> {
+  const hw = width / 2;
+  const hh = height / 2;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  return [
+    { x: cx + (-hw) * cos - (-hh) * sin, y: cy + (-hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (-hh) * sin, y: cy + (hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (hh) * sin, y: cy + (hw) * sin + (hh) * cos },
+    { x: cx + (-hw) * cos - (hh) * sin, y: cy + (-hw) * sin + (hh) * cos },
+  ];
+}
+
+/**
+ * Compute AABB from OBB corners
+ */
+function computeAABBFromOBB(
+  cx: number, cy: number, width: number, height: number, angle: number
+): { minX: number; minY: number; maxX: number; maxY: number } {
+  const corners = getOBBCornersForWitness(cx, cy, width, height, angle);
+  const xs = corners.map(c => c.x);
+  const ys = corners.map(c => c.y);
+  return {
+    minX: Math.min(...xs),
+    minY: Math.min(...ys),
+    maxX: Math.max(...xs),
+    maxY: Math.max(...ys),
+  };
+}
+
+/**
+ * Compute AABB IoU
+ */
+function computeAABBIoUForWitness(
+  a: { minX: number; minY: number; maxX: number; maxY: number },
+  b: { minX: number; minY: number; maxX: number; maxY: number }
+): number {
+  const interMinX = Math.max(a.minX, b.minX);
+  const interMaxX = Math.min(a.maxX, b.maxX);
+  const interMinY = Math.max(a.minY, b.minY);
+  const interMaxY = Math.min(a.maxY, b.maxY);
+
+  if (interMaxX <= interMinX || interMaxY <= interMinY) {
+    return 0;
+  }
+
+  const interArea = (interMaxX - interMinX) * (interMaxY - interMinY);
+  const aArea = (a.maxX - a.minX) * (a.maxY - a.minY);
+  const bArea = (b.maxX - b.minX) * (b.maxY - b.minY);
+  const unionArea = aArea + bArea - interArea;
+
+  return unionArea > 0 ? interArea / unionArea : 0;
+}
+
+/**
+ * Build NMS witness data from detections before and after NMS
+ */
+export function buildNMSWitnessData(
+  detectionsBeforeNMS: Array<{
+    cx: number;
+    cy: number;
+    width: number;
+    height: number;
+    angle: number;
+    score: number;
+  }>,
+  numAfterNMS: number,
+  nmsIouThreshold: number,
+  nmsMode: string
+): NMSWitnessData {
+  // Sort by score descending
+  const sorted = [...detectionsBeforeNMS]
+    .map((d, i) => ({ ...d, originalIndex: i }))
+    .sort((a, b) => b.score - a.score);
+
+  // Take top 50
+  const top50 = sorted.slice(0, 50);
+
+  // Build witness detections with AABB
+  const topByScore: NMSWitnessDetection[] = top50.map((d, i) => ({
+    index: i,
+    cx: d.cx,
+    cy: d.cy,
+    width: d.width,
+    height: d.height,
+    angle: d.angle,
+    score: d.score,
+    aabb: computeAABBFromOBB(d.cx, d.cy, d.width, d.height, d.angle),
+  }));
+
+  // Compute max IoU for each detection (against higher-scoring ones)
+  const maxIoUPerBox: Array<{ index: number; maxIoU: number; maxIoUPairIndex: number }> = [];
+  for (let i = 0; i < topByScore.length; i++) {
+    let maxIoU = 0;
+    let maxIoUPairIndex = -1;
+    for (let j = 0; j < i; j++) {  // Only compare with higher-scoring (j < i)
+      const iou = computeAABBIoUForWitness(topByScore[i].aabb, topByScore[j].aabb);
+      if (iou > maxIoU) {
+        maxIoU = iou;
+        maxIoUPairIndex = j;
+      }
+    }
+    maxIoUPerBox.push({ index: i, maxIoU, maxIoUPairIndex });
+  }
+
+  // Find all overlapping pairs and sort by IoU
+  const allPairs: NMSOverlappingPair[] = [];
+  for (let i = 0; i < topByScore.length; i++) {
+    for (let j = i + 1; j < topByScore.length; j++) {
+      const iou = computeAABBIoUForWitness(topByScore[i].aabb, topByScore[j].aabb);
+      if (iou > 0.01) {  // Only include pairs with some overlap
+        allPairs.push({
+          indexA: i,
+          indexB: j,
+          scoreA: topByScore[i].score,
+          scoreB: topByScore[j].score,
+          iou,
+          detA: topByScore[i],
+          detB: topByScore[j],
+          bShouldBeSuppressed: iou > nmsIouThreshold,
+        });
+      }
+    }
+  }
+
+  // Sort by IoU descending and take top 10
+  allPairs.sort((a, b) => b.iou - a.iou);
+  const topOverlappingPairs = allPairs.slice(0, 10);
+
+  // Count pairs above thresholds
+  const numPairsWithIoUAbove05 = allPairs.filter(p => p.iou > 0.5).length;
+  const numPairsWithIoUAbove03 = allPairs.filter(p => p.iou > 0.3).length;
+
+  return {
+    topByScore,
+    maxIoUPerBox,
+    topOverlappingPairs,
+    summary: {
+      totalBeforeNMS: detectionsBeforeNMS.length,
+      totalAfterNMS: numAfterNMS,
+      numSuppressed: detectionsBeforeNMS.length - numAfterNMS,
+      numPairsWithIoUAbove05,
+      numPairsWithIoUAbove03,
+      nmsIouThreshold,
+      nmsMode,
+    },
+  };
+}
+
+/**
+ * Write nms_witness.json - proves NMS is working correctly
+ */
+export async function writeNMSWitness(
+  sessionId: string,
+  witnessData: NMSWitnessData
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('nms_witness.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const witnessPath = `${sessionDir}/nms_witness.json`;
+
+  await RNFS.mkdir(sessionDir);
+
+  // Log NMS witness summary
+  console.log('========================================');
+  console.log('[DebugArtifacts] NMS WITNESS:');
+  console.log(`[DebugArtifacts]   Before NMS: ${witnessData.summary.totalBeforeNMS}`);
+  console.log(`[DebugArtifacts]   After NMS: ${witnessData.summary.totalAfterNMS}`);
+  console.log(`[DebugArtifacts]   Suppressed: ${witnessData.summary.numSuppressed}`);
+  console.log(`[DebugArtifacts]   Pairs with IoU > 0.5: ${witnessData.summary.numPairsWithIoUAbove05}`);
+  console.log(`[DebugArtifacts]   Pairs with IoU > 0.3: ${witnessData.summary.numPairsWithIoUAbove03}`);
+  console.log(`[DebugArtifacts]   NMS threshold: ${witnessData.summary.nmsIouThreshold}`);
+  if (witnessData.topOverlappingPairs.length > 0) {
+    console.log(`[DebugArtifacts]   Top overlapping pair: IoU=${witnessData.topOverlappingPairs[0].iou.toFixed(4)}`);
+  }
+  console.log('========================================');
+
+  return writeJsonAtomic(witnessPath, witnessData, sessionDir);
+}
+
+// ============================================================================
+// MODEL-SPACE OVERLAY ARTIFACTS (AABB)
+// ============================================================================
+
+/**
+ * OBB detection in model space for overlay drawing
+ */
+export interface OBBOverlayDetection {
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+  angle: number;
+  score: number;
+}
+
+/**
+ * AABB box format for native overlay drawing
+ */
+export interface AABBBox {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+  score: number;
+}
+
+/**
+ * Convert OBB detection to AABB by computing bounding box of rotated corners
+ */
+function obbToAABB(det: OBBOverlayDetection): AABBBox {
+  const { cx, cy, width, height, angle, score } = det;
+  const hw = width / 2;
+  const hh = height / 2;
+  const cos = Math.cos(angle);
+  const sin = Math.sin(angle);
+
+  // Compute 4 corners
+  const corners = [
+    { x: cx + (-hw) * cos - (-hh) * sin, y: cy + (-hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (-hh) * sin, y: cy + (hw) * sin + (-hh) * cos },
+    { x: cx + (hw) * cos - (hh) * sin, y: cy + (hw) * sin + (hh) * cos },
+    { x: cx + (-hw) * cos - (hh) * sin, y: cy + (-hw) * sin + (hh) * cos },
+  ];
+
+  // Find AABB
+  const xs = corners.map(c => c.x);
+  const ys = corners.map(c => c.y);
+
+  return {
+    x1: Math.min(...xs),
+    y1: Math.min(...ys),
+    x2: Math.max(...xs),
+    y2: Math.max(...ys),
+    score,
+  };
+}
+
+/**
+ * Write model-space AABB overlay image using native module.
+ * Draws axis-aligned bounding boxes directly on the 640x640 letterbox preview.
+ *
+ * @param sessionId - Session ID
+ * @param sourceImagePath - Path to source image (letterbox_640_preview.jpg)
+ * @param detections - OBB detections in model space (640x640) - will be converted to AABB
+ * @param outputFilename - Output filename (e.g., 'overlay_modelspace_raw.jpg')
+ * @param topK - Maximum number of boxes to draw (default 200)
+ */
+export async function writeModelSpaceOverlay(
+  sessionId: string,
+  sourceImagePath: string,
+  detections: OBBOverlayDetection[],
+  outputFilename: string,
+  topK: number = 200
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact(outputFilename)) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const outputPath = `${sessionDir}/${outputFilename}`;
+
+  await RNFS.mkdir(sessionDir);
+
+  // Sort by score descending and take top K
+  const sorted = [...detections].sort((a, b) => b.score - a.score);
+  const topDetections = sorted.slice(0, topK);
+
+  // Check if native module is available
+  const { NativeModules } = require('react-native');
+  const { ImagePreprocessor } = NativeModules;
+
+  if (!ImagePreprocessor || !ImagePreprocessor.drawAABBOverlay) {
+    console.error(`[DebugArtifacts] Native drawAABBOverlay not available, cannot write ${outputFilename}`);
+    return {
+      success: false,
+      path: outputPath,
+      bytes: 0,
+      error: 'Native drawAABBOverlay not available',
+    };
+  }
+
+  try {
+    // Convert OBB detections to AABB boxes
+    const aabbBoxes = topDetections.map(d => obbToAABB(d));
+
+    console.log(`[DebugArtifacts] Drawing ${aabbBoxes.length} AABB boxes for ${outputFilename}`);
+
+    const result = await ImagePreprocessor.drawAABBOverlay(
+      sourceImagePath,
+      aabbBoxes,
+      outputPath
+    );
+
+    console.log(`[DebugArtifacts] Wrote ${outputFilename}: ${aabbBoxes.length} boxes, ${result.size} bytes`);
+
+    return {
+      success: true,
+      path: result.path,
+      bytes: result.size,
+    };
+  } catch (error: any) {
+    console.error(`[DebugArtifacts] Failed to write ${outputFilename}: ${error.message}`);
+    return {
+      success: false,
+      path: outputPath,
+      bytes: 0,
+      error: error.message,
+    };
+  }
+}
+
+/**
+ * Write both model-space overlay artifacts:
+ * - overlay_modelspace_raw.jpg - detections after decode, before NMS (topK=200)
+ * - overlay_modelspace_nms.jpg - detections after NMS (topK=200)
+ *
+ * @param sessionId - Session ID
+ * @param detectionsBeforeNMS - Detections in model space before NMS
+ * @param detectionsAfterNMS - Detections in model space after NMS
+ */
+export async function writeModelSpaceOverlays(
+  sessionId: string,
+  detectionsBeforeNMS: OBBOverlayDetection[],
+  detectionsAfterNMS: OBBOverlayDetection[]
+): Promise<{ rawOverlay: WriteResult; nmsOverlay: WriteResult }> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('overlay_modelspace')) {
+    return {
+      rawOverlay: SKIPPED_WRITE_RESULT,
+      nmsOverlay: SKIPPED_WRITE_RESULT,
+    };
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const letterboxPreviewPath = `${sessionDir}/letterbox_640_preview.jpg`;
+
+  // Check if letterbox preview exists
+  const letterboxExists = await RNFS.exists(letterboxPreviewPath);
+  if (!letterboxExists) {
+    console.error('[DebugArtifacts] FATAL: letterbox_640_preview.jpg not found, cannot create overlays');
+    return {
+      rawOverlay: { success: false, path: '', bytes: 0, error: 'letterbox_640_preview.jpg not found' },
+      nmsOverlay: { success: false, path: '', bytes: 0, error: 'letterbox_640_preview.jpg not found' },
+    };
+  }
+
+  console.log('========================================');
+  console.log('[DebugArtifacts] CREATING MODEL-SPACE OVERLAYS (AABB):');
+  console.log(`[DebugArtifacts]   Source: ${letterboxPreviewPath}`);
+  console.log(`[DebugArtifacts]   Detections before NMS: ${detectionsBeforeNMS.length}`);
+  console.log(`[DebugArtifacts]   Detections after NMS: ${detectionsAfterNMS.length}`);
+
+  // Write raw overlay (before NMS, topK=200)
+  const rawOverlay = await writeModelSpaceOverlay(
+    sessionId,
+    letterboxPreviewPath,
+    detectionsBeforeNMS,
+    'overlay_modelspace_raw.jpg',
+    200
+  );
+
+  // Write NMS overlay (after NMS, topK=200)
+  const nmsOverlay = await writeModelSpaceOverlay(
+    sessionId,
+    letterboxPreviewPath,
+    detectionsAfterNMS,
+    'overlay_modelspace_nms.jpg',
+    200
+  );
+
+  console.log(`[DebugArtifacts]   Raw overlay: ${rawOverlay.success ? '✓ ' + rawOverlay.bytes + ' bytes' : '✗ ' + rawOverlay.error}`);
+  console.log(`[DebugArtifacts]   NMS overlay: ${nmsOverlay.success ? '✓ ' + nmsOverlay.bytes + ' bytes' : '✗ ' + nmsOverlay.error}`);
+  console.log('========================================');
+
+  return { rawOverlay, nmsOverlay };
+}
+
+// ============================================================================
+// LETTERBOX GEOMETRY VALIDATION
+// ============================================================================
+
+/**
+ * Native truth from ImagePreprocessor.preprocessForTFLite
+ */
+export interface NativeLetterboxTruth {
+  decodedW: number;
+  decodedH: number;
+  modelSize: number;
+  scale: number;
+  newW: number;
+  newH: number;
+  padX: number;
+  padY: number;
+}
+
+/**
+ * Letterbox inconsistency artifact
+ */
+export interface LetterboxInconsistency {
+  reason: string;
+  nativeTruth: NativeLetterboxTruth;
+  computed: {
+    isLandscape: boolean;
+    expectedPaddingAxis: 'X' | 'Y';
+    actualPaddingAxis: 'X' | 'Y' | 'NONE';
+  };
+  fatal: true;
+}
+
+/**
+ * Validate letterbox geometry consistency.
+ * Returns null if valid, or inconsistency data if invalid.
+ *
+ * HARD INVARIANT:
+ * - If padY > 0 (vertical padding), image must be landscape (decodedW > decodedH)
+ * - If padX > 0 (horizontal padding), image must be portrait (decodedW < decodedH)
+ *
+ * Violation indicates the letterbox was computed incorrectly.
+ */
+export function validateLetterboxConsistency(
+  nativeTruth: NativeLetterboxTruth
+): LetterboxInconsistency | null {
+  const { decodedW, decodedH, padX, padY } = nativeTruth;
+
+  const isLandscape = decodedW > decodedH;
+  const isPortrait = decodedW < decodedH;
+  const isSquare = decodedW === decodedH;
+
+  // Determine actual padding axis
+  let actualPaddingAxis: 'X' | 'Y' | 'NONE' = 'NONE';
+  if (padY > 0) actualPaddingAxis = 'Y';
+  else if (padX > 0) actualPaddingAxis = 'X';
+
+  // Determine expected padding axis
+  // Landscape (W > H) → scale by H, pad X (left/right)
+  // Portrait (W < H) → scale by W, pad Y (top/bottom)
+  // Square → no padding needed
+  let expectedPaddingAxis: 'X' | 'Y' = isLandscape ? 'X' : 'Y';
+
+  // Check for inconsistency
+  let reason: string | null = null;
+
+  if (padY > 0 && isPortrait) {
+    // FATAL: padY > 0 means vertical padding, but portrait images should have horizontal padding
+    reason = `FATAL_LETTERBOX_INCONSISTENT: padY=${padY} > 0 but decodedW=${decodedW} < decodedH=${decodedH} (portrait). ` +
+             `Portrait images should have padX > 0, not padY.`;
+  } else if (padX > 0 && isLandscape) {
+    // FATAL: padX > 0 means horizontal padding, but landscape images should have vertical padding
+    reason = `FATAL_LETTERBOX_INCONSISTENT: padX=${padX} > 0 but decodedW=${decodedW} > decodedH=${decodedH} (landscape). ` +
+             `Landscape images should have padY > 0, not padX.`;
+  }
+
+  if (reason) {
+    return {
+      reason,
+      nativeTruth,
+      computed: {
+        isLandscape,
+        expectedPaddingAxis,
+        actualPaddingAxis,
+      },
+      fatal: true,
+    };
+  }
+
+  return null;
+}
+
+/**
+ * Write letterbox_inconsistent.json artifact when geometry validation fails
+ */
+export async function writeLetterboxInconsistent(
+  sessionId: string,
+  inconsistency: LetterboxInconsistency
+): Promise<WriteResult> {
+  const sessionDir = getSessionDir(sessionId);
+  const path = `${sessionDir}/letterbox_inconsistent.json`;
+
+  console.error('========================================');
+  console.error('[DebugArtifacts] FATAL LETTERBOX INCONSISTENCY:');
+  console.error(`[DebugArtifacts]   ${inconsistency.reason}`);
+  console.error(`[DebugArtifacts]   Native truth: ${JSON.stringify(inconsistency.nativeTruth)}`);
+  console.error('========================================');
+
+  return writeJsonAtomic(path, inconsistency, sessionDir);
+}
+
 /**
  * Convert Uint8Array to base64 string
  * Uses manual encoding since btoa is not available in React Native
@@ -1722,6 +2636,17 @@ export async function writeInputTensorArtifacts(
   previewWritten: boolean;
   errors: string[];
 }> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('input_tensor')) {
+    return {
+      statsPath: '',
+      previewPath: '',
+      statsWritten: false,
+      previewWritten: false,
+      errors: [],
+    };
+  }
+
   const errors: string[] = [];
 
   // Compute and write stats

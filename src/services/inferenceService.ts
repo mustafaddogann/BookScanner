@@ -11,6 +11,8 @@ import { Platform, NativeModules } from 'react-native';
 import { loadTensorflowModel, TensorflowModel } from 'react-native-fast-tflite';
 import RNFS from 'react-native-fs';
 
+const WRITE_RAW_OUTPUT_ARTIFACTS = false;
+
 // Native module for resolving iOS bundle paths
 const { ModelPathResolver } = NativeModules;
 
@@ -56,6 +58,8 @@ export interface PostprocessConfig {
   nmsMode: 'aabb' | 'obb';
   /** Minimum aspect ratio (w/h) for spine filtering */
   minAspect: number;
+  /** Minimum detection area as fraction of image area (filter tiny noise) */
+  minAreaRatio: number;
   /** Maximum detection area as fraction of image area */
   maxAreaRatio: number;
   /** Minimum score for final filtered output */
@@ -66,17 +70,18 @@ export interface PostprocessConfig {
 
 /**
  * Spine preset - optimized for book spine detection
- * NMS IoU 0.45 is aggressive enough to suppress overlapping boxes
- * minScore 0.85 filters out low-confidence detections
- * topK 50 caps maximum detections for stability
+ * Higher threshold (0.60) reduces false positives
+ * OBB NMS for accurate rotated box suppression
+ * Aspect ratio 3.0+ for spine-shaped detections
  */
 export const SPINE_PRESET: PostprocessConfig = {
-  thr: 0.50,           // Initial threshold (before NMS)
+  thr: 0.60,           // Higher threshold reduces noise
   nmsIou: 0.45,        // Lower IoU = more aggressive suppression
   nmsMode: 'obb',      // Use OBB NMS for rotated boxes
-  minAspect: 4.0,      // Spine aspect ratio (after directional check)
-  maxAreaRatio: 0.15,  // Max 15% of image area
-  minScore: 0.85,      // High confidence only
+  minAspect: 3.0,      // Spine aspect ratio (w/h after canonicalization)
+  minAreaRatio: 0.002, // Filter tiny noise (0.2% of image)
+  maxAreaRatio: 0.40,  // Max 40% of image area
+  minScore: 0.60,      // Match threshold for consistency
   topK: 50,            // Max 50 detections
 };
 
@@ -86,8 +91,9 @@ export const SPINE_PRESET: PostprocessConfig = {
 export const GENERAL_PRESET: PostprocessConfig = {
   thr: 0.50,
   nmsIou: 0.50,
-  nmsMode: 'aabb',
+  nmsMode: 'obb',
   minAspect: 1.0,
+  minAreaRatio: 0.001,
   maxAreaRatio: 0.50,
   minScore: 0.50,
   topK: 100,
@@ -98,12 +104,13 @@ export const GENERAL_PRESET: PostprocessConfig = {
  * Uses AABB NMS for speed but still aggressive IoU
  */
 export const LIVE_PREVIEW_PRESET: PostprocessConfig = {
-  thr: 0.50,
+  thr: 0.60,
   nmsIou: 0.45,        // Aggressive suppression
   nmsMode: 'aabb',     // AABB for speed in live preview
-  minAspect: 4.0,      // Spine aspect ratio
-  maxAreaRatio: 0.15,  // Max 15% of image area
-  minScore: 0.80,      // High confidence
+  minAspect: 3.0,      // Spine aspect ratio
+  minAreaRatio: 0.002,
+  maxAreaRatio: 0.40,  // Max 40% of image area
+  minScore: 0.60,      // High confidence
   topK: 30,            // Fewer for live preview
 };
 
@@ -112,12 +119,13 @@ export const LIVE_PREVIEW_PRESET: PostprocessConfig = {
  * Uses OBB NMS for accuracy
  */
 export const CAPTURE_PRESET: PostprocessConfig = {
-  thr: 0.50,
+  thr: 0.60,
   nmsIou: 0.45,
   nmsMode: 'obb',      // OBB NMS for accurate capture
-  minAspect: 4.0,      // Spine aspect ratio
-  maxAreaRatio: 0.15,  // Max 15% of image area
-  minScore: 0.85,      // High confidence only
+  minAspect: 3.0,      // Spine aspect ratio
+  minAreaRatio: 0.002,
+  maxAreaRatio: 0.40,  // Max 40% of image area
+  minScore: 0.60,      // High confidence
   topK: 50,
 };
 
@@ -131,6 +139,7 @@ export const DIAG_PRESET: PostprocessConfig = {
   nmsIou: 1.0,      // Effectively disable NMS (nothing overlaps at IoU=1.0)
   nmsMode: 'aabb',
   minAspect: 0.0,   // No aspect ratio filter
+  minAreaRatio: 0.0,
   maxAreaRatio: 1.0, // No area filter
   minScore: 0.0,    // No final score filter
 };
@@ -143,14 +152,15 @@ export const DIAG_PRESET: PostprocessConfig = {
 export const DEBUG_ALIGNMENT_PRESET: PostprocessConfig = {
   thr: 0.50,          // Normal threshold for confidence
   nmsIou: 0.45,       // Keep NMS to remove duplicates
-  nmsMode: 'aabb',    // Fast AABB NMS
+  nmsMode: 'obb',     // Use OBB NMS
   minAspect: 1.0,     // Disabled: allow any aspect ratio
+  minAreaRatio: 0.0,
   maxAreaRatio: 1.0,  // Disabled: allow any area
   minScore: 0.50,     // minScore = thr (no additional filter)
-  topK: 100,
+  topK: 200,
 };
 
-// Current active config (can be changed at runtime)
+// Current active config - use SPINE_PRESET for production
 let activeConfig: PostprocessConfig = SPINE_PRESET;
 
 // ============================================================================
@@ -182,7 +192,7 @@ export interface DecodeModeConfig {
 export const MODE_A: DecodeModeConfig = {
   mode: 'mode_a',
   channelMapping: { cx: 0, cy: 1, w: 2, h: 3, score: 4, angle: 5 },
-  description: 'Standard YOLOv8 OBB: [cx, cy, w, h, score, angle]',
+  description: 'YOLOv8 OBB (matches Python decode_one.py): [cx, cy, w, h, score, angle]',
 };
 
 export const MODE_B: DecodeModeConfig = {
@@ -191,11 +201,11 @@ export const MODE_B: DecodeModeConfig = {
   description: 'Alternative: [cx, cy, w, h, angleRad, rawScore(logit)]',
 };
 
-/** Currently active decode mode - default to MODE_B based on observed data */
-let activeDecodeMode: DecodeModeConfig = MODE_B;
+/** Currently active decode mode - MODE_A matches Python decode_one.py: [cx, cy, w, h, score, angle] */
+let activeDecodeMode: DecodeModeConfig = MODE_A;
 
-/** Whether to apply sigmoid to raw scores (required for logit outputs) */
-let applySigmoid: boolean = true;
+/** Whether to apply sigmoid to raw scores - DISABLED: model outputs probabilities, not logits */
+let applySigmoid: boolean = false;
 
 /**
  * Sigmoid function to convert logit to probability
@@ -546,12 +556,12 @@ export function getTransposedValue(
 
 /**
  * Analyze decode mode - OBSERVATION ONLY, does NOT change active mode
- * Mode B is hardcoded as the correct layout based on tensor analysis:
+ * Mode A is correct per Python decode_one.py:
  *   ch0-3: geometry (cx, cy, w, h)
- *   ch4: angle in radians (small values ~0)
- *   ch5: raw logit score (needs sigmoid)
+ *   ch4: score (probability, no sigmoid needed)
+ *   ch5: angle in radians
  *
- * This function computes comparison data for diagnostics but does NOT override Mode B.
+ * This function computes comparison data for diagnostics but does NOT override mode.
  */
 export function analyzeDecodeMode(
   rawOutput: number[],
@@ -562,26 +572,27 @@ export function analyzeDecodeMode(
   // Compute channel ranges for diagnostics
   const channelRanges = computeChannelRanges(rawOutput, shape);
 
-  // Log channel ranges to prove ch4=angle, ch5=score
+  // Log channel ranges - Mode A: ch4=score, ch5=angle
   console.log('========================================');
-  console.log('[InferenceService] CHANNEL ANALYSIS (proving Mode B is correct):');
-  console.log(`[InferenceService]   ch4 (angle): range [${channelRanges[4]?.min.toFixed(4)}, ${channelRanges[4]?.max.toFixed(4)}] radians`);
-  console.log(`[InferenceService]   ch5 (rawScore): range [${channelRanges[5]?.min.toFixed(4)}, ${channelRanges[5]?.max.toFixed(4)}] logits`);
-
-  // Compute sigmoid range for ch5
-  const ch5SigmoidMin = sigmoid(channelRanges[5]?.min ?? 0);
-  const ch5SigmoidMax = sigmoid(channelRanges[5]?.max ?? 0);
-  console.log(`[InferenceService]   ch5 (scoreProb): sigmoid range [${ch5SigmoidMin.toFixed(4)}, ${ch5SigmoidMax.toFixed(4)}]`);
+  console.log('[InferenceService] CHANNEL ANALYSIS:');
+  console.log(`[InferenceService]   Active mode: ${activeDecodeMode.mode}`);
+  console.log(`[InferenceService]   Score channel: ch${activeDecodeMode.channelMapping.score}`);
+  console.log(`[InferenceService]   Angle channel: ch${activeDecodeMode.channelMapping.angle}`);
+  console.log(`[InferenceService]   Sigmoid applied: ${applySigmoid}`);
+  console.log(`[InferenceService]   ch4 range: [${channelRanges[4]?.min.toFixed(4)}, ${channelRanges[4]?.max.toFixed(4)}]`);
+  console.log(`[InferenceService]   ch5 range: [${channelRanges[5]?.min.toFixed(4)}, ${channelRanges[5]?.max.toFixed(4)}]`);
   console.log('========================================');
 
-  // Count candidates for comparison (diagnostic only - does not affect mode selection)
-  const modeAcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_A, t));
-  const modeBcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_B, t));
+  // Count candidates using CORRECT sigmoid setting for each mode:
+  // - Mode A: ch4=score (probability), no sigmoid needed
+  // - Mode B: ch5=score (logit), needs sigmoid
+  const modeAcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_A, t, false)); // Mode A: no sigmoid
+  const modeBcounts = thresholds.map(t => countCandidatesForMode(rawOutput, shape, MODE_B, t, true));  // Mode B: with sigmoid
 
   const modeAScore = modeAcounts.reduce((a, b) => a + b, 0);
   const modeBScore = modeBcounts.reduce((a, b) => a + b, 0);
 
-  // NOTE: We do NOT call setDecodeMode here - Mode B is hardcoded as correct
+  // NOTE: We do NOT call setDecodeMode here - Mode A is correct per Python decode_one.py
   const comparison: DecodeModeComparisonResult = {
     modeA: {
       mode: 'mode_a',
@@ -593,30 +604,30 @@ export function analyzeDecodeMode(
       counts: Object.fromEntries(thresholds.map((t, i) => [t.toString(), modeBcounts[i]])),
       totalScore: modeBScore,
     },
-    chosenMode: 'mode_b', // Always Mode B - hardcoded based on tensor analysis
-    reason: 'Mode B hardcoded: ch4=angle (radians), ch5=rawScore (logit→sigmoid)',
+    chosenMode: 'mode_a', // Mode A per Python decode_one.py
+    reason: 'Mode A matches Python decode_one.py: ch4=score (probability), ch5=angle (radians)',
   };
 
-  console.log(`[InferenceService] Mode comparison (for diagnostics only):`);
-  console.log(`[InferenceService]   Mode A (ch4=score): counts at thr ${thresholds.join('/')}: ${modeAcounts.join('/')}`);
-  console.log(`[InferenceService]   Mode B (ch5=score): counts at thr ${thresholds.join('/')}: ${modeBcounts.join('/')}`);
-  console.log(`[InferenceService]   Active mode: ${activeDecodeMode.mode} (NOT changed by analysis)`);
+  console.log(`[InferenceService] Mode comparison (diagnostics):`);
+  console.log(`[InferenceService]   Mode A (ch4=score, no sigmoid): counts at thr ${thresholds.join('/')}: ${modeAcounts.join('/')}`);
+  console.log(`[InferenceService]   Mode B (ch5=score, sigmoid): counts at thr ${thresholds.join('/')}: ${modeBcounts.join('/')}`);
+  console.log(`[InferenceService]   Active: ${activeDecodeMode.mode}, sigmoid=${applySigmoid}`);
 
   return { comparison, channelRanges };
 }
 
 /**
- * @deprecated Use analyzeDecodeMode instead - this function incorrectly overrides mode
+ * @deprecated Use analyzeDecodeMode instead
  * Kept for backward compatibility but now just calls analyzeDecodeMode
  */
 export function autoDetectDecodeMode(
   rawOutput: number[],
   shape: number[]
 ): { chosenMode: DecodeModeConfig; comparison: DecodeModeComparisonResult } {
-  console.warn('[InferenceService] autoDetectDecodeMode is deprecated - Mode B is now hardcoded');
+  console.warn('[InferenceService] autoDetectDecodeMode is deprecated - use MODE_A (matches Python)');
   const { comparison } = analyzeDecodeMode(rawOutput, shape);
-  // Return Mode B as the "chosen" mode - we no longer auto-detect
-  return { chosenMode: MODE_B, comparison };
+  // Return Mode A as the "chosen" mode - matches Python decode_one.py
+  return { chosenMode: MODE_A, comparison };
 }
 
 /**
@@ -661,6 +672,7 @@ export interface GeomFilterStats {
   /** Thresholds used */
   thresholds: {
     minAspect: number;
+    minAreaRatio: number;
     maxAreaRatio: number;
     minScore: number;
     imageArea: number;
@@ -795,6 +807,7 @@ export function applyGeometricFiltersInstrumented(
     sampleRejected: [],
     thresholds: {
       minAspect: config.minAspect,
+      minAreaRatio: config.minAreaRatio ?? 0,
       maxAreaRatio: config.maxAreaRatio,
       minScore: config.minScore,
       imageArea: modelArea,
@@ -849,12 +862,30 @@ export function applyGeometricFiltersInstrumented(
     // Area ratio filter (in model space)
     const detArea = det.width * det.height;
     const areaRatio = detArea / modelArea;
+
+    // Min area filter (reject tiny noise)
+    const minArea = config.minAreaRatio ?? 0;
+    if (areaRatio < minArea) {
+      stats.rejected.byArea++;
+      if (stats.sampleRejected.length < MAX_SAMPLES) {
+        stats.sampleRejected.push({
+          detection: det,
+          reason: `area ${(areaRatio * 100).toFixed(3)}% < ${(minArea * 100).toFixed(2)}% (too small)`,
+          computedAspect: aspectRatio,
+          computedAreaRatio: areaRatio,
+          angleDeg,
+        });
+      }
+      continue;
+    }
+
+    // Max area filter (reject oversized)
     if (areaRatio > config.maxAreaRatio) {
       stats.rejected.byArea++;
       if (stats.sampleRejected.length < MAX_SAMPLES) {
         stats.sampleRejected.push({
           detection: det,
-          reason: `area ${(areaRatio * 100).toFixed(2)}% > ${(config.maxAreaRatio * 100).toFixed(1)}%`,
+          reason: `area ${(areaRatio * 100).toFixed(2)}% > ${(config.maxAreaRatio * 100).toFixed(1)}% (too large)`,
           computedAspect: aspectRatio,
           computedAreaRatio: areaRatio,
           angleDeg,
@@ -905,8 +936,8 @@ export function applyGeometricFiltersInstrumented(
   console.log('========================================');
   console.log('[GeomFilter] REJECTION HISTOGRAM:');
   console.log(`  Input: ${stats.inputCount}, Output: ${stats.outputCount}`);
-  console.log(`  byAspect: ${stats.rejected.byAspect} (minAspect=${config.minAspect}, uses w/h post-canonicalization)`);
-  console.log(`  byArea: ${stats.rejected.byArea} (maxAreaRatio=${config.maxAreaRatio})`);
+  console.log(`  byAspect: ${stats.rejected.byAspect} (minAspect=${config.minAspect})`);
+  console.log(`  byArea: ${stats.rejected.byArea} (minAreaRatio=${config.minAreaRatio ?? 0}, maxAreaRatio=${config.maxAreaRatio})`);
   console.log(`  byBounds: ${stats.rejected.byBounds}`);
   console.log(`  byScore: ${stats.rejected.byScore} (minScore=${config.minScore})`);
   console.log(`  byNaN: ${stats.rejected.byNaN}`);
@@ -943,6 +974,7 @@ let model: TensorflowModel | null = null;
 let modelIOContract: ModelIOContract | null = null;
 let isModelInspected = false;
 let isUsingMockModel = false;
+let modelWarmupComplete = false;
 
 // ============================================================================
 // INVOKE COUNTER - Track model.runSync calls per capture
@@ -1283,6 +1315,76 @@ function createMockModel(): TensorflowModel {
  */
 export function isModelReady(): boolean {
   return model !== null && isModelInspected && !isUsingMockModel;
+}
+
+/**
+ * Check if model has been warmed up
+ */
+export function isModelWarmedUp(): boolean {
+  return modelWarmupComplete;
+}
+
+/**
+ * Warm up the model by running a dummy inference
+ * Call this at app startup to avoid first-scan latency
+ *
+ * This performs:
+ * 1. Model loading (if not already loaded)
+ * 2. Model inspection (validates IO contract)
+ * 3. Dummy inference run (warms up TFLite interpreter)
+ *
+ * @returns Warmup result with success status and duration
+ */
+export async function warmupModel(): Promise<{ success: boolean; durationMs: number }> {
+  const startTime = Date.now();
+
+  if (modelWarmupComplete) {
+    console.log('[InferenceService] Model already warmed up');
+    return { success: true, durationMs: 0 };
+  }
+
+  console.log('[InferenceService] Starting model warmup...');
+
+  try {
+    // Step 1: Ensure model is loaded
+    if (!model) {
+      console.log('[InferenceService] Warmup: Loading model...');
+      await loadModel();
+    }
+
+    // Step 2: Ensure model is inspected
+    if (!isModelInspected) {
+      console.log('[InferenceService] Warmup: Inspecting model...');
+      await inspectModel();
+    }
+
+    // Step 3: Run dummy inference to warm up interpreter
+    // This primes the TFLite delegate and GPU (if used)
+    console.log('[InferenceService] Warmup: Running dummy inference...');
+    const dummyTensor = new Float32Array(640 * 640 * 3);
+    // Fill with neutral gray (114/255) to mimic letterbox padding
+    dummyTensor.fill(0.447);
+
+    const outputs = model!.runSync([dummyTensor]);
+
+    // Verify we got output
+    if (!outputs || outputs.length === 0) {
+      throw new Error('Warmup inference produced no output');
+    }
+
+    modelWarmupComplete = true;
+    const durationMs = Date.now() - startTime;
+
+    console.log(`[InferenceService] Model warmup complete in ${durationMs.toFixed(1)}ms`);
+    console.log('[InferenceService] First real inference will be fast');
+
+    return { success: true, durationMs };
+
+  } catch (error: any) {
+    const durationMs = Date.now() - startTime;
+    console.error('[InferenceService] Model warmup failed:', error.message);
+    return { success: false, durationMs };
+  }
 }
 
 /**
@@ -1669,17 +1771,16 @@ export function applyOBBNMS(
 
 /**
  * Decode raw model output to OBB detections
- * Uses activeDecodeMode's channel mapping (auto-detected or explicitly set)
+ * Uses activeDecodeMode's channel mapping
  *
- * Mode B (VERIFIED for this model):
+ * Mode A (matches Python decode_one.py):
  * - ch0 = cx (center x in model space 0-640)
  * - ch1 = cy (center y in model space 0-640)
  * - ch2 = w (width)
  * - ch3 = h (height)
- * - ch4 = angleRad (radians)
- * - ch5 = rawScore (logit, needs sigmoid)
+ * - ch4 = score (probability, no sigmoid needed)
+ * - ch5 = angle (radians)
  *
- * scoreProb = sigmoid(rawScore) to get probability [0,1]
  * Canonicalization is applied to ensure w >= h and angle in [-pi/2, pi/2].
  */
 export function decodeModelOutput(
@@ -1795,9 +1896,10 @@ export async function runInferenceRaw(
   console.log(`[InferenceService] Invoke #${currentInvokeNum}: invokeMs=${invokeMs}, outputReadMs=${outputReadMs}`);
 
   // Write raw output for debugging
-  if (sessionId) {
-    await writeRawModelOutput(sessionId, rawOutput);
-  }
+  if (sessionId && WRITE_RAW_OUTPUT_ARTIFACTS) {
+  await writeRawModelOutput(sessionId, rawOutput);
+}
+
 
   // Return with timing info
   return {
@@ -1816,11 +1918,21 @@ export interface PostprocessResult {
   detectionsModelSpace: OBBModelSpace[];
   /** Pipeline statistics */
   stats: PostprocessStats;
+  /** Detections after decode, before NMS (for overlay_modelspace_raw.jpg) */
+  detectionsAfterDecode?: OBBModelSpace[];
+  /** Detections after NMS, before geom filters (for overlay_modelspace_nms.jpg) */
+  detectionsAfterNMS?: OBBModelSpace[];
 }
 
 /**
  * Run full postprocess pipeline on raw model output
  * Matches Python: tools/decode_one.py main pipeline
+ *
+ * STAGE COUNTS ARE LOGGED AT EACH STEP:
+ * 1. Decode: 8400 anchors → numAfterThr (above threshold)
+ * 2. NMS: numAfterThr → numAfterNms (non-suppressed)
+ * 3. Geom: numAfterNms → numAfterGeom (passes geometric filters)
+ * 4. TopK: numAfterGeom → final (limited if topK set)
  */
 export function runPostprocess(
   rawOutput: Float32Array | number[],
@@ -1832,13 +1944,38 @@ export function runPostprocess(
 
   // Step 1: Decode (includes canonicalization and initial threshold)
   const startDecode = Date.now();
-  const decoded = decodeModelOutput(rawOutput, outputShape, config);
+  let decoded = decodeModelOutput(rawOutput, outputShape, config);
   const decodeTime = Date.now() - startDecode;
+
+  // STAGE 1 COUNT: Save decoded detections (before NMS) for overlay
+  const detectionsAfterDecode = [...decoded]; // Copy for artifacts
+  console.log(`[Postprocess] STAGE 1 - Decode: ${decoded.length} detections (thr=${config.thr})`);
+
+  // ================================================================
+  // PRE-NMS SAFEGUARD: Cap candidates to prevent O(n²) explosion
+  // NMS on 7000+ boxes = 50M+ comparisons = iOS memory kill
+  // ================================================================
+  const PRE_NMS_MAX_CANDIDATES = 500;
+  if (decoded.length > PRE_NMS_MAX_CANDIDATES) {
+    console.warn(`[Postprocess] ⚠️  PRE-NMS CAP: ${decoded.length} candidates exceeds limit ${PRE_NMS_MAX_CANDIDATES}`);
+    console.warn(`[Postprocess]    This usually indicates score distribution collapse (raw logits ≈ 0)`);
+    console.warn(`[Postprocess]    Taking top ${PRE_NMS_MAX_CANDIDATES} by score to prevent memory explosion`);
+
+    // Sort by score descending and take top candidates
+    decoded.sort((a, b) => b.score - a.score);
+    decoded = decoded.slice(0, PRE_NMS_MAX_CANDIDATES);
+
+    console.log(`[Postprocess]    After cap: ${decoded.length} candidates (top score: ${decoded[0]?.score.toFixed(4)})`);
+  }
 
   // Step 2: NMS
   const startNms = Date.now();
   const afterNms = applyNMS(decoded, config);
   const nmsTime = Date.now() - startNms;
+
+  // STAGE 2 COUNT: Save NMS detections for overlay
+  const detectionsAfterNMS = [...afterNms]; // Copy for artifacts
+  console.log(`[Postprocess] STAGE 2 - NMS: ${afterNms.length} detections (iou=${config.nmsIou}, mode=${config.nmsMode})`);
 
   // Step 3: Geometric filters (instrumented)
   const startGeom = Date.now();
@@ -1851,12 +1988,15 @@ export function runPostprocess(
   let afterGeom = afterGeomRaw;
   const geomTime = Date.now() - startGeom;
 
+  // STAGE 3 COUNT
+  console.log(`[Postprocess] STAGE 3 - Geom: ${afterGeom.length} detections (minAspect=${config.minAspect}, minScore=${config.minScore})`);
+
   // Step 4: TopK limit (if configured)
   const numBeforeTopK = afterGeom.length;
   if (config.topK && config.topK > 0 && afterGeom.length > config.topK) {
     // Already sorted by score from NMS, just take top K
     afterGeom = afterGeom.slice(0, config.topK);
-    console.log(`[InferenceService] TopK: ${numBeforeTopK} -> ${afterGeom.length} (limit ${config.topK})`);
+    console.log(`[Postprocess] STAGE 4 - TopK: ${numBeforeTopK} -> ${afterGeom.length} (limit ${config.topK})`);
   }
 
   const totalTime = Date.now() - startTotal;
@@ -1881,7 +2021,17 @@ export function runPostprocess(
     },
   };
 
-  return { detections, detectionsModelSpace: afterGeom, stats };
+  // Log final count
+  console.log(`[Postprocess] FINAL: ${detections.length} detections mapped to original space`);
+
+  return {
+    detections,
+    detectionsModelSpace: afterGeom,
+    stats,
+    // Include intermediate stages for overlay artifacts
+    detectionsAfterDecode,
+    detectionsAfterNMS,
+  };
 }
 
 /**
@@ -2038,7 +2188,7 @@ export async function runThrottledInference(
 export async function runThrottledInferenceWithStats(
   inputTensor: Float32Array,
   letterbox: LetterboxParams,
-  config: PostprocessConfig = LIVE_PREVIEW_PRESET,
+  config: PostprocessConfig = DEBUG_ALIGNMENT_PRESET,
   sessionId?: string
 ): Promise<PostprocessResult | null> {
   if (!canRunInference()) {
@@ -2080,7 +2230,8 @@ export async function runCaptureInference(
   resetThrottle();
 
   // Run with capture preset (can enable OBB NMS if needed)
-  return runInferenceWithStats(inputTensor, letterbox, CAPTURE_PRESET, sessionId);
+ return runInferenceWithStats(inputTensor, letterbox, DEBUG_ALIGNMENT_PRESET, sessionId);
+
 }
 
 /**
@@ -2412,7 +2563,7 @@ export function computeTensorStats(
 
 /**
  * Extract sample anchors from raw model output for debugging
- * Uses activeDecodeMode channel mapping (Mode B: ch5=score, ch4=angle)
+ * Uses activeDecodeMode channel mapping (Mode A: ch4=score, ch5=angle)
  */
 export function extractRawSampleAnchors(
   rawOutput: number[],
@@ -2512,7 +2663,7 @@ export function getDecodeModeComparison(): DecodeModeComparison {
 
 /**
  * Diagnostic decode result - for proving candidates exist
- * Mode B layout: ch4=angle(rad), ch5=rawScore(logit)
+ * Mode A layout (matches Python): ch4=score (probability), ch5=angle (radians)
  */
 export interface DiagDecodeResult {
   diagDecodedCount: number;
@@ -2529,9 +2680,9 @@ export interface DiagDecodeResult {
   thresholdUsed: number;
   sigmoidApplied: boolean;
   totalAnchors: number;
-  rawScoreRange: { min: number; max: number };   // ch5 raw logits
-  scoreProbRange: { min: number; max: number };  // ch5 after sigmoid
-  angleRange: { min: number; max: number };      // ch4 in radians
+  rawScoreRange: { min: number; max: number };   // Score channel raw values
+  scoreProbRange: { min: number; max: number };  // Score channel (with sigmoid if enabled)
+  angleRange: { min: number; max: number };      // Angle channel in radians
 }
 
 /**
@@ -2539,10 +2690,10 @@ export interface DiagDecodeResult {
  * Returns count and top 20 scores with raw 6-float data
  * Does NOT affect normal pipeline - only for debugging
  *
- * Mode B layout (hardcoded):
+ * Mode A layout (matches Python decode_one.py):
  *   ch0-3: geometry (cx, cy, w, h)
- *   ch4: angle in radians
- *   ch5: raw logit score (sigmoid applied to get probability)
+ *   ch4: score (probability, no sigmoid)
+ *   ch5: angle in radians
  */
 export function runDiagnosticDecode(
   rawOutput: number[],
@@ -2568,7 +2719,7 @@ export function runDiagnosticDecode(
 
   const numAnchors = shape[2];
 
-  // Compute raw score range from ch5 (score channel)
+  // Compute raw score range from score channel
   let rawMin = Infinity, rawMax = -Infinity;
   for (let i = 0; i < numAnchors; i++) {
     const rawScore = rawOutput[chMap.score * numAnchors + i];
@@ -2576,7 +2727,7 @@ export function runDiagnosticDecode(
     if (rawScore > rawMax) rawMax = rawScore;
   }
 
-  // Compute angle range from ch4 (angle channel)
+  // Compute angle range from angle channel
   let angleMin = Infinity, angleMax = -Infinity;
   for (let i = 0; i < numAnchors; i++) {
     const angle = rawOutput[chMap.angle * numAnchors + i];
@@ -2584,7 +2735,7 @@ export function runDiagnosticDecode(
     if (angle > angleMax) angleMax = angle;
   }
 
-  // Collect all anchors above DIAG threshold (0.01) using scoreProb from ch5
+  // Collect all anchors above DIAG threshold (0.01) using score probability
   const candidates: Array<{
     index: number;
     rawScore: number;
@@ -2610,8 +2761,8 @@ export function runDiagnosticDecode(
           rawOutput[1 * numAnchors + i], // ch1 = cy
           rawOutput[2 * numAnchors + i], // ch2 = w
           rawOutput[3 * numAnchors + i], // ch3 = h
-          rawOutput[4 * numAnchors + i], // ch4 = angle (radians)
-          rawOutput[5 * numAnchors + i], // ch5 = rawScore (logit)
+          rawOutput[4 * numAnchors + i], // ch4 = score (probability)
+          rawOutput[5 * numAnchors + i], // ch5 = angle (radians)
         ],
       });
     }
@@ -2628,14 +2779,13 @@ export function runDiagnosticDecode(
   const top20 = candidates.slice(0, 20);
 
   console.log('========================================');
-  console.log('[InferenceService] DIAGNOSTIC DECODE (Mode B: ch4=angle, ch5=score)');
+  console.log('[InferenceService] DIAGNOSTIC DECODE (Mode A: ch4=score, ch5=angle)');
   console.log(`[InferenceService]   Active mode: ${activeDecodeMode.mode}`);
   console.log(`[InferenceService]   Score channel: ${chMap.score}, Angle channel: ${chMap.angle}`);
   console.log(`[InferenceService]   Sigmoid applied: ${applySigmoid}`);
-  console.log(`[InferenceService]   Threshold (scoreProb): ${DIAG_PRESET.thr}`);
-  console.log(`[InferenceService]   ch5 rawScore range: [${rawMin.toFixed(4)}, ${rawMax.toFixed(4)}] logits`);
-  console.log(`[InferenceService]   ch5 scoreProb range: [${sigmoid(rawMin).toFixed(4)}, ${sigmoid(rawMax).toFixed(4)}] (sigmoid)`);
-  console.log(`[InferenceService]   ch4 angle range: [${angleMin.toFixed(4)}, ${angleMax.toFixed(4)}] radians`);
+  console.log(`[InferenceService]   Threshold (score): ${DIAG_PRESET.thr}`);
+  console.log(`[InferenceService]   Score (ch${chMap.score}) range: [${rawMin.toFixed(4)}, ${rawMax.toFixed(4)}]`);
+  console.log(`[InferenceService]   Angle (ch${chMap.angle}) range: [${angleMin.toFixed(4)}, ${angleMax.toFixed(4)}] radians`);
   console.log(`[InferenceService]   Candidates above ${DIAG_PRESET.thr}: ${candidates.length} / ${numAnchors}`);
   if (top20.length > 0) {
     console.log(`[InferenceService]   Top 5 scoreProb: ${top20.slice(0, 5).map(c => c.scoreProb.toFixed(4)).join(', ')}`);

@@ -12,7 +12,7 @@
  * 4. All mapping operations use this letterbox
  */
 
-import type { LetterboxParams } from '../types';
+import type { LetterboxParams, SerializedFrameGeo } from '../types';
 
 /**
  * Frame geometry - single source of truth for all coordinate mapping
@@ -441,7 +441,7 @@ export function runCoordinateRoundtripTest(
 /**
  * Serialize FrameGeo for debug artifacts
  */
-export function serializeFrameGeo(frameGeo: FrameGeo): object {
+export function serializeFrameGeo(frameGeo: FrameGeo): SerializedFrameGeo {
   return {
     normalizedUri: frameGeo.normalizedUri,
     pixelW: frameGeo.pixelW,

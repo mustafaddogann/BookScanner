@@ -88,9 +88,11 @@ export interface RectifyResult {
   paddingUsed: number;
   detectionIndex: number;
   /** Method used for rectification */
-  rectificationMethod?: 'native_opencv' | 'backend' | 'fallback_copy';
+  rectificationMethod?: 'native_opencv' | 'backend' | 'fallback_copy' | 'skipped';
   /** If fallback was used, this is the AABB region that SHOULD have been cropped */
   fallbackAABB?: { x: number; y: number; width: number; height: number };
+  /** Reason why rectification was skipped (only when rectificationMethod='skipped') */
+  skippedReason?: 'native_opencv_unavailable' | 'native_opencv_failed';
 }
 
 /**
@@ -317,3 +319,110 @@ export type RootStackParamList = {
   };
   Debug: undefined;
 };
+
+// ============================================================================
+// Pipeline Mode & ImageSource Types (Architecture Upgrade)
+// ============================================================================
+
+/**
+ * Pipeline execution mode
+ * - 'preview': Fast path for live camera preview (no artifacts, AABB NMS)
+ * - 'capture': Full pipeline for final captures (all artifacts, OBB NMS)
+ */
+export type PipelineMode = 'preview' | 'capture';
+
+/**
+ * Image source type discriminator
+ */
+export type ImageSourceType = 'camera' | 'fixture' | 'replay';
+
+/**
+ * Base metadata common to all image sources
+ */
+export interface ImageSourceMetadata {
+  sourceType: ImageSourceType;
+  uri: string;
+  width: number;
+  height: number;
+  orientation: number;
+  timestamp: number;
+}
+
+/**
+ * Camera-specific metadata
+ */
+export interface CameraSourceMetadata extends ImageSourceMetadata {
+  sourceType: 'camera';
+  deviceId?: string;
+  flash?: boolean;
+}
+
+/**
+ * Fixture-specific metadata
+ */
+export interface FixtureSourceMetadata extends ImageSourceMetadata {
+  sourceType: 'fixture';
+  fixtureId: string;
+  fixtureName: string;
+  groundTruthPath?: string;
+}
+
+/**
+ * Replay-specific metadata
+ */
+export interface ReplaySourceMetadata extends ImageSourceMetadata {
+  sourceType: 'replay';
+  originalSessionId: string;
+  tensorPath: string;
+  skipPreprocessing: boolean;
+}
+
+/**
+ * Pipeline options controlling execution behavior
+ */
+export interface PipelineOptions {
+  /** Pipeline mode: 'preview' or 'capture' */
+  mode: PipelineMode;
+  /** Whether to write debug artifacts to disk */
+  writeArtifacts: boolean;
+  /** Skip the rectification step */
+  skipRectification: boolean;
+  /** Save preprocessed tensor for replay capability */
+  saveTensorForReplay: boolean;
+  /** Override the auto-generated session ID */
+  sessionIdOverride?: string;
+}
+
+/**
+ * Native letterbox truth values from ImagePreprocessor
+ * These are the actual values used during native preprocessing
+ */
+export interface NativeLetterboxTruth {
+  decodedW: number;
+  decodedH: number;
+  modelSize: number;
+  scale: number;
+  newW: number;
+  newH: number;
+  padX: number;
+  padY: number;
+}
+
+/**
+ * Saved tensor metadata for replay capability
+ * Stored as {sessionDir}/saved_tensor.json
+ */
+export interface SavedTensor {
+  /** Session ID this tensor belongs to */
+  sessionId: string;
+  /** Absolute path to the saved tensor binary file */
+  tensorPath: string;
+  /** Tensor shape [1, 640, 640, 3] */
+  tensorShape: number[];
+  /** Letterbox parameters used during preprocessing */
+  letterboxParams: LetterboxParams;
+  /** Native preprocessing truth values */
+  nativeTruth: NativeLetterboxTruth;
+  /** ISO timestamp when tensor was saved */
+  createdAt: string;
+}

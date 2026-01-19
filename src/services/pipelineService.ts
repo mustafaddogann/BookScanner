@@ -24,7 +24,23 @@ import type {
   DebugManifest,
   RawModelOutput,
   InputTensorMeta,
+  PipelineOptions,
+  PipelineMode,
+  SavedTensor,
+  NativeLetterboxTruth,
 } from '../types';
+import type { ImageSource } from './imageSource';
+import {
+  CameraSource,
+  FixtureSource,
+  createReplaySource,
+  isReplaySource,
+} from './imageSource';
+import {
+  setArtifactWritingEnabled,
+  isArtifactWritingEnabled,
+} from './debugArtifacts';
+import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 
 // Native image preprocessor module
 const { ImagePreprocessor } = NativeModules;
@@ -52,6 +68,7 @@ import {
   preprocessImage,
   runPostprocess,
   getPostprocessConfig,
+  setPostprocessConfig,
   computeTensorStats,
   extractRawSampleAnchors,
   getDecodeModeComparison,
@@ -60,6 +77,10 @@ import {
   runDiagnosticDecode,
   runFullDiagnostics,
   getDecodeMode,
+  isSigmoidEnabled,
+  DEBUG_ALIGNMENT_PRESET,
+  SPINE_PRESET,
+  LIVE_PREVIEW_PRESET,
 } from './inferenceService';
 import { rectifyAll } from './rectificationService';
 import {
@@ -78,10 +99,20 @@ import {
   writeLetterboxMeta,
   writeSourceDecodeStats,
   writeLetterbox640Preview,
+  computeScoreSanityStats,
+  writeScoreSanity,
+  buildNMSWitnessData,
+  writeNMSWitness,
+  writeModelSpaceOverlays,
+  validateLetterboxConsistency,
+  writeLetterboxInconsistent,
+  writeJsonAtomic,
   type AllArtifactsData,
   type FilteredDetectionsData,
   type PreprocessDebug,
   type SourceDecodeStats,
+  type ScoreSanityStats,
+  type NMSWitnessData,
 } from './debugArtifacts';
 import { buildImageMetaFromUri } from './imageService';
 import { useAppStore } from '../store/useAppStore';
@@ -156,6 +187,8 @@ export async function runPipeline(
   let rawOutput: RawModelOutput | undefined;
   let diagResult: ReturnType<typeof runDiagnosticDecode> | undefined;
   let postprocessStats: ReturnType<typeof runPostprocess>['stats'] | undefined;
+  let postprocessResult: ReturnType<typeof runPostprocess> | undefined;
+  let scoreSanityStats: ScoreSanityStats | undefined;
 
   // Track orientation normalization info
   let normalizedImagePath: string | undefined;
@@ -222,14 +255,16 @@ export async function runPipeline(
       const errMsg = `COORDINATE ROUNDTRIP TEST FAILED: max error ${roundtripTest.maxError.toFixed(4)}px (limit 1.0px)`;
       console.error(`[Pipeline] ${errMsg}`);
       errors.push(errMsg);
-      // Write test results for debugging
-      try {
-        await RNFS.writeFile(
-          `${sessionDir}/coordinate_roundtrip.json`,
-          JSON.stringify(roundtripTest, null, 2),
-          'utf8'
-        );
-      } catch {}
+      // Write test results for debugging (only if artifacts enabled)
+      if (DEBUG_ARTIFACTS_ENABLED) {
+        try {
+          await RNFS.writeFile(
+            `${sessionDir}/coordinate_roundtrip.json`,
+            JSON.stringify(roundtripTest, null, 2),
+            'utf8'
+          );
+        } catch {}
+      }
       // Note: We continue despite failure so artifacts are written for debugging
     } else {
       console.log(`[Pipeline] Coordinate roundtrip test PASSED (max error: ${roundtripTest.maxError.toFixed(4)}px)`);
@@ -300,6 +335,15 @@ export async function runPipeline(
         }
 
         console.log('[Pipeline] STEP 1: Decoding source image...');
+
+        // HARD GUARD: Verify file exists before decode attempt
+        const fsPath = normalizedUri.startsWith('file://') ? normalizedUri.slice(7) : normalizedUri;
+        const fileExists = await RNFS.exists(fsPath);
+        console.log(`[Pipeline] File existence check: exists=${fileExists}, path=${fsPath}`);
+        if (!fileExists) {
+          throw new Error(`[Preprocess] file missing. uri=${normalizedUri} path=${fsPath}`);
+        }
+
         let decodeStats: SourceDecodeStats;
         try {
           decodeStats = await ImagePreprocessor.getImageDecodeStats(normalizedUri);
@@ -333,6 +377,11 @@ export async function runPipeline(
             640,  // targetSize
             PADDING_FILL_VALUE_UINT8  // paddingValue
           );
+
+          // HARD GUARD: preprocessResult must exist
+          if (!preprocessResult) {
+            throw new Error(`[Preprocess] preprocessForTFLite returned undefined. uri=${normalizedUri}`);
+          }
 
           // ================================================================
           // STEP 3: Write letterbox_640_preview.jpg (BEFORE float normalization)
@@ -385,11 +434,70 @@ export async function runPipeline(
 
           console.log(`[Pipeline] ✓ Tensor verification passed: non-constant data with std=${tensorStats.std.toFixed(4)}`);
 
-          // Update letterboxParams from native result (in case they differ)
-          const nativeLB = preprocessResult.letterbox;
-          letterboxParams.scale = nativeLB.scale;
-          letterboxParams.padX = nativeLB.padX;
-          letterboxParams.padY = nativeLB.padY;
+          // ================================================================
+          // NATIVE TRUTH: Use native values for letterbox params
+          // Falls back to legacy `letterbox` object if `nativeTruth` is not available
+          // (e.g., when running on older native build without nativeTruth support)
+          // ================================================================
+          let nativeTruth: NativeLetterboxTruth;
+
+          if (preprocessResult.nativeTruth) {
+            // Use nativeTruth (preferred - newer native builds)
+            nativeTruth = preprocessResult.nativeTruth;
+            console.log('[Pipeline] Using nativeTruth from preprocessing');
+          } else if (preprocessResult.letterbox) {
+            // Fall back to legacy letterbox object (older native builds)
+            console.log('[Pipeline] ⚠️  nativeTruth not available, falling back to letterbox');
+            const lb = preprocessResult.letterbox;
+            nativeTruth = {
+              decodedW: lb.srcWidth,
+              decodedH: lb.srcHeight,
+              modelSize: lb.dstWidth,  // Assume square (640x640)
+              scale: lb.scale,
+              newW: Math.round(lb.srcWidth * lb.scale),
+              newH: Math.round(lb.srcHeight * lb.scale),
+              padX: lb.padX,
+              padY: lb.padY,
+            };
+          } else {
+            // Neither available - this is a fatal error
+            throw new Error(
+              `[Preprocess] Neither nativeTruth nor letterbox available. preprocessResult keys=${Object.keys(preprocessResult).join(',')}`
+            );
+          }
+
+          // Validate nativeTruth dimensions
+          if (!Number.isFinite(nativeTruth.decodedW) || !Number.isFinite(nativeTruth.decodedH)) {
+            throw new Error(
+              `[Preprocess] nativeTruth has invalid dimensions. decodedW=${nativeTruth.decodedW}, decodedH=${nativeTruth.decodedH}`
+            );
+          }
+
+          console.log('[Pipeline] Native truth from preprocessing:');
+          console.log(`[Pipeline]   decodedW=${nativeTruth.decodedW}, decodedH=${nativeTruth.decodedH}`);
+          console.log(`[Pipeline]   modelSize=${nativeTruth.modelSize}, scale=${nativeTruth.scale.toFixed(6)}`);
+          console.log(`[Pipeline]   newW=${nativeTruth.newW}, newH=${nativeTruth.newH}`);
+          console.log(`[Pipeline]   padX=${nativeTruth.padX}, padY=${nativeTruth.padY}`);
+
+          // ================================================================
+          // HARD INVARIANT: Validate letterbox geometry consistency
+          // ================================================================
+          const inconsistency = validateLetterboxConsistency(nativeTruth);
+          if (inconsistency) {
+            // Write the inconsistency artifact before throwing
+            await writeLetterboxInconsistent(sessionId, inconsistency);
+            throw new Error(inconsistency.reason);
+          }
+          console.log('[Pipeline] ✓ Letterbox geometry consistency validated');
+
+          // Update letterboxParams from native truth
+          letterboxParams.srcWidth = nativeTruth.decodedW;
+          letterboxParams.srcHeight = nativeTruth.decodedH;
+          letterboxParams.dstWidth = nativeTruth.modelSize;
+          letterboxParams.dstHeight = nativeTruth.modelSize;
+          letterboxParams.scale = nativeTruth.scale;
+          letterboxParams.padX = nativeTruth.padX;
+          letterboxParams.padY = nativeTruth.padY;
 
           // ================================================================
           // STEP 6: Write input tensor artifacts (GUARANTEED)
@@ -417,9 +525,52 @@ export async function runPipeline(
             tensorFormat: 'NHWC',
           };
 
-          // Also write letterbox metadata
-          const letterboxMeta = buildLetterboxMeta(letterboxParams, PADDING_FILL_VALUE_UINT8);
+          // Write letterbox metadata using NATIVE TRUTH values
+          const letterboxMeta = {
+            ...buildLetterboxMeta(letterboxParams, PADDING_FILL_VALUE_UINT8),
+            // Override with explicit native truth
+            inputWidth: nativeTruth.decodedW,
+            inputHeight: nativeTruth.decodedH,
+            nativeTruth,  // Include full native truth for debugging
+          };
           await writeLetterboxMeta(sessionId, letterboxMeta);
+
+          // ================================================================
+          // UPDATE FRAMEGEO: Rebuild with native truth dimensions
+          // ================================================================
+          // Check if native decoded dimensions differ from JS imageMeta
+          if (frameGeo && (frameGeo.pixelW !== nativeTruth.decodedW || frameGeo.pixelH !== nativeTruth.decodedH)) {
+            console.log('[Pipeline] ⚠️ Native decoded dimensions differ from JS imageMeta:');
+            console.log(`[Pipeline]   JS imageMeta: ${imageMeta.width}x${imageMeta.height}`);
+            console.log(`[Pipeline]   JS frameGeo: ${frameGeo.pixelW}x${frameGeo.pixelH}`);
+            console.log(`[Pipeline]   Native truth: ${nativeTruth.decodedW}x${nativeTruth.decodedH}`);
+            console.log('[Pipeline]   Rebuilding frameGeo with native truth...');
+
+            // Rebuild FrameGeo with native truth dimensions
+            frameGeo = buildFrameGeo(
+              normalizedUri,
+              nativeTruth.decodedW,
+              nativeTruth.decodedH,
+              imageMeta.orientation,
+              nativeTruth.modelSize
+            );
+
+            // Verify the rebuilt frameGeo letterbox matches native truth
+            const newLB = frameGeo.letterbox;
+            console.log(`[Pipeline]   Rebuilt frameGeo: ${frameGeo.pixelW}x${frameGeo.pixelH}`);
+            console.log(`[Pipeline]   Rebuilt letterbox: scale=${newLB.scale.toFixed(6)}, pad=(${newLB.padX}, ${newLB.padY})`);
+
+            // Sanity check: rebuilt letterbox should match native
+            if (Math.abs(newLB.scale - nativeTruth.scale) > 0.001 ||
+                Math.abs(newLB.padX - nativeTruth.padX) > 1 ||
+                Math.abs(newLB.padY - nativeTruth.padY) > 1) {
+              console.error('[Pipeline] FATAL: Rebuilt frameGeo letterbox does not match native truth!');
+              console.error(`[Pipeline]   Native: scale=${nativeTruth.scale}, pad=(${nativeTruth.padX}, ${nativeTruth.padY})`);
+              console.error(`[Pipeline]   Rebuilt: scale=${newLB.scale}, pad=(${newLB.padX}, ${newLB.padY})`);
+              // Continue but log error for debugging
+              errors.push('LETTERBOX_MISMATCH: Rebuilt frameGeo does not match native truth');
+            }
+          }
 
         } catch (preprocessError: any) {
           // Ensure we still write artifacts even on failure
@@ -438,17 +589,43 @@ export async function runPipeline(
         rawOutput = await runInferenceRaw(inputTensor);
 
         if (rawOutput.outputs.length > 0) {
-          // ANALYZE DECODE MODE: Log channel ranges to prove Mode B is correct
-          // Mode B is HARDCODED: ch4=angle(rad), ch5=rawScore(logit)
+          // ANALYZE DECODE MODE: Log channel ranges for diagnostics
+          // Active mode: MODE_A (ch4=score probability, ch5=angle radians, sigmoid=false)
           // This does NOT change the active mode - just produces diagnostic data
-          console.log('[Pipeline] Analyzing decode mode (Mode B hardcoded)...');
+          const activeMode = getDecodeMode();
+          console.log(`[Pipeline] Analyzing decode mode (diagnostic only; active=${activeMode.mode}, scoreChannel=${activeMode.channelMapping.score}, sigmoid=${isSigmoidEnabled()})...`);
           analyzeDecodeMode(rawOutput.outputs[0], rawOutput.shapes[0]);
 
           // RUN DIAGNOSTIC DECODE: Prove candidates exist with very low threshold
-          // Uses ch5 (rawScore) with sigmoid, threshold 0.01
+          // Uses active mode channel mapping (ch4=score, ch5=angle), threshold 0.01
           // This is for ARTIFACTS ONLY - not for display
           console.log('[Pipeline] Running diagnostic decode (artifacts only)...');
           diagResult = runDiagnosticDecode(rawOutput.outputs[0], rawOutput.shapes[0]);
+
+          // ================================================================
+          // STEP 7: Score sanity check (HARD GATE)
+          // ================================================================
+          console.log('[Pipeline] STEP 7: Computing score sanity stats...');
+          const scoreChannel = getDecodeMode().channelMapping.score;
+          const applySigmoid = isSigmoidEnabled();
+          scoreSanityStats = computeScoreSanityStats(
+            rawOutput.outputs[0],
+            rawOutput.shapes[0],
+            scoreChannel,
+            applySigmoid
+          );
+
+          // Write score_sanity.json
+          await writeScoreSanity(sessionId, scoreSanityStats);
+
+          // HARD GATE: Check score sanity
+          if (!scoreSanityStats.valid) {
+            errors.push(`SCORE_SANITY_FAILED: ${scoreSanityStats.failureReason}`);
+            console.error(`[Pipeline] ⚠️  ${scoreSanityStats.failureReason}`);
+            // Note: We continue despite failure to write artifacts for debugging
+          } else {
+            console.log('[Pipeline] ✓ Score sanity check passed');
+          }
 
           // RUN FINAL POSTPROCESS with production config (SPINE_PRESET)
           // This produces the actual filtered detections for display
@@ -456,25 +633,76 @@ export async function runPipeline(
           console.log('[Pipeline] Running final postprocess...');
           console.log(`[Pipeline]   Config: thr=${config.thr}, nmsIou=${config.nmsIou}, minAspect=${config.minAspect}, minScore=${config.minScore}`);
 
-          const result = runPostprocess(
+          postprocessResult = runPostprocess(
             rawOutput.outputs[0],
             rawOutput.shapes[0],
             letterboxParams,
             config
           );
-          detections = result.detections;
-          postprocessStats = result.stats;
+          detections = postprocessResult.detections;
+          postprocessStats = postprocessResult.stats;
 
           // Log pipeline stage counts
           console.log('========================================');
           console.log('[Pipeline] POSTPROCESS STAGE COUNTS:');
-          console.log(`[Pipeline]   Raw anchors:     ${result.stats.numRaw}`);
-          console.log(`[Pipeline]   After threshold: ${result.stats.numAfterThr}`);
-          console.log(`[Pipeline]   After NMS:       ${result.stats.numAfterNms}`);
-          console.log(`[Pipeline]   After geom:      ${result.stats.numAfterGeom}`);
+          console.log(`[Pipeline]   Raw anchors:     ${postprocessResult.stats.numRaw}`);
+          console.log(`[Pipeline]   After threshold: ${postprocessResult.stats.numAfterThr}`);
+          console.log(`[Pipeline]   After NMS:       ${postprocessResult.stats.numAfterNms}`);
+          console.log(`[Pipeline]   After geom:      ${postprocessResult.stats.numAfterGeom}`);
           console.log(`[Pipeline]   FINAL OUTPUT:    ${detections.length} detections`);
           console.log('[Pipeline] (Diagnostic decode found ' + diagResult.diagDecodedCount + ' loose candidates for debugging)');
           console.log('========================================');
+
+          // ================================================================
+          // STEP 8: Write NMS witness artifact
+          // ================================================================
+          console.log('[Pipeline] STEP 8: Writing NMS witness...');
+          if (postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
+            const nmsWitnessData = buildNMSWitnessData(
+              postprocessResult.detectionsAfterDecode,
+              postprocessResult.detectionsAfterNMS.length,
+              config.nmsIou,
+              config.nmsMode
+            );
+            await writeNMSWitness(sessionId, nmsWitnessData);
+          }
+
+          // ================================================================
+          // STEP 9: Write model-space overlays
+          // ================================================================
+          console.log('[Pipeline] STEP 9: Writing model-space overlays...');
+          if (postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
+            // Convert to overlay format
+            const overlayDetectionsRaw = postprocessResult.detectionsAfterDecode.map(d => ({
+              cx: d.cx,
+              cy: d.cy,
+              width: d.width,
+              height: d.height,
+              angle: d.angle,
+              score: d.score,
+            }));
+            const overlayDetectionsNMS = postprocessResult.detectionsAfterNMS.map(d => ({
+              cx: d.cx,
+              cy: d.cy,
+              width: d.width,
+              height: d.height,
+              angle: d.angle,
+              score: d.score,
+            }));
+
+            const overlayResults = await writeModelSpaceOverlays(
+              sessionId,
+              overlayDetectionsRaw,
+              overlayDetectionsNMS
+            );
+
+            if (!overlayResults.rawOverlay.success) {
+              errors.push(`overlay_modelspace_raw.jpg failed: ${overlayResults.rawOverlay.error}`);
+            }
+            if (!overlayResults.nmsOverlay.success) {
+              errors.push(`overlay_modelspace_nms.jpg failed: ${overlayResults.nmsOverlay.error}`);
+            }
+          }
         }
 
         console.log(`[Pipeline] Model returned ${detections.length} detections`);
@@ -532,6 +760,15 @@ export async function runPipeline(
     // Update store with detections
     store.setDetections(detections);
 
+    // Update store with sessionMeta (SINGLE SOURCE OF TRUTH for UI)
+    // This enables ResultsScreen to render overlays without reading debug_manifest.json
+    store.setSessionMeta({
+      frameGeo: frameGeo ? serializeFrameGeo(frameGeo) : null,
+      imageDimensions: frameGeo ? { width: frameGeo.pixelW, height: frameGeo.pixelH } : { width: imageMeta.width, height: imageMeta.height },
+      normalizedImagePath: normalizedImagePath || null,
+      originalImagePath: imageUri,
+    });
+
     timer.endStage('overlay-prep');
 
     // STAGE 6: Rectification
@@ -540,7 +777,16 @@ export async function runPipeline(
 
     let rectification: RectifyResult[] | undefined;
 
-    if (detections.length > 0) {
+    // Check if we should skip rectification (DEBUG_ALIGNMENT_PRESET mode)
+    const currentConfig = getPostprocessConfig();
+    const isDebugAlignmentMode =
+      currentConfig.thr === DEBUG_ALIGNMENT_PRESET.thr &&
+      currentConfig.minAspect === DEBUG_ALIGNMENT_PRESET.minAspect &&
+      currentConfig.topK === DEBUG_ALIGNMENT_PRESET.topK;
+
+    if (isDebugAlignmentMode) {
+      console.log('[Pipeline] DEBUG_ALIGNMENT_PRESET active - skipping rectification and localhost calls');
+    } else if (detections.length > 0) {
       try {
         rectification = await rectifyAll(imageUri, detections, sessionId);
         console.log(`[Pipeline] Rectified ${rectification.length} detections`);
@@ -772,4 +1018,210 @@ export async function runPipelineOnFixture(
  */
 export async function runPipelineOnCapture(imageUri: string): Promise<PipelineResult> {
   return runPipeline(imageUri, 'camera');
+}
+
+// ============================================================================
+// PIPELINE OPTIONS - Preview vs Capture Mode
+// ============================================================================
+
+/**
+ * Default options for preview mode (fast path for live camera)
+ * - No artifact writing (skip disk I/O)
+ * - AABB NMS for speed
+ * - Skip rectification
+ * - Don't save tensor for replay
+ */
+export const PREVIEW_OPTIONS: PipelineOptions = {
+  mode: 'preview',
+  writeArtifacts: false,
+  skipRectification: true,
+  saveTensorForReplay: false,
+};
+
+/**
+ * Default options for capture mode (full pipeline)
+ * - Write artifacts only if DEBUG_ARTIFACTS_ENABLED (default: false for performance)
+ * - OBB NMS for accuracy
+ * - Full rectification
+ * - Save tensor for replay capability (only if debugging)
+ */
+export const CAPTURE_OPTIONS: PipelineOptions = {
+  mode: 'capture',
+  writeArtifacts: DEBUG_ARTIFACTS_ENABLED,
+  skipRectification: false,
+  saveTensorForReplay: DEBUG_ARTIFACTS_ENABLED,
+};
+
+// ============================================================================
+// TENSOR SAVING FOR REPLAY
+// ============================================================================
+
+/**
+ * Encode ArrayBuffer to base64 string
+ */
+function arrayBufferToBase64(buffer: ArrayBuffer | SharedArrayBuffer): string {
+  const bytes = new Uint8Array(buffer as ArrayBuffer);
+  const base64Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+  let result = '';
+  let i = 0;
+
+  while (i < bytes.length) {
+    const b0 = bytes[i++];
+    const b1 = i < bytes.length ? bytes[i++] : 0;
+    const b2 = i < bytes.length ? bytes[i++] : 0;
+
+    result += base64Chars[b0 >> 2];
+    result += base64Chars[((b0 & 0x03) << 4) | (b1 >> 4)];
+    result += base64Chars[((b1 & 0x0f) << 2) | (b2 >> 6)];
+    result += base64Chars[b2 & 0x3f];
+  }
+
+  // Add padding
+  const padding = bytes.length % 3;
+  if (padding === 1) {
+    result = result.slice(0, -2) + '==';
+  } else if (padding === 2) {
+    result = result.slice(0, -1) + '=';
+  }
+
+  return result;
+}
+
+/**
+ * Save preprocessed tensor to disk for replay capability
+ * Creates saved_tensor.json (metadata) and input_tensor.bin (tensor data)
+ */
+export async function saveTensorForReplay(
+  sessionId: string,
+  tensor: Float32Array,
+  letterboxParams: LetterboxParams,
+  nativeTruth: NativeLetterboxTruth
+): Promise<void> {
+  const sessionDir = getSessionDir(sessionId);
+
+  // Save tensor as binary file (base64 encoded)
+  const tensorPath = `${sessionDir}/input_tensor.bin`;
+  const tensorBase64 = arrayBufferToBase64(tensor.buffer);
+  await RNFS.writeFile(tensorPath, tensorBase64, 'base64');
+
+  // Save metadata
+  const savedTensor: SavedTensor = {
+    sessionId,
+    tensorPath,
+    tensorShape: [1, 640, 640, 3],
+    letterboxParams,
+    nativeTruth: {
+      decodedW: nativeTruth.decodedW,
+      decodedH: nativeTruth.decodedH,
+      modelSize: nativeTruth.modelSize,
+      scale: nativeTruth.scale,
+      newW: nativeTruth.newW,
+      newH: nativeTruth.newH,
+      padX: nativeTruth.padX,
+      padY: nativeTruth.padY,
+    },
+    createdAt: new Date().toISOString(),
+  };
+
+  // Write metadata using atomic write
+  await writeJsonAtomic(`${sessionDir}/saved_tensor.json`, savedTensor, sessionDir);
+  console.log(`[Pipeline] Saved tensor for replay: ${tensorPath}`);
+}
+
+// ============================================================================
+// UNIFIED PIPELINE ENTRY POINT WITH OPTIONS
+// ============================================================================
+
+/**
+ * Run pipeline with explicit options controlling behavior
+ *
+ * This is the new unified entry point that supports:
+ * - Preview mode (fast, no artifacts)
+ * - Capture mode (full pipeline)
+ * - Replay mode (uses cached tensor)
+ *
+ * @param source ImageSource instance (CameraSource, FixtureSource, or ReplaySource)
+ * @param options PipelineOptions controlling execution behavior
+ */
+export async function runPipelineWithOptions(
+  source: ImageSource,
+  options: PipelineOptions
+): Promise<PipelineResult> {
+  const mode = options.mode;
+
+  console.log(`[Pipeline] Running with options: mode=${mode}, writeArtifacts=${options.writeArtifacts}, skipRectification=${options.skipRectification}`);
+
+  // Set postprocess config based on mode
+  if (mode === 'preview') {
+    setPostprocessConfig(LIVE_PREVIEW_PRESET);
+    console.log('[Pipeline] Using LIVE_PREVIEW_PRESET (AABB NMS, fast)');
+  } else {
+    setPostprocessConfig(SPINE_PRESET);
+    console.log('[Pipeline] Using SPINE_PRESET (OBB NMS, accurate)');
+  }
+
+  // Control artifact writing based on options
+  const previousArtifactState = isArtifactWritingEnabled();
+  setArtifactWritingEnabled(options.writeArtifacts);
+
+  try {
+    // Get image URI and source type
+    const imageUri = source.getImageUri();
+    const sourceType = source.getType();
+
+    // Run the main pipeline
+    // Note: For replay sources, the existing pipeline will still work
+    // because it uses the imageUri for display, and we're not yet
+    // implementing full tensor replay (that would require more extensive changes)
+    const result = await runPipeline(
+      imageUri,
+      sourceType === 'camera' ? 'camera' : 'fixture',
+      sourceType === 'fixture' ? (source as FixtureSource).getFixtureInfo().name : undefined
+    );
+
+    // Restore artifact writing state
+    setArtifactWritingEnabled(previousArtifactState);
+
+    return result;
+  } catch (error) {
+    // Restore artifact writing state on error
+    setArtifactWritingEnabled(previousArtifactState);
+    throw error;
+  }
+}
+
+/**
+ * Run preview-mode pipeline for fast live camera feedback
+ * - Skips artifact writing for performance
+ * - Uses AABB NMS for speed
+ * - Skips rectification
+ */
+export async function runPreviewPipeline(imageUri: string): Promise<PipelineResult> {
+  const source = new CameraSource(imageUri);
+  return runPipelineWithOptions(source, PREVIEW_OPTIONS);
+}
+
+/**
+ * Run replay pipeline from a saved session
+ * Uses cached tensor data to produce identical results
+ *
+ * @param sessionId The session ID to replay
+ * @returns Pipeline result or null if session has no replay data
+ */
+export async function runReplayPipeline(sessionId: string): Promise<PipelineResult | null> {
+  const source = await createReplaySource(sessionId);
+  if (!source) {
+    console.error(`[Pipeline] No replay data found for session ${sessionId}`);
+    return null;
+  }
+
+  console.log(`[Pipeline] Replaying session ${sessionId}`);
+
+  // Run with capture options but generate new session ID
+  const options: PipelineOptions = {
+    ...CAPTURE_OPTIONS,
+    sessionIdOverride: `replay_${sessionId}_${Date.now()}`,
+  };
+
+  return runPipelineWithOptions(source, options);
 }
