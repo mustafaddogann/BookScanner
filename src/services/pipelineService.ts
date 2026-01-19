@@ -83,6 +83,7 @@ import {
   LIVE_PREVIEW_PRESET,
 } from './inferenceService';
 import { rectifyAll } from './rectificationService';
+import { recognizeAllCrops, isTextRecognitionAvailable } from './textRecognitionService';
 import {
   createSessionDir,
   writeDebugManifest,
@@ -776,6 +777,7 @@ export async function runPipeline(
     store.setProcessing(true, 'rectification');
 
     let rectification: RectifyResult[] | undefined;
+    let rectificationSummary: { total: number; succeeded: number; skipped: number } | undefined;
 
     // Check if we should skip rectification (DEBUG_ALIGNMENT_PRESET mode)
     const currentConfig = getPostprocessConfig();
@@ -785,11 +787,35 @@ export async function runPipeline(
       currentConfig.topK === DEBUG_ALIGNMENT_PRESET.topK;
 
     if (isDebugAlignmentMode) {
-      console.log('[Pipeline] DEBUG_ALIGNMENT_PRESET active - skipping rectification and localhost calls');
+      console.log('[Pipeline] DEBUG_ALIGNMENT_PRESET active - skipping rectification');
     } else if (detections.length > 0) {
       try {
-        rectification = await rectifyAll(imageUri, detections, sessionId);
-        console.log(`[Pipeline] Rectified ${rectification.length} detections`);
+        // Use normalized image path for rectification to match detection coordinates
+        const rectifyImagePath = normalizedImagePath || imageUri;
+        const rectifyResult = await rectifyAll(rectifyImagePath, detections, sessionId);
+        rectification = rectifyResult.results;
+        rectificationSummary = {
+          total: rectifyResult.total,
+          succeeded: rectifyResult.succeeded,
+          skipped: rectifyResult.skipped,
+        };
+
+        // Update sessionMeta with rectification results
+        const currentMeta = store.sessionMeta;
+        if (currentMeta) {
+          store.setSessionMeta({
+            ...currentMeta,
+            rectificationResults: rectifyResult.results.map((r) => ({
+              detectionIndex: r.detectionIndex,
+              cropUri: r.cropUri || null,
+              cropWidth: r.outputWidth,
+              cropHeight: r.outputHeight,
+              rectificationMethod: r.rectificationMethod || 'unknown',
+              skippedReason: r.skippedReason,
+            })),
+            rectificationSummary,
+          });
+        }
       } catch (rectError: any) {
         const errMsg = `Rectification failed: ${rectError.message}`;
         console.error(`[Pipeline] ${errMsg}`, rectError.stack);
@@ -799,6 +825,67 @@ export async function runPipeline(
     }
 
     timer.endStage('rectification');
+
+    // =========================================================================
+    // STAGE 8: OCR - Text Recognition (on successful crops)
+    // =========================================================================
+    timer.startStage('ocr');
+    store.setProcessing(true, 'ocr');
+
+    // Only run OCR if we have successful rectification results
+    const successfulCrops = rectification?.filter(
+      r => r.cropUri && r.rectificationMethod !== 'skipped'
+    ) || [];
+
+    if (successfulCrops.length > 0 && !isDebugAlignmentMode) {
+      try {
+        // Check OCR availability first
+        const ocrAvailability = await isTextRecognitionAvailable();
+
+        if (ocrAvailability.available) {
+          console.log(`[Pipeline] Running OCR on ${successfulCrops.length} crops...`);
+
+          const ocrInput = successfulCrops.map(r => ({
+            cropUri: r.cropUri,
+            detectionIndex: r.detectionIndex,
+            rectificationMethod: r.rectificationMethod,
+          }));
+
+          const { summary: ocrSummary, results: ocrResults } = await recognizeAllCrops(
+            sessionId,
+            ocrInput,
+            (completed, total) => {
+              store.setProcessing(true, `ocr (${completed + 1}/${total})`);
+            }
+          );
+
+          // Update sessionMeta with OCR results
+          const currentMeta = store.sessionMeta;
+          if (currentMeta) {
+            store.setSessionMeta({
+              ...currentMeta,
+              ocrResultsByCropIndex: ocrResults,
+              ocrSummary,
+            });
+          }
+
+          console.log(`[Pipeline] OCR complete: ${ocrSummary.succeeded}/${ocrSummary.total} succeeded`);
+        } else {
+          console.log(`[Pipeline] OCR skipped: ${ocrAvailability.reason || ocrAvailability.method}`);
+        }
+      } catch (ocrError: any) {
+        const errMsg = `OCR failed: ${ocrError.message}`;
+        console.error(`[Pipeline] ${errMsg}`, ocrError.stack);
+        errors.push(errMsg);
+        await appendWriteError(sessionDir, `${errMsg}\n${ocrError.stack || ''}`);
+      }
+    } else if (successfulCrops.length === 0) {
+      console.log('[Pipeline] OCR skipped: no successful crops');
+    } else {
+      console.log('[Pipeline] OCR skipped: DEBUG_ALIGNMENT_PRESET mode');
+    }
+
+    timer.endStage('ocr');
 
     // Build session object
     const session: ScanSession = {

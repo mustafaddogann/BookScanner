@@ -697,4 +697,271 @@ RCT_EXPORT_METHOD(drawAABBOverlay:(NSString *)basePath
   });
 }
 
+// ============================================================================
+// PERSPECTIVE RECTIFICATION using CoreImage
+// ============================================================================
+
+/**
+ * Rectify a quadrilateral region of an image to an upright rectangle.
+ * Uses CoreImage CIPerspectiveCorrection filter for high-quality warping.
+ *
+ * @param imagePath - Path to source image (file:// URI or absolute path)
+ * @param corners - Dict with topLeft, topRight, bottomRight, bottomLeft (each has x, y in ORIGINAL IMAGE PIXELS)
+ *                  NOTE: Corners must be in CLOCKWISE order starting from top-left
+ * @param outputPath - Path where rectified crop should be saved
+ * @param targetHeight - Target height for output (width computed from aspect ratio)
+ *
+ * Returns: {path, width, height, method: 'native_coreimage'}
+ *
+ * COORDINATE SYSTEM NOTE:
+ * - Input corners are in UIKit coordinates (origin top-left, Y increases downward)
+ * - CoreImage uses Cartesian coordinates (origin bottom-left, Y increases upward)
+ * - This method handles the conversion internally
+ */
+RCT_EXPORT_METHOD(rectifyPerspective:(NSString *)imagePath
+                  corners:(NSDictionary *)corners
+                  outputPath:(NSString *)outputPath
+                  targetHeight:(NSNumber *)targetHeight
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  RCTLogInfo(@"[ImagePreprocessor] rectifyPerspective called");
+  RCTLogInfo(@"[ImagePreprocessor]   imagePath: %@", imagePath);
+  RCTLogInfo(@"[ImagePreprocessor]   outputPath: %@", outputPath);
+  RCTLogInfo(@"[ImagePreprocessor]   targetHeight: %@", targetHeight);
+
+  // Clean paths
+  NSString *cleanInputPath = imagePath;
+  if ([cleanInputPath hasPrefix:@"file://"]) {
+    cleanInputPath = [cleanInputPath substringFromIndex:7];
+  }
+
+  NSString *cleanOutputPath = outputPath;
+  if ([cleanOutputPath hasPrefix:@"file://"]) {
+    cleanOutputPath = [cleanOutputPath substringFromIndex:7];
+  }
+
+  // Parse corners
+  NSDictionary *tlDict = corners[@"topLeft"];
+  NSDictionary *trDict = corners[@"topRight"];
+  NSDictionary *brDict = corners[@"bottomRight"];
+  NSDictionary *blDict = corners[@"bottomLeft"];
+
+  if (!tlDict || !trDict || !brDict || !blDict) {
+    reject(@"RECTIFY_FAILED", @"Missing corner coordinates (need topLeft, topRight, bottomRight, bottomLeft)", nil);
+    return;
+  }
+
+  CGFloat tlX = [tlDict[@"x"] floatValue];
+  CGFloat tlY = [tlDict[@"y"] floatValue];
+  CGFloat trX = [trDict[@"x"] floatValue];
+  CGFloat trY = [trDict[@"y"] floatValue];
+  CGFloat brX = [brDict[@"x"] floatValue];
+  CGFloat brY = [brDict[@"y"] floatValue];
+  CGFloat blX = [blDict[@"x"] floatValue];
+  CGFloat blY = [blDict[@"y"] floatValue];
+
+  RCTLogInfo(@"[ImagePreprocessor] Corners (UIKit coords):");
+  RCTLogInfo(@"[ImagePreprocessor]   TL: (%.1f, %.1f)", tlX, tlY);
+  RCTLogInfo(@"[ImagePreprocessor]   TR: (%.1f, %.1f)", trX, trY);
+  RCTLogInfo(@"[ImagePreprocessor]   BR: (%.1f, %.1f)", brX, brY);
+  RCTLogInfo(@"[ImagePreprocessor]   BL: (%.1f, %.1f)", blX, blY);
+
+  // Load source image
+  UIImage *rawImage = [UIImage imageWithContentsOfFile:cleanInputPath];
+  if (!rawImage) {
+    reject(@"RECTIFY_FAILED", [NSString stringWithFormat:@"Failed to load image: %@", cleanInputPath], nil);
+    return;
+  }
+
+  // CRITICAL: Normalize EXIF orientation to get correct dimensions
+  UIImage *image = [ImagePreprocessor normalizeImageOrientation:rawImage];
+  CGFloat imageHeight = image.size.height;
+
+  RCTLogInfo(@"[ImagePreprocessor] Image size after EXIF normalization: %.0fx%.0f", image.size.width, image.size.height);
+
+  // Create CIImage from UIImage
+  CIImage *ciImage = [[CIImage alloc] initWithImage:image];
+  if (!ciImage) {
+    reject(@"RECTIFY_FAILED", @"Failed to create CIImage", nil);
+    return;
+  }
+
+  // Convert from UIKit coordinates (origin top-left) to CoreImage coordinates (origin bottom-left)
+  // In CoreImage: y' = imageHeight - y
+  CGFloat ciTlY = imageHeight - tlY;
+  CGFloat ciTrY = imageHeight - trY;
+  CGFloat ciBrY = imageHeight - brY;
+  CGFloat ciBlY = imageHeight - blY;
+
+  RCTLogInfo(@"[ImagePreprocessor] Corners (CoreImage coords):");
+  RCTLogInfo(@"[ImagePreprocessor]   TL: (%.1f, %.1f)", tlX, ciTlY);
+  RCTLogInfo(@"[ImagePreprocessor]   TR: (%.1f, %.1f)", trX, ciTrY);
+  RCTLogInfo(@"[ImagePreprocessor]   BR: (%.1f, %.1f)", brX, ciBrY);
+  RCTLogInfo(@"[ImagePreprocessor]   BL: (%.1f, %.1f)", blX, ciBlY);
+
+  // Create CIVectors for the corner points
+  // CIPerspectiveCorrection expects: topLeft, topRight, bottomRight, bottomLeft
+  // But in CoreImage coords, what was "top" is now "bottom" visually
+  // The filter maps: inputTopLeft -> output top-left, etc.
+  // Since we flipped Y, our UIKit topLeft is now at a higher Y (visually at top in CoreImage)
+
+  // For CIPerspectiveCorrection, we provide corners as they should MAP to the output rectangle:
+  // - inputTopLeft: maps to top-left of output
+  // - inputTopRight: maps to top-right of output
+  // - inputBottomRight: maps to bottom-right of output
+  // - inputBottomLeft: maps to bottom-left of output
+
+  // Since we converted UIKit Y to CoreImage Y, we provide them directly:
+  CIVector *topLeft = [CIVector vectorWithX:tlX Y:ciTlY];
+  CIVector *topRight = [CIVector vectorWithX:trX Y:ciTrY];
+  CIVector *bottomRight = [CIVector vectorWithX:brX Y:ciBrY];
+  CIVector *bottomLeft = [CIVector vectorWithX:blX Y:ciBlY];
+
+  // Apply CIPerspectiveCorrection filter
+  CIFilter *perspectiveFilter = [CIFilter filterWithName:@"CIPerspectiveCorrection"];
+  if (!perspectiveFilter) {
+    reject(@"RECTIFY_FAILED", @"CIPerspectiveCorrection filter not available", nil);
+    return;
+  }
+
+  [perspectiveFilter setValue:ciImage forKey:kCIInputImageKey];
+  [perspectiveFilter setValue:topLeft forKey:@"inputTopLeft"];
+  [perspectiveFilter setValue:topRight forKey:@"inputTopRight"];
+  [perspectiveFilter setValue:bottomRight forKey:@"inputBottomRight"];
+  [perspectiveFilter setValue:bottomLeft forKey:@"inputBottomLeft"];
+
+  CIImage *correctedImage = perspectiveFilter.outputImage;
+  if (!correctedImage) {
+    reject(@"RECTIFY_FAILED", @"CIPerspectiveCorrection produced no output", nil);
+    return;
+  }
+
+  // Get the extent of the corrected image
+  CGRect extent = correctedImage.extent;
+  RCTLogInfo(@"[ImagePreprocessor] Corrected image extent: %.1fx%.1f at (%.1f, %.1f)",
+             extent.size.width, extent.size.height, extent.origin.x, extent.origin.y);
+
+  // The corrected image may have non-zero origin, so we need to translate it
+  if (extent.origin.x != 0 || extent.origin.y != 0) {
+    correctedImage = [correctedImage imageByApplyingTransform:CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
+    extent = correctedImage.extent;
+  }
+
+  // Compute output dimensions
+  CGFloat outputWidth = extent.size.width;
+  CGFloat outputHeight = extent.size.height;
+  CGFloat targetH = [targetHeight floatValue];
+
+  // Scale to target height if specified and positive
+  CGFloat scaleFactor = 1.0;
+  if (targetH > 0 && outputHeight > 0) {
+    scaleFactor = targetH / outputHeight;
+    outputWidth = outputWidth * scaleFactor;
+    outputHeight = targetH;
+
+    // Apply scale transform
+    CIFilter *scaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+    if (scaleFilter) {
+      [scaleFilter setValue:correctedImage forKey:kCIInputImageKey];
+      [scaleFilter setValue:@(scaleFactor) forKey:kCIInputScaleKey];
+      [scaleFilter setValue:@(1.0) forKey:kCIInputAspectRatioKey];
+      correctedImage = scaleFilter.outputImage;
+    }
+  }
+
+  // Clamp dimensions to reasonable max (2048) to avoid memory issues
+  CGFloat maxDimension = 2048.0;
+  if (outputWidth > maxDimension || outputHeight > maxDimension) {
+    CGFloat clampScale = MIN(maxDimension / outputWidth, maxDimension / outputHeight);
+    outputWidth *= clampScale;
+    outputHeight *= clampScale;
+
+    CIFilter *clampScaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+    if (clampScaleFilter) {
+      [clampScaleFilter setValue:correctedImage forKey:kCIInputImageKey];
+      [clampScaleFilter setValue:@(clampScale) forKey:kCIInputScaleKey];
+      [clampScaleFilter setValue:@(1.0) forKey:kCIInputAspectRatioKey];
+      correctedImage = clampScaleFilter.outputImage;
+    }
+  }
+
+  // Render to CGImage
+  CIContext *ciContext = [CIContext contextWithOptions:nil];
+  extent = correctedImage.extent;
+  CGImageRef cgImage = [ciContext createCGImage:correctedImage fromRect:extent];
+
+  if (!cgImage) {
+    reject(@"RECTIFY_FAILED", @"Failed to render corrected image", nil);
+    return;
+  }
+
+  // Convert to UIImage (this also flips back to UIKit coordinates)
+  UIImage *outputImage = [UIImage imageWithCGImage:cgImage];
+  CGImageRelease(cgImage);
+
+  if (!outputImage) {
+    reject(@"RECTIFY_FAILED", @"Failed to create UIImage from CGImage", nil);
+    return;
+  }
+
+  RCTLogInfo(@"[ImagePreprocessor] Output image size: %.0fx%.0f", outputImage.size.width, outputImage.size.height);
+
+  // Ensure output directory exists
+  NSString *outputDir = [cleanOutputPath stringByDeletingLastPathComponent];
+  NSError *mkdirError = nil;
+  [[NSFileManager defaultManager] createDirectoryAtPath:outputDir
+                            withIntermediateDirectories:YES
+                                             attributes:nil
+                                                  error:&mkdirError];
+  if (mkdirError) {
+    RCTLogInfo(@"[ImagePreprocessor] Warning: mkdir error (may be ok): %@", mkdirError.localizedDescription);
+  }
+
+  // Save as JPEG
+  NSData *jpegData = UIImageJPEGRepresentation(outputImage, 0.92);
+  if (!jpegData) {
+    reject(@"RECTIFY_FAILED", @"Failed to create JPEG data", nil);
+    return;
+  }
+
+  NSError *writeError = nil;
+  BOOL success = [jpegData writeToFile:cleanOutputPath options:NSDataWritingAtomic error:&writeError];
+
+  if (!success) {
+    reject(@"RECTIFY_FAILED", writeError.localizedDescription, writeError);
+    return;
+  }
+
+  RCTLogInfo(@"[ImagePreprocessor] ✓ Saved rectified crop: %@ (%.0fx%.0f, %lu bytes)",
+             cleanOutputPath, outputImage.size.width, outputImage.size.height, (unsigned long)jpegData.length);
+
+  resolve(@{
+    @"path": cleanOutputPath,
+    @"width": @((NSInteger)outputImage.size.width),
+    @"height": @((NSInteger)outputImage.size.height),
+    @"bytes": @(jpegData.length),
+    @"method": @"native_coreimage"
+  });
+}
+
+/**
+ * Check if native rectification is available on this device
+ */
+RCT_EXPORT_METHOD(isRectificationAvailable:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  // Check if CIPerspectiveCorrection filter is available
+  CIFilter *filter = [CIFilter filterWithName:@"CIPerspectiveCorrection"];
+  BOOL available = (filter != nil);
+
+  RCTLogInfo(@"[ImagePreprocessor] isRectificationAvailable: %@", available ? @"YES" : @"NO");
+
+  resolve(@{
+    @"available": @(available),
+    @"platform": @"ios",
+    @"method": @"native_coreimage"
+  });
+}
+
 @end

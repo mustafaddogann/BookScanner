@@ -1,6 +1,6 @@
 /**
  * Debug configuration for BookScanner
- * Controls expensive debug artifact generation
+ * Controls expensive debug artifact generation and feature flags
  */
 
 /**
@@ -26,4 +26,24 @@ export const DEBUG_ARTIFACTS_ENABLED = false;
  */
 export function isDebugArtifactsEnabled(): boolean {
   return DEBUG_ARTIFACTS_ENABLED;
+}
+
+/**
+ * Feature flag for book metadata lookup
+ *
+ * When false (default):
+ * - No network calls for metadata lookup
+ * - Title/author from OCR only
+ *
+ * When true:
+ * - Enables Open Library / Google Books lookups
+ * - Requires internet connection
+ */
+export const METADATA_LOOKUP_ENABLED = false;
+
+/**
+ * Check if metadata lookup is enabled
+ */
+export function isMetadataLookupEnabled(): boolean {
+  return METADATA_LOOKUP_ENABLED;
 }

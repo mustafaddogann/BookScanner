@@ -1,12 +1,23 @@
 import { create } from 'zustand';
 import { MMKV } from 'react-native-mmkv';
-import type { ScanSession, OBBDetection, SerializedFrameGeo } from '../types';
-import { setRectifierUrl as setServiceRectifierUrl } from '../services/rectificationService';
+import type { ScanSession, OBBDetection, SerializedFrameGeo, RectifyResult, OCRResult, OCRSummary, MetadataMatch } from '../types';
 
 // Initialize MMKV storage
 export const storage = new MMKV({
   id: 'bookscanner-storage',
 });
+
+/**
+ * Per-detection rectification result for UI
+ */
+export interface DetectionRectifyInfo {
+  detectionIndex: number;
+  cropUri: string | null;
+  cropWidth: number;
+  cropHeight: number;
+  rectificationMethod: string;
+  skippedReason?: string;
+}
 
 /**
  * Session metadata stored in-memory for UI rendering
@@ -21,6 +32,22 @@ export interface SessionMeta {
   normalizedImagePath: string | null;
   /** Original image path (pre-normalization) */
   originalImagePath: string | null;
+  /** Rectification results per detection */
+  rectificationResults?: DetectionRectifyInfo[];
+  /** Rectification summary */
+  rectificationSummary?: {
+    total: number;
+    succeeded: number;
+    skipped: number;
+  };
+  /** OCR results indexed by crop/detection index */
+  ocrResultsByCropIndex?: Record<number, OCRResult>;
+  /** OCR processing summary */
+  ocrSummary?: OCRSummary;
+  /** Metadata matches indexed by crop/detection index (from external lookup) */
+  metadataMatchesByCropIndex?: Record<number, MetadataMatch[]>;
+  /** User-edited title/author overrides indexed by crop index */
+  userEdits?: Record<number, { title?: string; author?: string }>;
 }
 
 interface AppState {
@@ -174,8 +201,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   setRectifierUrl: (url) => {
     set({ rectifierUrl: url });
     storage.set(RECTIFIER_URL_KEY, url);
-    // Also update the service module
-    setServiceRectifierUrl(url);
+    // Note: URL stored for future backend integration but native rectification
+    // does not use it - all rectification is on-device via CoreImage (iOS)
     console.log(`[AppStore] Rectifier URL set to: ${url}`);
   },
 

@@ -92,7 +92,7 @@ export interface RectifyResult {
   /** If fallback was used, this is the AABB region that SHOULD have been cropped */
   fallbackAABB?: { x: number; y: number; width: number; height: number };
   /** Reason why rectification was skipped (only when rectificationMethod='skipped') */
-  skippedReason?: 'native_opencv_unavailable' | 'native_opencv_failed';
+  skippedReason?: string;
 }
 
 /**
@@ -139,6 +139,7 @@ export interface PipelineTimings {
   postprocess?: number;
   overlayPrep?: number;
   rectification?: number;
+  ocr?: number;
   total?: number;
 }
 
@@ -425,4 +426,124 @@ export interface SavedTensor {
   nativeTruth: NativeLetterboxTruth;
   /** ISO timestamp when tensor was saved */
   createdAt: string;
+}
+
+// ============================================================================
+// OCR / Text Recognition Types (GATE 6)
+// ============================================================================
+
+/**
+ * Bounding box for OCR text line
+ */
+export interface OCRBoundingBox {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+/**
+ * A single line of recognized text
+ */
+export interface OCRLine {
+  /** The recognized text content */
+  text: string;
+  /** Bounding box in image coordinates */
+  bbox: OCRBoundingBox;
+  /** Confidence score [0-1] */
+  confidence: number;
+}
+
+/**
+ * OCR recognition result
+ */
+export interface OCRResult {
+  /** Whether OCR succeeded */
+  ok: boolean;
+  /** Error message if failed */
+  error?: string;
+  /** Reason if skipped */
+  skippedReason?: string;
+  /** The rotation that produced best results (degrees) */
+  chosenRotation: number;
+  /** Full concatenated text from all lines */
+  fullText: string;
+  /** Individual recognized lines with position and confidence */
+  lines: OCRLine[];
+  /** Average confidence across all lines */
+  avgConfidence: number;
+  /** Ratio of alphanumeric characters to total characters */
+  alnumRatio: number;
+  /** Total character count */
+  charCount: number;
+  /** Total line count */
+  lineCount: number;
+  /** Best candidate for book title */
+  titleCandidate: string | null;
+  /** Best candidate for author name */
+  authorCandidate: string | null;
+  /** Processing time in milliseconds */
+  processingTimeMs?: number;
+  /** Platform that performed OCR */
+  platform?: 'ios' | 'android';
+  /** Recognition level used */
+  recognitionLevel?: 'fast' | 'accurate';
+}
+
+/**
+ * OCR summary for a session
+ */
+export interface OCRSummary {
+  /** Total crops processed */
+  total: number;
+  /** Successfully OCR'd crops */
+  succeeded: number;
+  /** Skipped crops (no OCR available or failed) */
+  skipped: number;
+  /** Number of crops with title candidates */
+  withTitles: number;
+  /** Number of crops with author candidates */
+  withAuthors: number;
+  /** Most common chosen rotation */
+  dominantRotation?: number;
+  /** Timestamp when OCR completed */
+  completedAt: string;
+}
+
+/**
+ * Book metadata from external lookup
+ */
+export interface MetadataMatch {
+  /** Match confidence/relevance score */
+  score: number;
+  /** Book title */
+  title: string;
+  /** Author name(s) */
+  authors: string[];
+  /** ISBN-10 or ISBN-13 */
+  isbn?: string;
+  /** Publisher name */
+  publisher?: string;
+  /** Publication year */
+  publishYear?: string;
+  /** Cover image URL */
+  coverUrl?: string;
+  /** Source of the metadata */
+  source: 'openLibrary' | 'googleBooks';
+  /** Open Library work/edition key or Google Books volume ID */
+  sourceId?: string;
+}
+
+/**
+ * Options for text recognition
+ */
+export interface TextRecognitionOptions {
+  /** Path to the image file */
+  imagePath: string;
+  /** Rotations to try in degrees (default: [0, 90, 180, 270]) */
+  rotationsToTry?: number[];
+  /** Recognition accuracy level */
+  recognitionLevel?: 'fast' | 'accurate';
+  /** Languages to prioritize (ISO codes) */
+  languages?: string[];
 }
