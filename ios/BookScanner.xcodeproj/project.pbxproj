@@ -12,7 +12,9 @@
 		5DB985202F18EA11000B11F1 /* ModelPathResolver.m in Sources */ = {isa = PBXBuildFile; fileRef = 5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */; };
 		5DB985212F18EA11000B11F1 /* yolov8_obb.tflite in Resources */ = {isa = PBXBuildFile; fileRef = 5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */; };
 		5DB985232F1ABE6E000B11F1 /* ImagePreprocessor.m in Sources */ = {isa = PBXBuildFile; fileRef = 5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */; };
+		5DB985252F1ABE70000B11F2 /* TextRecognizer.m in Sources */ = {isa = PBXBuildFile; fileRef = 5DB985242F1ABE70000B11F2 /* TextRecognizer.m */; };
 		761780ED2CA45674006654EE /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EC2CA45674006654EE /* AppDelegate.swift */; };
+		761780EF2CA45675006654F0 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EE2CA45675006654F0 /* SceneDelegate.swift */; };
 		7E34C907730A22F397EDC1D6 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
 /* End PBXBuildFile section */
@@ -26,8 +28,10 @@
 		5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ModelPathResolver.m; sourceTree = "<group>"; };
 		5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */ = {isa = PBXFileReference; lastKnownFileType = file; path = yolov8_obb.tflite; sourceTree = "<group>"; };
 		5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ImagePreprocessor.m; sourceTree = "<group>"; };
+		5DB985242F1ABE70000B11F2 /* TextRecognizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TextRecognizer.m; sourceTree = "<group>"; };
 		5EEE23BC8245A33BC4A925BA /* libPods-BookScanner.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-BookScanner.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = BookScanner/AppDelegate.swift; sourceTree = "<group>"; };
+		761780EE2CA45675006654F0 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = BookScanner/SceneDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = BookScanner/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		E24AB9C8ECDBC48B332E3264 /* Pods-BookScanner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-BookScanner.release.xcconfig"; path = "Target Support Files/Pods-BookScanner/Pods-BookScanner.release.xcconfig"; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
@@ -50,9 +54,11 @@
 			children = (
 				5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */,
 				5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */,
+				5DB985242F1ABE70000B11F2 /* TextRecognizer.m */,
 				5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
 				761780EC2CA45674006654EE /* AppDelegate.swift */,
+				761780EE2CA45675006654F0 /* SceneDelegate.swift */,
 				13B07FB61A68108700A75B9A /* Info.plist */,
 				81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */,
 				13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */,
@@ -258,7 +264,9 @@
 			files = (
 				5DB985202F18EA11000B11F1 /* ModelPathResolver.m in Sources */,
 				5DB985232F1ABE6E000B11F1 /* ImagePreprocessor.m in Sources */,
+				5DB985252F1ABE70000B11F2 /* TextRecognizer.m in Sources */,
 				761780ED2CA45674006654EE /* AppDelegate.swift in Sources */,
+				761780EF2CA45675006654F0 /* SceneDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

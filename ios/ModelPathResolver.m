@@ -5,7 +5,7 @@
  * This module returns absolute filesystem paths from the app bundle.
  */
 
-#import <Foundation/Foundation.h>
+@import Foundation;
 #import <React/RCTBridgeModule.h>
 #import <React/RCTLog.h>
 

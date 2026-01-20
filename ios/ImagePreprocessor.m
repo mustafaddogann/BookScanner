@@ -7,8 +7,9 @@
  * 3. Float32 tensor generation for TFLite
  */
 
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
+@import Foundation;
+@import UIKit;
+@import CoreImage;
 #import <React/RCTBridgeModule.h>
 #import <React/RCTLog.h>
 
@@ -961,6 +962,112 @@ RCT_EXPORT_METHOD(isRectificationAvailable:(RCTPromiseResolveBlock)resolve
     @"available": @(available),
     @"platform": @"ios",
     @"method": @"native_coreimage"
+  });
+}
+
+/**
+ * Create a downscaled display image for UI rendering
+ *
+ * Reduces large images to a maximum dimension to prevent memory issues
+ * and PERF ASSETS warnings when loading in React Native Image component.
+ *
+ * @param sourcePath Path to source image
+ * @param outputPath Path to save display image
+ * @param maxDimension Maximum width/height (e.g., 1600)
+ * @param quality JPEG quality 0.0-1.0
+ */
+RCT_EXPORT_METHOD(createDisplayImage:(NSString *)sourcePath
+                  outputPath:(NSString *)outputPath
+                  maxDimension:(NSInteger)maxDimension
+                  quality:(float)quality
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  // Clean paths
+  NSString *cleanSourcePath = [sourcePath stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+  NSString *cleanOutputPath = [outputPath stringByReplacingOccurrencesOfString:@"file://" withString:@""];
+
+  // Load source image
+  UIImage *sourceImage = [UIImage imageWithContentsOfFile:cleanSourcePath];
+  if (!sourceImage) {
+    reject(@"DISPLAY_IMAGE_FAILED", @"Failed to load source image", nil);
+    return;
+  }
+
+  CGFloat srcWidth = sourceImage.size.width;
+  CGFloat srcHeight = sourceImage.size.height;
+  CGFloat largestDim = MAX(srcWidth, srcHeight);
+
+  // Check if resize needed
+  if (largestDim <= maxDimension) {
+    // Already small enough, just copy
+    NSData *jpegData = UIImageJPEGRepresentation(sourceImage, quality);
+    NSError *writeError = nil;
+    [jpegData writeToFile:cleanOutputPath options:NSDataWritingAtomic error:&writeError];
+
+    if (writeError) {
+      reject(@"DISPLAY_IMAGE_FAILED", writeError.localizedDescription, writeError);
+      return;
+    }
+
+    RCTLogInfo(@"[ImagePreprocessor] Display image: no resize needed (%.0fx%.0f)", srcWidth, srcHeight);
+
+    resolve(@{
+      @"path": cleanOutputPath,
+      @"width": @((NSInteger)srcWidth),
+      @"height": @((NSInteger)srcHeight),
+      @"sourceWidth": @((NSInteger)srcWidth),
+      @"sourceHeight": @((NSInteger)srcHeight),
+      @"scale": @(1.0),
+      @"resized": @NO
+    });
+    return;
+  }
+
+  // Calculate scale factor
+  CGFloat scale = (CGFloat)maxDimension / largestDim;
+  CGSize newSize = CGSizeMake(roundf(srcWidth * scale), roundf(srcHeight * scale));
+
+  RCTLogInfo(@"[ImagePreprocessor] Display image: %.0fx%.0f -> %.0fx%.0f (scale=%.3f)",
+             srcWidth, srcHeight, newSize.width, newSize.height, scale);
+
+  // Create resized image
+  UIGraphicsBeginImageContextWithOptions(newSize, NO, 1.0);
+  [sourceImage drawInRect:CGRectMake(0, 0, newSize.width, newSize.height)];
+  UIImage *resizedImage = UIGraphicsGetImageFromCurrentImageContext();
+  UIGraphicsEndImageContext();
+
+  if (!resizedImage) {
+    reject(@"DISPLAY_IMAGE_FAILED", @"Failed to resize image", nil);
+    return;
+  }
+
+  // Save as JPEG
+  NSData *jpegData = UIImageJPEGRepresentation(resizedImage, quality);
+  if (!jpegData) {
+    reject(@"DISPLAY_IMAGE_FAILED", @"Failed to create JPEG data", nil);
+    return;
+  }
+
+  NSError *writeError = nil;
+  BOOL success = [jpegData writeToFile:cleanOutputPath options:NSDataWritingAtomic error:&writeError];
+
+  if (!success) {
+    reject(@"DISPLAY_IMAGE_FAILED", writeError.localizedDescription, writeError);
+    return;
+  }
+
+  RCTLogInfo(@"[ImagePreprocessor] ✓ Display image saved: %@ (%.0fx%.0f, %lu bytes)",
+             cleanOutputPath, newSize.width, newSize.height, (unsigned long)jpegData.length);
+
+  resolve(@{
+    @"path": cleanOutputPath,
+    @"width": @((NSInteger)newSize.width),
+    @"height": @((NSInteger)newSize.height),
+    @"sourceWidth": @((NSInteger)srcWidth),
+    @"sourceHeight": @((NSInteger)srcHeight),
+    @"scale": @(scale),
+    @"resized": @YES
   });
 }
 

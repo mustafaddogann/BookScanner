@@ -30,5 +30,17 @@ target 'BookScanner' do
       :mac_catalyst_enabled => false,
       # :ccache_enabled => true
     )
+
+    # iOS build hardening: fix module issues and warnings
+    installer.pods_project.targets.each do |target|
+      target.build_configurations.each do |config|
+        # Allow non-modular includes in framework modules (fixes RCT* import issues)
+        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        # Enable modules for C and Objective-C
+        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+        # Suppress deprecation warnings for older iOS APIs
+        config.build_settings['GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS'] = 'NO'
+      end
+    end
   end
 end

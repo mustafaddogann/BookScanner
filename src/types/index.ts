@@ -1,5 +1,25 @@
 // Core type definitions for BookScanner
 
+// ============================================================================
+// File Path Type Aliases
+// ============================================================================
+
+/**
+ * Absolute filesystem path (e.g., /var/mobile/Containers/Data/...)
+ * Use for native module calls that expect plain paths.
+ */
+export type LocalFilePath = string;
+
+/**
+ * File URI with scheme (e.g., file:///var/mobile/Containers/Data/...)
+ * Use for React Native Image source.uri and other RN components.
+ */
+export type LocalFileUri = string;
+
+// ============================================================================
+// Image Types
+// ============================================================================
+
 /**
  * Image metadata extracted after capture
  */

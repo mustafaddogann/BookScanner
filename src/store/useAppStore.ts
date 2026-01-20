@@ -9,14 +9,24 @@ export const storage = new MMKV({
 
 /**
  * Per-detection rectification result for UI
+ * Contains both path (for native) and URI (for React Native Image)
  */
 export interface DetectionRectifyInfo {
   detectionIndex: number;
+  /** Absolute filesystem path (for native modules) */
+  cropPath: string | null;
+  /** file:// URI (for React Native Image) */
   cropUri: string | null;
+  /** Crop image width in pixels */
   cropWidth: number;
+  /** Crop image height in pixels */
   cropHeight: number;
+  /** Rectification method used */
   rectificationMethod: string;
+  /** Reason if skipped */
   skippedReason?: string;
+  /** OCR-determined best rotation for readability (degrees) */
+  ocrRotation?: number;
 }
 
 /**
@@ -28,10 +38,14 @@ export interface SessionMeta {
   frameGeo: SerializedFrameGeo | null;
   /** Image dimensions for overlay mapping */
   imageDimensions: { width: number; height: number } | null;
-  /** Path to normalized image for display */
+  /** Path to normalized image (full resolution, for inference) */
   normalizedImagePath: string | null;
   /** Original image path (pre-normalization) */
   originalImagePath: string | null;
+  /** Path to display image (downscaled for UI rendering) */
+  displayImagePath?: string | null;
+  /** Scale factor from source to display image (1.0 if not downscaled) */
+  displayImageScale?: number;
   /** Rectification results per detection */
   rectificationResults?: DetectionRectifyInfo[];
   /** Rectification summary */

@@ -95,6 +95,7 @@ import {
   appendWriteError,
   getSessionDir,
   writeInputNormalized,
+  createDisplayImage,
   writeInputTensorArtifacts,
   buildLetterboxMeta,
   writeLetterboxMeta,
@@ -108,12 +109,15 @@ import {
   validateLetterboxConsistency,
   writeLetterboxInconsistent,
   writeJsonAtomic,
+  writeRectificationDebugOverlay,
+  writeCropQualityAnalysis,
   type AllArtifactsData,
   type FilteredDetectionsData,
   type PreprocessDebug,
   type SourceDecodeStats,
   type ScoreSanityStats,
   type NMSWitnessData,
+  type RectificationOverlayDetection,
 } from './debugArtifacts';
 import { buildImageMetaFromUri } from './imageService';
 import { useAppStore } from '../store/useAppStore';
@@ -201,6 +205,10 @@ export async function runPipeline(
   // SINGLE SOURCE OF TRUTH: FrameGeo captures all geometry at capture time
   let frameGeo: FrameGeo | undefined;
 
+  // Track display image for UI rendering (downscaled to avoid PERF ASSETS warnings)
+  let displayImagePath: string | undefined;
+  let displayImageScale: number = 1.0;
+
   try {
     // Create session directory
     const sessionDir = await createSessionDir(sessionId);
@@ -228,6 +236,20 @@ export async function runPipeline(
     normalizedImagePath = normalizedResult.path;
     rotationApplied = normalizedResult.rotationApplied;
     console.log(`[Pipeline] Normalized image: ${normalizedImagePath} (rotation applied: ${rotationApplied}°)`);
+
+    // Create display.jpg - downscaled for UI rendering to avoid PERF ASSETS warnings
+    // Max dimension 1280px is sufficient for most phone screens
+    const displayResult = await createDisplayImage(sessionId, normalizedImagePath, 1280, 0.85);
+    if (displayResult) {
+      displayImagePath = displayResult.path;
+      displayImageScale = displayResult.scale;
+      console.log(`[Pipeline] Display image: ${displayImagePath} (scale: ${displayImageScale.toFixed(3)})`);
+    } else {
+      // Fall back to normalized image if display creation fails
+      displayImagePath = normalizedImagePath;
+      displayImageScale = 1.0;
+      console.log('[Pipeline] Display image creation failed, using normalized image');
+    }
 
     timer.endStage('meta');
 
@@ -768,6 +790,8 @@ export async function runPipeline(
       imageDimensions: frameGeo ? { width: frameGeo.pixelW, height: frameGeo.pixelH } : { width: imageMeta.width, height: imageMeta.height },
       normalizedImagePath: normalizedImagePath || null,
       originalImagePath: imageUri,
+      displayImagePath: displayImagePath || null,
+      displayImageScale: displayImageScale,
     });
 
     timer.endStage('overlay-prep');
@@ -801,20 +825,72 @@ export async function runPipeline(
         };
 
         // Update sessionMeta with rectification results
+        // IMPORTANT: Populate BOTH cropPath (for native) and cropUri (for RN Image)
         const currentMeta = store.sessionMeta;
         if (currentMeta) {
           store.setSessionMeta({
             ...currentMeta,
-            rectificationResults: rectifyResult.results.map((r) => ({
-              detectionIndex: r.detectionIndex,
-              cropUri: r.cropUri || null,
-              cropWidth: r.outputWidth,
-              cropHeight: r.outputHeight,
-              rectificationMethod: r.rectificationMethod || 'unknown',
-              skippedReason: r.skippedReason,
-            })),
+            rectificationResults: rectifyResult.results.map((r) => {
+              // r.cropUri from rectificationService is already file:// prefixed
+              const cropUri = r.cropUri || null;
+              // Strip file:// to get plain path for native modules
+              const cropPath = cropUri ? cropUri.replace('file://', '') : null;
+
+              return {
+                detectionIndex: r.detectionIndex,
+                cropPath,
+                cropUri,
+                cropWidth: r.outputWidth,
+                cropHeight: r.outputHeight,
+                rectificationMethod: r.rectificationMethod || 'unknown',
+                skippedReason: r.skippedReason,
+              };
+            }),
             rectificationSummary,
           });
+
+          // Log for verification
+          const successCount = rectifyResult.results.filter(r => r.cropUri).length;
+          console.log(`[Pipeline] Stored ${successCount} rectification results in sessionMeta`);
+          if (successCount > 0) {
+            const first = rectifyResult.results.find(r => r.cropUri);
+            console.log(`[Pipeline] First cropUri: ${first?.cropUri?.substring(0, 60)}...`);
+          }
+        }
+        // ================================================================
+        // STEP 10: Write rectification debug overlay
+        // ================================================================
+        if (detections.length > 0) {
+          try {
+            const overlayDetections: RectificationOverlayDetection[] = detections.map((d, idx) => ({
+              cx: d.cx,
+              cy: d.cy,
+              width: d.width,
+              height: d.height,
+              angle: d.angle,
+              score: d.score,
+              detectionIndex: idx,
+            }));
+            await writeRectificationDebugOverlay(sessionId, overlayDetections);
+          } catch (overlayError: any) {
+            console.warn(`[Pipeline] Rectification overlay failed: ${overlayError.message}`);
+          }
+        }
+
+        // ================================================================
+        // STEP 11: Analyze crop quality (detect blank crops)
+        // ================================================================
+        const validCrops = rectifyResult.results.filter(r => r.cropUri && r.rectificationMethod !== 'skipped');
+        if (validCrops.length > 0) {
+          try {
+            const cropPaths = validCrops.map(r => ({
+              detectionIndex: r.detectionIndex,
+              cropUri: r.cropUri,
+            }));
+            await writeCropQualityAnalysis(sessionId, cropPaths);
+          } catch (qualityError: any) {
+            console.warn(`[Pipeline] Crop quality analysis failed: ${qualityError.message}`);
+          }
         }
       } catch (rectError: any) {
         const errMsg = `Rectification failed: ${rectError.message}`;

@@ -1,5 +1,43 @@
 // Jest setup file
 
+// Mock react-native-gesture-handler (additional mocks beyond jestSetup.js)
+jest.mock('react-native-gesture-handler', () => {
+  const View = require('react-native').View;
+  return {
+    GestureHandlerRootView: View,
+    Swipeable: View,
+    DrawerLayout: View,
+    State: {},
+    ScrollView: require('react-native').ScrollView,
+    Slider: View,
+    Switch: View,
+    TextInput: require('react-native').TextInput,
+    ToolbarAndroid: View,
+    ViewPagerAndroid: View,
+    DrawerLayoutAndroid: View,
+    WebView: View,
+    NativeViewGestureHandler: View,
+    TapGestureHandler: View,
+    FlingGestureHandler: View,
+    ForceTouchGestureHandler: View,
+    LongPressGestureHandler: View,
+    PanGestureHandler: View,
+    PinchGestureHandler: View,
+    RotationGestureHandler: View,
+    RawButton: View,
+    BaseButton: View,
+    RectButton: View,
+    BorderlessButton: View,
+    TouchableHighlight: require('react-native').TouchableHighlight,
+    TouchableNativeFeedback: View,
+    TouchableOpacity: require('react-native').TouchableOpacity,
+    TouchableWithoutFeedback: require('react-native').TouchableWithoutFeedback,
+    Directions: {},
+    gestureHandlerRootHOC: jest.fn((component) => component),
+    createNativeWrapper: jest.fn((component) => component),
+  };
+});
+
 // Mock react-native-mmkv
 jest.mock('react-native-mmkv', () => ({
   MMKV: jest.fn().mockImplementation(() => ({

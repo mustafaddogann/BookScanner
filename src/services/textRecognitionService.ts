@@ -20,6 +20,7 @@ const TextRecognizer = NativeModules.TextRecognizer;
 // Cache for availability check
 let textRecognitionAvailable: boolean | null = null;
 let textRecognitionMethod: string | null = null;
+let availabilityCheckLogged = false;
 
 /**
  * Check if text recognition is available on this device
@@ -32,7 +33,11 @@ export async function isTextRecognitionAvailable(): Promise<{
   reason?: string;
 }> {
   if (!TextRecognizer) {
-    console.log('[OCR] TextRecognizer native module not found');
+    // Only log once to reduce spam
+    if (!availabilityCheckLogged) {
+      console.log('[OCR] TextRecognizer native module not found');
+      availabilityCheckLogged = true;
+    }
     return {
       available: false,
       platform: Platform.OS,

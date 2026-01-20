@@ -42,10 +42,11 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>BookScanner needs photo library access to save scanned images</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>BookScanner needs local network access to connect to the development server during debugging</string>
+	<string>BookScanner needs local network access to connect to the Metro development server for loading JavaScript bundles during development.</string>
 	<key>NSBonjourServices</key>
 	<array>
 		<string>_http._tcp.</string>
+		<string>_http-alt._tcp.</string>
 	</array>
 	<key>RCTNewArchEnabled</key>
 	<true/>
@@ -63,5 +64,22 @@
 	</array>
 	<key>UIViewControllerBasedStatusBarAppearance</key>
 	<false/>
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<false/>
+		<key>UISceneConfigurations</key>
+		<dict>
+			<key>UIWindowSceneSessionRoleApplication</key>
+			<array>
+				<dict>
+					<key>UISceneConfigurationName</key>
+					<string>Default Configuration</string>
+					<key>UISceneDelegateClassName</key>
+					<string>$(PRODUCT_MODULE_NAME).SceneDelegate</string>
+				</dict>
+			</array>
+		</dict>
+	</dict>
 </dict>
 </plist>

@@ -685,6 +685,84 @@ export async function writeInputNormalized(
 }
 
 /**
+ * Result of createDisplayImage
+ */
+export interface DisplayImageResult {
+  path: string;
+  width: number;
+  height: number;
+  sourceWidth: number;
+  sourceHeight: number;
+  scale: number;
+  resized: boolean;
+}
+
+/**
+ * Create a downscaled display image for UI rendering
+ *
+ * This generates a smaller version of the normalized image to avoid
+ * "[PERF ASSETS] Loading image at size ... larger than screen" warnings.
+ *
+ * The display image is ONLY for UI rendering - detection coordinates
+ * are still relative to the original image dimensions and must be scaled
+ * using the returned scale factor.
+ *
+ * @param sessionId - Session ID for artifact storage
+ * @param sourcePath - Path to source image (usually input_normalized.jpg)
+ * @param maxDimension - Max size for longest edge (default 1280)
+ * @param quality - JPEG quality 0.0-1.0 (default 0.85)
+ * @returns DisplayImageResult with path and scale info, or null if native module unavailable
+ */
+export async function createDisplayImage(
+  sessionId: string,
+  sourcePath: string,
+  maxDimension: number = 1280,
+  quality: number = 0.85
+): Promise<DisplayImageResult | null> {
+  const sessionDir = getSessionDir(sessionId);
+  const displayPath = `${sessionDir}/display.jpg`;
+
+  // Get native module
+  const { NativeModules } = require('react-native');
+  const { ImagePreprocessor } = NativeModules;
+
+  if (!ImagePreprocessor || !ImagePreprocessor.createDisplayImage) {
+    console.warn('[DebugArtifacts] createDisplayImage: Native module not available');
+    return null;
+  }
+
+  try {
+    // Clean source path for native module
+    const cleanSource = sourcePath.startsWith('file://') ? sourcePath.slice(7) : sourcePath;
+
+    const result = await ImagePreprocessor.createDisplayImage(
+      cleanSource,
+      displayPath,
+      maxDimension,
+      quality
+    );
+
+    console.log(
+      `[DebugArtifacts] Created display.jpg: ${result.width}x${result.height} ` +
+      `(source: ${result.sourceWidth}x${result.sourceHeight}, scale: ${result.scale.toFixed(3)}, resized: ${result.resized})`
+    );
+
+    return {
+      path: displayPath,
+      width: result.width,
+      height: result.height,
+      sourceWidth: result.sourceWidth,
+      sourceHeight: result.sourceHeight,
+      scale: result.scale,
+      resized: result.resized,
+    };
+  } catch (error: any) {
+    console.error(`[DebugArtifacts] createDisplayImage failed: ${error.message}`);
+    return null;
+  }
+}
+
+/**
  * Write preprocess_debug.json - preprocessing parameters (atomic)
  */
 export async function writePreprocessDebug(
@@ -2681,4 +2759,239 @@ export async function writeInputTensorArtifacts(
     previewWritten: previewResult.success,
     errors,
   };
+}
+
+// ============================================================================
+// RECTIFICATION DEBUG OVERLAY
+// ============================================================================
+
+/**
+ * OBB detection for rectification overlay (frame-space coordinates)
+ */
+export interface RectificationOverlayDetection {
+  cx: number;
+  cy: number;
+  width: number;
+  height: number;
+  angle: number;
+  score: number;
+  detectionIndex: number;
+}
+
+/**
+ * Write rectification debug overlay artifact.
+ * Draws OBB boxes on input_normalized.jpg to visualize what regions are being rectified.
+ *
+ * @param sessionId - Session ID
+ * @param detections - OBB detections in frame-space coordinates
+ * @returns WriteResult
+ */
+export async function writeRectificationDebugOverlay(
+  sessionId: string,
+  detections: RectificationOverlayDetection[]
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('rectification_overlay')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const normalizedPath = `${sessionDir}/input_normalized.jpg`;
+  const outputPath = `${sessionDir}/overlay_rectification.jpg`;
+
+  // Check if input_normalized.jpg exists
+  const exists = await RNFS.exists(normalizedPath);
+  if (!exists) {
+    const error = 'input_normalized.jpg not found';
+    console.error(`[DebugArtifacts] Cannot create rectification overlay: ${error}`);
+    return { success: false, path: outputPath, bytes: 0, error };
+  }
+
+  // Get native module
+  const { NativeModules } = require('react-native');
+  const ImagePreprocessor = NativeModules.ImagePreprocessor;
+
+  if (!ImagePreprocessor || !ImagePreprocessor.drawOBBOverlay) {
+    const error = 'Native drawOBBOverlay not available';
+    console.warn(`[DebugArtifacts] ${error}`);
+    return { success: false, path: outputPath, bytes: 0, error };
+  }
+
+  try {
+    // Convert detections to overlay format
+    const overlayDetections = detections.map(d => ({
+      cx: d.cx,
+      cy: d.cy,
+      width: d.width,
+      height: d.height,
+      angle: d.angle,
+      score: d.score,
+    }));
+
+    const result = await ImagePreprocessor.drawOBBOverlay(
+      normalizedPath,
+      overlayDetections,
+      outputPath,
+      3.0  // thicker line width for frame-space (larger image)
+    );
+
+    console.log(`[DebugArtifacts] ✓ Created rectification overlay: ${detections.length} boxes`);
+
+    return {
+      success: true,
+      path: result.path,
+      bytes: result.size,
+    };
+  } catch (error: any) {
+    console.error(`[DebugArtifacts] Rectification overlay failed: ${error.message}`);
+    return {
+      success: false,
+      path: outputPath,
+      bytes: 0,
+      error: error.message,
+    };
+  }
+}
+
+// ============================================================================
+// BLANK CROP DETECTOR
+// ============================================================================
+
+/**
+ * Crop quality analysis result
+ */
+export interface CropQualityResult {
+  /** Whether the crop appears to be blank/empty */
+  isBlank: boolean;
+  /** Variance of pixel values (low = likely blank) */
+  variance: number;
+  /** Minimum pixel value (0-255) */
+  minValue: number;
+  /** Maximum pixel value (0-255) */
+  maxValue: number;
+  /** Mean pixel value (0-255) */
+  meanValue: number;
+  /** Percentage of pixels that are near-gray (within ±10 of 114) */
+  grayPercentage: number;
+  /** Reason why crop is considered blank (if isBlank=true) */
+  blankReason?: string;
+}
+
+/**
+ * Analyze crop quality to detect blank/empty crops.
+ * A blank crop typically has:
+ * - Very low variance (all pixels same color)
+ * - High percentage of gray pixels (padding fill color)
+ *
+ * @param cropPath - Path to the crop image file
+ * @returns CropQualityResult
+ */
+export async function analyzeCropQuality(cropPath: string): Promise<CropQualityResult | null> {
+  const { NativeModules } = require('react-native');
+  const ImagePreprocessor = NativeModules.ImagePreprocessor;
+
+  if (!ImagePreprocessor || !ImagePreprocessor.getImageDecodeStats) {
+    console.warn('[DebugArtifacts] Cannot analyze crop quality: native module not available');
+    return null;
+  }
+
+  try {
+    const cleanPath = cropPath.startsWith('file://') ? cropPath.slice(7) : cropPath;
+    const stats = await ImagePreprocessor.getImageDecodeStats(cleanPath);
+
+    // Calculate overall variance from RGB channel stats
+    const channels = stats.channels;
+    const avgMean = (channels.R.mean + channels.G.mean + channels.B.mean) / 3;
+    const avgStd = (channels.R.std + channels.G.std + channels.B.std) / 3;
+    const variance = avgStd * avgStd;
+
+    // Check for blank/empty crop
+    const VARIANCE_THRESHOLD = 50;  // Very low variance = likely blank
+    const GRAY_FILL_VALUE = 114;     // Standard padding fill color
+    const GRAY_TOLERANCE = 10;       // ±10 from gray
+
+    // Calculate what percentage of the image is near-gray
+    // This is an approximation based on mean being close to gray
+    const isNearGray = Math.abs(avgMean - GRAY_FILL_VALUE) < GRAY_TOLERANCE;
+    const grayPercentage = isNearGray && variance < VARIANCE_THRESHOLD ? 95 : 0;
+
+    let isBlank = false;
+    let blankReason: string | undefined;
+
+    if (variance < VARIANCE_THRESHOLD && isNearGray) {
+      isBlank = true;
+      blankReason = `Low variance (${variance.toFixed(1)}) and mean (${avgMean.toFixed(1)}) near gray fill (114)`;
+    } else if (stats.globalMax === stats.globalMin) {
+      isBlank = true;
+      blankReason = `All pixels same value (${stats.globalMin})`;
+    } else if (stats.globalMax - stats.globalMin < 10) {
+      isBlank = true;
+      blankReason = `Very narrow pixel range (${stats.globalMin}-${stats.globalMax})`;
+    }
+
+    return {
+      isBlank,
+      variance,
+      minValue: stats.globalMin,
+      maxValue: stats.globalMax,
+      meanValue: avgMean,
+      grayPercentage,
+      blankReason,
+    };
+  } catch (error: any) {
+    console.error(`[DebugArtifacts] Crop quality analysis failed: ${error.message}`);
+    return null;
+  }
+}
+
+/**
+ * Write crop quality analysis for all crops in a session
+ */
+export async function writeCropQualityAnalysis(
+  sessionId: string,
+  cropPaths: Array<{ detectionIndex: number; cropUri: string }>
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('crop_quality')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const outputPath = `${sessionDir}/crop_quality.json`;
+
+  const results: Array<{
+    detectionIndex: number;
+    cropPath: string;
+    quality: CropQualityResult | null;
+  }> = [];
+
+  let blankCount = 0;
+
+  for (const { detectionIndex, cropUri } of cropPaths) {
+    const cleanPath = cropUri.startsWith('file://') ? cropUri.slice(7) : cropUri;
+    const quality = await analyzeCropQuality(cleanPath);
+
+    if (quality?.isBlank) {
+      blankCount++;
+      console.warn(`[DebugArtifacts] ⚠️  Crop ${detectionIndex} appears BLANK: ${quality.blankReason}`);
+    }
+
+    results.push({
+      detectionIndex,
+      cropPath: cleanPath,
+      quality,
+    });
+  }
+
+  const summary = {
+    totalCrops: results.length,
+    blankCrops: blankCount,
+    validCrops: results.length - blankCount,
+    crops: results,
+    analyzedAt: new Date().toISOString(),
+  };
+
+  console.log(`[DebugArtifacts] Crop quality: ${summary.validCrops}/${summary.totalCrops} valid (${blankCount} blank)`);
+
+  return writeJsonAtomic(outputPath, summary, sessionDir);
 }

@@ -7,9 +7,9 @@
  * 3. Title/author extraction heuristics
  */
 
-#import <Foundation/Foundation.h>
-#import <UIKit/UIKit.h>
-#import <Vision/Vision.h>
+@import Foundation;
+@import UIKit;
+@import Vision;
 #import <React/RCTBridgeModule.h>
 #import <React/RCTLog.h>
 
@@ -102,15 +102,17 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
     return;
   }
 
-  VNRecognizeTextRequestCompletionHandler handler = ^(VNRequest *request, NSError *error) {
+  // Capture image dimensions for use in completion handler
+  CGFloat imageWidth = CGImageGetWidth(cgImage);
+  CGFloat imageHeight = CGImageGetHeight(cgImage);
+
+  VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:^(VNRequest * _Nonnull request, NSError * _Nullable error) {
     if (error) {
       completion(nil, error);
       return;
     }
 
     NSMutableArray<NSDictionary *> *results = [NSMutableArray array];
-    CGFloat imageWidth = CGImageGetWidth(cgImage);
-    CGFloat imageHeight = CGImageGetHeight(cgImage);
 
     for (VNRecognizedTextObservation *observation in request.results) {
       VNRecognizedText *topCandidate = [[observation topCandidates:1] firstObject];
@@ -140,9 +142,7 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
     }
 
     completion(results, nil);
-  };
-
-  VNRecognizeTextRequest *request = [[VNRecognizeTextRequest alloc] initWithCompletionHandler:handler];
+  }];
 
   // Set recognition level
   if ([level isEqualToString:@"fast"]) {

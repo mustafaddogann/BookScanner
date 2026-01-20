@@ -24,6 +24,7 @@ const ImagePreprocessor = NativeModules.ImagePreprocessor;
 // Cache for native rectification availability
 let nativeRectificationAvailable: boolean | null = null;
 let nativeRectificationMethod: string | null = null;
+let availabilityCheckLogged = false;
 
 /**
  * Check if native rectification is available on this device
@@ -36,7 +37,11 @@ export async function isNativeRectificationAvailable(): Promise<{
   reason?: string;
 }> {
   if (!ImagePreprocessor) {
-    console.log('[Rectifier] ImagePreprocessor native module not found');
+    // Only log once to reduce spam
+    if (!availabilityCheckLogged) {
+      console.log('[Rectifier] ImagePreprocessor native module not found');
+      availabilityCheckLogged = true;
+    }
     return {
       available: false,
       platform: Platform.OS,

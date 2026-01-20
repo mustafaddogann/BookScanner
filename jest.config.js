@@ -10,6 +10,9 @@ module.exports = {
   transformIgnorePatterns: [
     'node_modules/(?!(react-native|@react-native|react-native-.*|@react-navigation)/)',
   ],
+  setupFiles: [
+    './node_modules/react-native-gesture-handler/jestSetup.js',
+  ],
   setupFilesAfterEnv: ['<rootDir>/jest.setup.js'],
   moduleNameMapper: {
     '^@/(.*)$': '<rootDir>/src/$1',

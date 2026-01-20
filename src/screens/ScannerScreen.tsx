@@ -1,5 +1,10 @@
 /**
  * ScannerScreen - Camera preview and capture
+ *
+ * Orientation handling:
+ * - VisionCamera outputOrientation is set to "preview" (follows preview orientation)
+ * - Device orientation changes are tracked internally for overlay math
+ * - Orientation changes are debounced (300ms) to avoid rapid state updates
  */
 
 import React, { useCallback, useEffect, useRef, useState } from 'react';
@@ -17,15 +22,24 @@ import {
   useCameraDevice,
   useCameraPermission,
   PhotoFile,
+  Orientation,
 } from 'react-native-vision-camera';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
-import { createSessionFromCapture } from '../services/imageService';
 import { runPipelineOnCapture } from '../services/pipelineService';
 import { useAppStore } from '../store/useAppStore';
 
+// Orientation debounce time in ms
+const ORIENTATION_DEBOUNCE_MS = 300;
+
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Scanner'>;
+
+/**
+ * Internal UI orientation type for overlay calculations.
+ * This is separate from VisionCamera's OutputOrientation ('device' | 'preview').
+ */
+type UIOrientation = Orientation;
 
 export function ScannerScreen(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
@@ -37,12 +51,57 @@ export function ScannerScreen(): React.JSX.Element {
 
   const { isProcessing, processingStage, error, setError } = useAppStore();
 
+  // Internal UI orientation state for overlay calculations
+  // This tracks the device orientation for UI/overlay purposes only.
+  // VisionCamera outputOrientation is always "preview" (constant).
+  const [uiOrientation, setUIOrientation] = useState<UIOrientation>('portrait');
+  const orientationDebounceTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastOrientationUpdate = useRef<number>(0);
+
   // Request camera permission on mount
   useEffect(() => {
     if (!hasPermission) {
       requestPermission();
     }
   }, [hasPermission, requestPermission]);
+
+  // Handle orientation change from VisionCamera callback (for internal UI tracking)
+  // This is called by onOutputOrientationChanged and provides the device's physical orientation.
+  // We use this for overlay calculations only - not for VisionCamera outputOrientation prop.
+  const handleOrientationChange = useCallback((newOrientation: Orientation) => {
+    const now = Date.now();
+
+    // Skip if same as current
+    if (newOrientation === uiOrientation) {
+      return;
+    }
+
+    // Debounce rapid changes
+    if (now - lastOrientationUpdate.current < ORIENTATION_DEBOUNCE_MS) {
+      // Clear existing timer and set new one
+      if (orientationDebounceTimer.current) {
+        clearTimeout(orientationDebounceTimer.current);
+      }
+      orientationDebounceTimer.current = setTimeout(() => {
+        handleOrientationChange(newOrientation);
+      }, ORIENTATION_DEBOUNCE_MS);
+      return;
+    }
+
+    // Apply the orientation change (for UI tracking only)
+    lastOrientationUpdate.current = now;
+    setUIOrientation(newOrientation);
+    console.log(`[Scanner] UI orientation updated: ${newOrientation}`);
+  }, [uiOrientation]);
+
+  // Cleanup debounce timer on unmount
+  useEffect(() => {
+    return () => {
+      if (orientationDebounceTimer.current) {
+        clearTimeout(orientationDebounceTimer.current);
+      }
+    };
+  }, []);
 
   // Handle capture
   const handleCapture = useCallback(async () => {
@@ -52,7 +111,7 @@ export function ScannerScreen(): React.JSX.Element {
     setError(null);
 
     try {
-      console.log('[Scanner] Capturing photo...');
+      console.log(`[Scanner] Capturing photo... (ui orientation: ${uiOrientation})`);
 
       // Capture best quality still
       const photo: PhotoFile = await camera.current.takePhoto({
@@ -76,7 +135,7 @@ export function ScannerScreen(): React.JSX.Element {
     } finally {
       setIsCapturing(false);
     }
-  }, [isCapturing, isProcessing, navigation, setError]);
+  }, [isCapturing, isProcessing, navigation, setError, uiOrientation]);
 
   // Navigate to debug screen
   const handleDebug = useCallback(() => {
@@ -122,6 +181,8 @@ export function ScannerScreen(): React.JSX.Element {
         isActive={isCameraActive}
         photo={true}
         enableZoomGesture={!isCapturing}
+        outputOrientation="preview"
+        onOutputOrientationChanged={handleOrientationChange}
       />
 
       {/* Processing overlay */}
