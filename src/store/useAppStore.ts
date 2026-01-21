@@ -1,6 +1,18 @@
 import { create } from 'zustand';
 import { MMKV } from 'react-native-mmkv';
-import type { ScanSession, OBBDetection, SerializedFrameGeo, RectifyResult, OCRResult, OCRSummary, MetadataMatch } from '../types';
+import type {
+  ScanSession,
+  OBBDetection,
+  SerializedFrameGeo,
+  RectifyResult,
+  OCRResult,
+  OCRSummary,
+  MetadataMatch,
+  BookCandidate,
+  BookCandidatesSummary,
+  EvidenceSummary,
+  MetadataResolutionState,
+} from '../types';
 
 // Initialize MMKV storage
 export const storage = new MMKV({
@@ -62,6 +74,16 @@ export interface SessionMeta {
   metadataMatchesByCropIndex?: Record<number, MetadataMatch[]>;
   /** User-edited title/author overrides indexed by crop index */
   userEdits?: Record<number, { title?: string; author?: string }>;
+  /** Book candidates after grouping (Gate 7) */
+  bookCandidates?: BookCandidate[];
+  /** Summary of book candidate grouping */
+  bookCandidatesSummary?: BookCandidatesSummary;
+  /** Evidence quality summary from metadata resolution (Gate 8+) */
+  evidenceSummary?: EvidenceSummary;
+  /** Metadata resolution state (Gate 8+) */
+  metadataResolution?: MetadataResolutionState;
+  /** Whether metadata resolution was queued for offline retry */
+  metadataQueuedForOffline?: boolean;
 }
 
 interface AppState {
@@ -90,7 +112,7 @@ interface AppState {
   setSelectedDetection: (index: number | null) => void;
   setProcessing: (isProcessing: boolean, stage?: string | null) => void;
   setError: (error: string | null) => void;
-  setSessionMeta: (meta: SessionMeta | null) => void;
+  setSessionMeta: (meta: Partial<SessionMeta> | null) => void;
   addSession: (session: ScanSession) => void;
   updateSession: (sessionId: string, updates: Partial<ScanSession>) => void;
   loadSessions: () => void;
@@ -156,12 +178,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     });
   },
 
+  /**
+   * Update sessionMeta with MERGE semantics to prevent clobbering.
+   *
+   * IMPORTANT: This function MERGES the provided partial into existing state.
+   * Previously it REPLACED, which caused rectificationResults/ocrResults to be
+   * wiped when later calls only provided frameGeo/dims.
+   *
+   * To clear sessionMeta entirely, pass null.
+   * To update specific fields, pass a partial object - existing fields are preserved.
+   *
+   * @param meta - Partial SessionMeta to merge, or null to clear entirely
+   */
   setSessionMeta: (meta) => {
-    set({ sessionMeta: meta });
-    if (meta) {
-      console.log(`[AppStore] Session meta set: frameGeo=${!!meta.frameGeo}, dims=${meta.imageDimensions?.width}x${meta.imageDimensions?.height}`);
-    } else {
+    if (meta === null) {
+      // Explicit clear - replace with null
+      set({ sessionMeta: null });
       console.log('[AppStore] Session meta cleared');
+    } else {
+      // MERGE semantics: preserve existing fields, update provided ones
+      const current = get().sessionMeta;
+      // When merging, cast to SessionMeta since we're combining current (full) with partial
+      const merged: SessionMeta = current
+        ? { ...current, ...meta }
+        : {
+            // If no current, create with defaults for required fields
+            frameGeo: null,
+            imageDimensions: null,
+            normalizedImagePath: null,
+            originalImagePath: null,
+            ...meta,
+          };
+      set({ sessionMeta: merged });
+
+      // Log what was updated (for debugging)
+      const updatedKeys = Object.keys(meta).join(', ');
+      console.log(`[AppStore] Session meta merged: updated=[${updatedKeys}], frameGeo=${!!merged.frameGeo}, dims=${merged.imageDimensions?.width}x${merged.imageDimensions?.height}, rectResults=${merged.rectificationResults?.length ?? 0}, ocrResults=${Object.keys(merged.ocrResultsByCropIndex || {}).length}`);
     }
   },
 

@@ -2,6 +2,13 @@
 
 This document describes the image processing pipeline used by BookScanner to detect and extract book spine information from photographs.
 
+**Related Documentation:**
+- [docs/project_plan.md](./project_plan.md) - Project roadmap and Gates 7-10 (metadata extraction)
+- [docs/gates.md](./gates.md) - Stop-the-line gate checklist
+- [docs/build.md](./build.md) - Build troubleshooting
+
+---
+
 ## Pipeline Overview
 
 The pipeline processes captured images through the following stages:
@@ -43,7 +50,56 @@ Image Capture
 ┌─────────────────┐
 │     7. OCR      │ ─── Text recognition on crops
 └─────────────────┘
+     │
+     ▼
+┌─────────────────┐
+│  8. GROUPING    │ ─── Cluster detections into book candidates
+└─────────────────┘
+     │
+     ▼
+┌─────────────────┐
+│ 9. METADATA     │ ─── QUALITY_CLASSIFY → HYPOTHESIZE → RESOLVE → VERIFY → DECIDE
+│    RESOLUTION   │     (feature-flagged: METADATA_RESOLUTION_ENABLED)
+└─────────────────┘
+     │
+     ▼
+┌ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+│ 10. EXTRACTION  │ ─── Gate 8: Extract title/author/ISBN/publisher
+└ ─ ─ ─ ─ ─ ─ ─ ─ ┘     (see project_plan.md)
+     │
+     ▼
+┌ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+│  11. RESOLVER   │ ─── Gate 9: External lookup (planned)
+└ ─ ─ ─ ─ ─ ─ ─ ─ ┘     (see project_plan.md)
+     │
+     ▼
+┌ ─ ─ ─ ─ ─ ─ ─ ─ ┐
+│ 12. CORRECTIONS │ ─── Gate 10: Apply remembered corrections
+└ ─ ─ ─ ─ ─ ─ ─ ─ ┘     (see project_plan.md)
 ```
+
+**Note:** Stages 10-12 (dashed boxes) are planned but not yet implemented. See [project_plan.md](./project_plan.md) for details.
+
+---
+
+## Current Implementation Status
+
+| Stage | Status | Platform |
+|-------|--------|----------|
+| 1. Meta | Implemented | iOS, Android |
+| 2. Letterbox | Implemented | iOS, Android |
+| 3. Inference | Implemented | iOS, Android |
+| 4. Postprocess | Implemented | iOS, Android |
+| 5. Overlay-Prep | Implemented | iOS, Android |
+| 6. Rectification | Implemented | iOS only (CoreImage) |
+| 7. OCR | Implemented | iOS (Vision), Android (ML Kit) |
+| 8. Grouping | Implemented | iOS, Android |
+| 9. Metadata Resolution | Implemented (feature-flagged) | iOS, Android |
+| 10. Extraction | Planned | See Gate 8 |
+| 11. Resolver | Planned | See Gate 9 |
+| 12. Corrections | Planned | See Gate 10 |
+
+---
 
 ## Stage Details
 
@@ -149,24 +205,210 @@ interface FrameGeo {
 
 **Purpose:** Extract straightened book spine images.
 
+**Platform Support:**
+- **iOS:** Uses CoreImage `CIPerspectiveCorrection` filter, max 2048px output
+- **Android:** Not yet implemented (returns `skipped`)
+
 **Operations:**
 - For each detection, compute perspective transform
 - Extract crop with deskewing
 - Save as `crop_{index}.jpg`
 
 **Rectification Methods:**
-- `native_affine` - Core Graphics affine transform
-- `native_perspective` - Core Graphics perspective transform
-- `skipped` - Detection too small or invalid
+- `native_perspective` - CoreImage perspective correction (iOS)
+- `skipped` - Detection too small, invalid, or platform unsupported
+
+**Service Location:** `src/services/rectificationService.ts`
 
 ### 7. OCR Stage
 
 **Purpose:** Extract text from book spine crops.
 
+**Platform Support:**
+- **iOS:** Apple Vision `VNRecognizeTextRequest` with accurate recognition level
+- **Android:** ML Kit text recognition
+
 **Operations:**
-- Run Vision framework text recognition
-- Extract title and author candidates
-- Apply heuristics to separate title from author
+- Try 4 rotations (0°, 90°, 180°, 270°)
+- Score each rotation by: confidence × alnum ratio × sqrt(char count)
+- Select best rotation
+- Extract title and author candidates via heuristics
+- Store results in `SessionMeta.ocrResultsByCropIndex`
+
+**Service Location:** `src/services/textRecognitionService.ts`
+
+**Post-Processing:** `src/services/ocrPostProcessingService.ts`
+- Normalize lines (trim, collapse whitespace)
+- Filter noise (ISBN patterns, URLs, prices, barcodes)
+- Extract title/author candidates
+- Support user edits via `SessionMeta.userEdits`
+
+---
+
+### 8. Grouping Stage
+
+**Purpose:** Cluster multiple detections/crops that belong to the same physical book.
+
+**Problem Solved:** Multiple detections may represent the same book (overlapping regions, different angles). This stage groups them into book candidates.
+
+**Algorithm:** Uses a **conservative-by-default** approach to avoid incorrectly merging unrelated spines:
+
+**Merge Conditions (ONLY merges under strict conditions):**
+1. **High IoU Path (≥0.50):** Duplicate detections that heavily overlap
+2. **Split-Detection Path:** ALL conditions must be met:
+   - Angle difference ≤ 10°
+   - Center distance ≤ 15% of min dimension
+   - OCR text similarity ≥ 0.75 (**REQUIRED** - no OCR = no merge)
+
+**Safety Cap:** If any candidate would have >3 crops after merging, falls back to 1:1 mapping (no merges at all).
+
+**Key Services:**
+- `bookCandidateGrouper.ts` - Conservative clustering with IoU and OCR-based merge paths
+- `spineEvidenceMerger.ts` - Merge OCR from top K crops per candidate
+
+**Configuration (Conservative):**
+```typescript
+const IOU_MERGE_THRESHOLD = 0.50;           // Minimum IoU to merge as duplicates
+const SPLIT_ANGLE_THRESHOLD_RAD = 0.175;    // ~10 degrees max angle difference
+const SPLIT_CENTER_DIST_RATIO = 0.15;       // Center proximity as % of min dimension
+const SPLIT_OCR_SIMILARITY_THRESHOLD = 0.75; // Minimum OCR text similarity
+const MAX_CROPS_PER_CANDIDATE = 3;          // Safety cap - triggers fallback if exceeded
+```
+
+**Debug Artifact:** When `DEBUG_ARTIFACTS_ENABLED` is true, writes `grouping_assignments.json` with:
+- Which crops/detections belong to each candidate
+- Merge decisions with details (reason, IoU, angle diff, center dist, text similarity)
+- Whether safety fallback was triggered
+- Configuration thresholds used
+
+**Output:** `SessionMeta.bookCandidates[]`, `SessionMeta.bookCandidatesSummary`
+
+**Tests:** 19 comprehensive unit tests covering all merge paths and edge cases
+
+---
+
+### 9. Metadata Resolution Stage
+
+**Purpose:** Classify evidence quality, generate search candidates, and make acceptance decisions.
+
+**Feature Flag:** `METADATA_RESOLUTION_ENABLED` (OFF by default)
+
+**Operations:** Runs a 5-phase pipeline:
+
+```
+QUALITY_CLASSIFY → HYPOTHESIZE → RESOLVE → VERIFY → DECIDE
+```
+
+1. **QUALITY_CLASSIFY:** Classify evidence quality for each crop
+   - Tiers: `strong`, `usable`, `weak`, `unusable`
+   - Based on OCR confidence, alphanumeric ratio, text length
+
+2. **HYPOTHESIZE:** Generate search candidates from evidence
+   - Extract ISBN using OCR-tolerant normalization
+   - Build title/author hints from evidence lines
+   - When `METADATA_FIELD_EXTRACTION_ENABLED`: Extract publisher, edition, year
+   - Enhanced title/author classification to fix OCR assignment errors
+   - Rank candidates by evidence quality
+
+3. **RESOLVE:** Search metadata provider for matches
+   - ISBN lookup (most reliable)
+   - Text search fallback (title + author)
+   - Provider is pluggable (via `MetadataLookupProvider` interface)
+
+4. **VERIFY:** Score and rank matches
+   - Composite score: 40% title + 30% ISBN + 20% author + 10% year
+   - Verification flags: author-mismatch, isbn-mismatch, token-coverage-low
+   - With field extraction: publisher-mismatch, edition-conflict
+
+5. **DECIDE:** Make acceptance decision
+   - `auto-accept`: High confidence, clear winner
+   - `suggest`: Likely match but needs confirmation
+   - `ambiguous`: Multiple valid candidates
+   - `no-match`: No suitable matches found
+
+**Key Services:**
+| Service | Purpose |
+|---------|---------|
+| `evidenceQualityService.ts` | Classify crop evidence tiers |
+| `searchCandidateService.ts` | Generate search candidates |
+| `metadataResolverService.ts` | Score and rank matches |
+| `matchVerificationService.ts` | Verify matches and generate flags |
+| `acceptanceDecisionService.ts` | Make final acceptance decisions |
+| `metadataResolutionOrchestrator.ts` | Orchestrate full pipeline |
+| `metadataLookupProvider.ts` | Provider interface |
+| `metadataLookupProviderFactory.ts` | Provider factory |
+| `offlineResolutionQueue.ts` | Queue for offline retry |
+
+**Types:**
+```typescript
+// Evidence tiers
+type EvidenceTier = 'strong' | 'usable' | 'weak' | 'unusable';
+
+// Acceptance decisions
+type AcceptanceAction = 'auto-accept' | 'suggest' | 'ambiguous' | 'no-match';
+
+// Verification flags
+type VerificationFlag =
+  | 'author-mismatch'
+  | 'isbn-mismatch'
+  | 'token-coverage-low'
+  | 'suspicious-edition'
+  | 'year-implausible'
+  | 'publisher-mismatch'   // From field extraction
+  | 'edition-conflict';    // From field extraction
+```
+
+**Feature Flags (in `src/config/debug.ts`):**
+```typescript
+METADATA_RESOLUTION_ENABLED      // Enable metadata resolution (default: false)
+METADATA_FIELD_EXTRACTION_ENABLED // Enable enhanced field extraction (default: false)
+METADATA_OFFLINE_QUEUE_ENABLED   // Enable offline queue (default: false)
+METADATA_VERBOSE_DEBUG           // Verbose logging (default: false)
+```
+
+**Output:**
+- `SessionMeta.evidenceSummary` - Evidence quality summary
+- `SessionMeta.metadataResolution` - Resolution state and decision
+- `SessionMeta.metadataQueuedForOffline` - Whether queued for offline retry
+
+---
+
+## Future Pipeline Stages (Gates 8-10)
+
+The following stages are planned to improve metadata extraction accuracy. See [project_plan.md](./project_plan.md) for full implementation details.
+
+### 10. Extraction Stage (Gate 8)
+
+**Purpose:** Extract structured fields (title, author, ISBN, publisher, edition) from merged evidence.
+
+**Key Components:**
+- `spineFieldExtractor.ts` - Pattern matching and ranking
+- `isbnValidator.ts` - ISBN-10/13 checksum validation with OCR-tolerant normalization
+
+**Output:** `BookCandidate.extractedFields`
+
+### 11. Resolver Stage (Gate 9)
+
+**Purpose:** Correct OCR errors and fill missing fields using external databases.
+
+**Key Components:**
+- `bookResolverService.ts` - Provider orchestration
+- `openLibraryProvider.ts` - Open Library API
+- `resolverCache.ts` - MMKV cache with TTL
+
+**Output:** `BookCandidate.resolvedMetadata`
+
+### 12. Corrections Stage (Gate 10)
+
+**Purpose:** Apply user corrections from previous scans automatically.
+
+**Key Components:**
+- `correctionsMemory.ts` - Match by ISBN or content hash
+- `useCorrectionsStore.ts` - MMKV-backed persistence
+
+**Output:** `BookCandidate.appliedCorrection`
+
+---
 
 ## Coordinate Systems
 
@@ -208,6 +450,8 @@ screen_x = pixel_x * screenMapping.scale + screenMapping.offsetX
 screen_y = pixel_y * screenMapping.scale + screenMapping.offsetY
 ```
 
+---
+
 ## OBB (Oriented Bounding Box) Format
 
 Detections use oriented bounding boxes with 5 parameters:
@@ -242,6 +486,8 @@ function obbToCorners(obb: OBBDetection): OBBCorners {
 }
 ```
 
+---
+
 ## Session Artifacts
 
 Each pipeline run creates a session directory with the following structure:
@@ -267,6 +513,8 @@ sessions/
         └── ...
 ```
 
+---
+
 ## Debug Artifacts
 
 When `DEBUG_ARTIFACTS_ENABLED = true`, additional artifacts are written:
@@ -275,6 +523,45 @@ When `DEBUG_ARTIFACTS_ENABLED = true`, additional artifacts are written:
 - `overlay_modelspace_nms.jpg` - Post-NMS detections on letterbox preview
 - `detections_raw.json` - Raw model output
 - `preprocess_debug.json` - Preprocessing parameters
+
+---
+
+## Data Flow: SessionMeta
+
+All pipeline results flow through `SessionMeta` in the Zustand store (single source of truth):
+
+```typescript
+interface SessionMeta {
+  // Geometry (from stages 1-2)
+  frameGeo: SerializedFrameGeo | null;
+  imageDimensions: { width: number; height: number } | null;
+  normalizedImagePath: string | null;
+  displayImagePath: string | null;
+  displayImageScale: number;
+
+  // Rectification (from stage 6)
+  rectificationResults: DetectionRectifyInfo[];
+  rectificationSummary: { total: number; succeeded: number; skipped: number };
+
+  // OCR (from stage 7)
+  ocrResultsByCropIndex: Record<number, OCRResult>;
+  ocrSummary: OCRSummary;
+
+  // User edits
+  userEdits: Record<number, { title?: string; author?: string }>;
+
+  // Grouping (from stage 8)
+  bookCandidates: BookCandidate[];
+  bookCandidatesSummary: BookCandidatesSummary;
+
+  // Metadata Resolution (from stage 9, feature-flagged)
+  evidenceSummary?: EvidenceSummary;           // Evidence quality per crop
+  metadataResolution?: MetadataResolutionState; // Resolution decision
+  metadataQueuedForOffline?: boolean;           // Queued for offline retry
+}
+```
+
+---
 
 ## Error Handling
 
@@ -285,9 +572,56 @@ The pipeline tracks errors at each stage:
 - `debug_manifest.json` includes an `errors` array
 - Session `status` is set to `'error'` if any critical failures occur
 
+---
+
 ## Performance Notes
 
 - Display image (`display.jpg`) is capped at 1280px to avoid PERF ASSETS warnings
 - Artifact writing can be disabled for preview mode
 - AABB NMS is faster than OBB NMS (used in preview mode)
 - Model warmup runs on app start to reduce first-inference latency
+- Rectification outputs capped at 2048px on iOS
+
+---
+
+## Service Files
+
+| Service | Location | Purpose |
+|---------|----------|---------|
+| `pipelineService.ts` | `src/services/` | Orchestrates full pipeline |
+| `inferenceService.ts` | `src/services/` | TFLite model inference |
+| `rectificationService.ts` | `src/services/` | Native module bridge for rectification |
+| `textRecognitionService.ts` | `src/services/` | Native OCR bridge |
+| `ocrPostProcessingService.ts` | `src/services/` | Title/author heuristics, noise filtering |
+| `debugArtifacts.ts` | `src/services/` | Debug file writing |
+
+**Grouping services (Stage 8):**
+| Service | Purpose |
+|---------|---------|
+| `bookCandidateGrouper.ts` | Cluster detections into candidates |
+| `spineEvidenceMerger.ts` | Merge OCR from multiple crops |
+
+**Metadata Resolution services (Stage 9, feature-flagged):**
+| Service | Purpose |
+|---------|---------|
+| `evidenceQualityService.ts` | Classify evidence tier per crop |
+| `searchCandidateService.ts` | Generate search candidates from evidence |
+| `spineFieldExtractionService.ts` | Extract ISBN, publisher, edition, year, title, author (feature-flagged) |
+| `metadataResolverService.ts` | Score and rank matches |
+| `matchVerificationService.ts` | Verify matches, generate flags (incl. publisher-mismatch, edition-conflict) |
+| `acceptanceDecisionService.ts` | Make acceptance decisions |
+| `metadataResolutionOrchestrator.ts` | Orchestrate full pipeline |
+| `metadataLookupProvider.ts` | Provider interface |
+| `metadataLookupProviderFactory.ts` | Provider factory |
+| `offlineResolutionQueue.ts` | Queue for offline retry |
+| `stringSimilarity.ts` | Fuzzy string matching |
+| `isbnUtils.ts` | ISBN parsing and validation |
+
+**Future services (Gates 8-10):**
+| Service | Purpose |
+|---------|---------|
+| `spineFieldExtractor.ts` | Extract structured fields |
+| `bookResolverService.ts` | External lookup orchestration |
+| `openLibraryProvider.ts` | Open Library API |
+| `resolverCache.ts` | Lookup result caching |
+| `correctionsMemory.ts` | User correction persistence |

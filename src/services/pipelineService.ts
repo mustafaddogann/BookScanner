@@ -84,6 +84,10 @@ import {
 } from './inferenceService';
 import { rectifyAll } from './rectificationService';
 import { recognizeAllCrops, isTextRecognitionAvailable } from './textRecognitionService';
+import { groupDetectionsIntoCandidates } from './bookCandidateGrouper';
+import { mergeEvidenceForAllCandidates } from './spineEvidenceMerger';
+import { runMetadataResolution } from './metadataResolutionOrchestrator';
+import { isMetadataResolutionEnabled, isMetadataVerboseDebug } from '../config/debug';
 import {
   createSessionDir,
   writeDebugManifest,
@@ -111,6 +115,7 @@ import {
   writeJsonAtomic,
   writeRectificationDebugOverlay,
   writeCropQualityAnalysis,
+  writeGroupingAssignments,
   type AllArtifactsData,
   type FilteredDetectionsData,
   type PreprocessDebug,
@@ -824,38 +829,37 @@ export async function runPipeline(
           skipped: rectifyResult.skipped,
         };
 
-        // Update sessionMeta with rectification results
+        // Update sessionMeta with rectification results (MERGE semantics)
         // IMPORTANT: Populate BOTH cropPath (for native) and cropUri (for RN Image)
-        const currentMeta = store.sessionMeta;
-        if (currentMeta) {
-          store.setSessionMeta({
-            ...currentMeta,
-            rectificationResults: rectifyResult.results.map((r) => {
-              // r.cropUri from rectificationService is already file:// prefixed
-              const cropUri = r.cropUri || null;
-              // Strip file:// to get plain path for native modules
-              const cropPath = cropUri ? cropUri.replace('file://', '') : null;
+        // NOTE: setSessionMeta now merges, so we don't need to spread currentMeta
+        const rectificationResults = rectifyResult.results.map((r) => {
+          // r.cropUri from rectificationService is already file:// prefixed
+          const cropUri = r.cropUri || null;
+          // Strip file:// to get plain path for native modules
+          const cropPath = cropUri ? cropUri.replace('file://', '') : null;
 
-              return {
-                detectionIndex: r.detectionIndex,
-                cropPath,
-                cropUri,
-                cropWidth: r.outputWidth,
-                cropHeight: r.outputHeight,
-                rectificationMethod: r.rectificationMethod || 'unknown',
-                skippedReason: r.skippedReason,
-              };
-            }),
-            rectificationSummary,
-          });
+          return {
+            detectionIndex: r.detectionIndex,
+            cropPath,
+            cropUri,
+            cropWidth: r.outputWidth,
+            cropHeight: r.outputHeight,
+            rectificationMethod: r.rectificationMethod || 'unknown',
+            skippedReason: r.skippedReason,
+          };
+        });
 
-          // Log for verification
-          const successCount = rectifyResult.results.filter(r => r.cropUri).length;
-          console.log(`[Pipeline] Stored ${successCount} rectification results in sessionMeta`);
-          if (successCount > 0) {
-            const first = rectifyResult.results.find(r => r.cropUri);
-            console.log(`[Pipeline] First cropUri: ${first?.cropUri?.substring(0, 60)}...`);
-          }
+        store.setSessionMeta({
+          rectificationResults,
+          rectificationSummary,
+        });
+
+        // Log for verification
+        const successCount = rectifyResult.results.filter(r => r.cropUri).length;
+        console.log(`[Pipeline] Stored ${successCount} rectification results in sessionMeta`);
+        if (successCount > 0) {
+          const first = rectifyResult.results.find(r => r.cropUri);
+          console.log(`[Pipeline] First cropUri: ${first?.cropUri?.substring(0, 60)}...`);
         }
         // ================================================================
         // STEP 10: Write rectification debug overlay
@@ -935,15 +939,12 @@ export async function runPipeline(
             }
           );
 
-          // Update sessionMeta with OCR results
-          const currentMeta = store.sessionMeta;
-          if (currentMeta) {
-            store.setSessionMeta({
-              ...currentMeta,
-              ocrResultsByCropIndex: ocrResults,
-              ocrSummary,
-            });
-          }
+          // Update sessionMeta with OCR results (MERGE semantics)
+          // NOTE: setSessionMeta now merges, so we don't need to spread currentMeta
+          store.setSessionMeta({
+            ocrResultsByCropIndex: ocrResults,
+            ocrSummary,
+          });
 
           console.log(`[Pipeline] OCR complete: ${ocrSummary.succeeded}/${ocrSummary.total} succeeded`);
         } else {
@@ -962,6 +963,123 @@ export async function runPipeline(
     }
 
     timer.endStage('ocr');
+
+    // =========================================================================
+    // STAGE 9: Book Candidate Grouping (Gate 7)
+    // =========================================================================
+    timer.startStage('grouping');
+    store.setProcessing(true, 'grouping');
+
+    // Group detections into book candidates and merge OCR evidence
+    // IMPORTANT: Read FRESH state to get rectificationResults and ocrResults
+    // that were just stored (the 'store' variable from getState() is stale)
+    const freshMeta = useAppStore.getState().sessionMeta;
+    if (freshMeta && detections.length > 0 && !isDebugAlignmentMode) {
+      try {
+        const rectResults = freshMeta.rectificationResults || [];
+        const ocrResults = freshMeta.ocrResultsByCropIndex || {};
+
+        console.log(`[Pipeline] Grouping input: ${rectResults.length} rectResults, ${Object.keys(ocrResults).length} ocrResults`);
+
+        // Step 1: Group detections into candidates
+        const groupingResult = groupDetectionsIntoCandidates({
+          detections,
+          rectificationResults: rectResults,
+          sessionId,
+        });
+
+        // Step 2: Merge OCR evidence for each candidate
+        const candidatesWithEvidence = mergeEvidenceForAllCandidates(
+          groupingResult.candidates,
+          ocrResults
+        );
+
+        // Update sessionMeta with book candidates (MERGE semantics)
+        // NOTE: setSessionMeta now merges, so we don't need to spread freshMeta
+        store.setSessionMeta({
+          bookCandidates: candidatesWithEvidence,
+          bookCandidatesSummary: groupingResult.summary,
+        });
+
+        // Write grouping debug artifact (guarded by DEBUG_ARTIFACTS_ENABLED)
+        if (groupingResult.debugAssignments) {
+          writeGroupingAssignments(sessionId, groupingResult.debugAssignments).catch(err => {
+            console.warn(`[Pipeline] Failed to write grouping_assignments.json: ${err.message}`);
+          });
+        }
+
+        console.log(`[Pipeline] Grouping complete: ${groupingResult.summary.candidates} book candidates`);
+      } catch (groupingError: any) {
+        const errMsg = `Book grouping failed: ${groupingError.message}`;
+        console.error(`[Pipeline] ${errMsg}`, groupingError.stack);
+        errors.push(errMsg);
+        await appendWriteError(sessionDir, `${errMsg}\n${groupingError.stack || ''}`);
+      }
+    } else if (detections.length === 0) {
+      console.log('[Pipeline] Grouping skipped: no detections');
+    } else if (isDebugAlignmentMode) {
+      console.log('[Pipeline] Grouping skipped: DEBUG_ALIGNMENT_PRESET mode');
+    }
+
+    timer.endStage('grouping');
+
+    // =========================================================================
+    // STAGE 10: Metadata Resolution (Gate 8+) - Feature-flagged
+    // =========================================================================
+    if (isMetadataResolutionEnabled() && !isDebugAlignmentMode) {
+      timer.startStage('metadata');
+      store.setProcessing(true, 'metadata');
+
+      // Get FRESH state to access OCR and grouping results
+      const metaMeta = useAppStore.getState().sessionMeta;
+      const metaRectResults = metaMeta?.rectificationResults || [];
+      const metaOcrResults = metaMeta?.ocrResultsByCropIndex || {};
+      const metaBookCandidates = metaMeta?.bookCandidates || [];
+
+      if (Object.keys(metaOcrResults).length > 0) {
+        try {
+          if (isMetadataVerboseDebug()) {
+            console.log(`[Pipeline] Running metadata resolution: ${metaRectResults.length} crops, ${Object.keys(metaOcrResults).length} OCR results`);
+          }
+
+          const metadataResult = await runMetadataResolution({
+            sessionId,
+            rectificationResults: metaRectResults,
+            ocrResultsByCropIndex: metaOcrResults,
+            bookCandidates: metaBookCandidates,
+          });
+
+          // Store results in sessionMeta (MERGE semantics)
+          store.setSessionMeta({
+            evidenceSummary: metadataResult.evidenceSummary,
+            metadataResolution: metadataResult.resolutionState,
+            metadataQueuedForOffline: metadataResult.queuedForOffline,
+          });
+
+          console.log(`[Pipeline] Metadata resolution complete: action=${metadataResult.decision.action}`);
+        } catch (metadataError: any) {
+          // Non-fatal: log error but continue
+          const errMsg = `Metadata resolution failed: ${metadataError.message}`;
+          console.warn(`[Pipeline] ${errMsg}`);
+          // Don't add to errors array - this is non-fatal
+          // Store a no-match fallback so UI knows resolution was attempted
+          store.setSessionMeta({
+            metadataResolution: {
+              evidenceTier: 'unusable',
+              decision: { action: 'no-match', fallback: 'ocr-only' },
+              resolvedAt: new Date().toISOString(),
+            },
+          });
+        }
+      } else {
+        console.log('[Pipeline] Metadata resolution skipped: no OCR results');
+      }
+
+      timer.endStage('metadata');
+    } else if (!isMetadataResolutionEnabled()) {
+      // Feature flag is OFF - don't add any metadata keys to sessionMeta
+      // This preserves existing behavior
+    }
 
     // Build session object
     const session: ScanSession = {

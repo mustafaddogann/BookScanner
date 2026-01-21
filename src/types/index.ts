@@ -160,6 +160,7 @@ export interface PipelineTimings {
   overlayPrep?: number;
   rectification?: number;
   ocr?: number;
+  grouping?: number;
   total?: number;
 }
 
@@ -508,6 +509,32 @@ export interface OCRResult {
   platform?: 'ios' | 'android';
   /** Recognition level used */
   recognitionLevel?: 'fast' | 'accurate';
+  /** Per-rotation trial results (for mixed-orientation support) */
+  rotationTrials?: RotationTrialResult[];
+}
+
+/**
+ * Result from a single rotation trial during OCR
+ */
+export interface RotationTrialResult {
+  /** Rotation angle (0, 90, 180, 270) */
+  rotation: number;
+  /** Full text from this rotation */
+  fullText: string;
+  /** Lines recognized at this rotation */
+  lines: OCRLine[];
+  /** Average confidence */
+  avgConfidence: number;
+  /** Alphanumeric ratio */
+  alnumRatio: number;
+  /** Character count */
+  charCount: number;
+  /** Composite quality score used for ranking */
+  qualityScore: number;
+  /** Title candidate from this rotation */
+  titleCandidate: string | null;
+  /** Author candidate from this rotation */
+  authorCandidate: string | null;
 }
 
 /**
@@ -566,4 +593,434 @@ export interface TextRecognitionOptions {
   recognitionLevel?: 'fast' | 'accurate';
   /** Languages to prioritize (ISO codes) */
   languages?: string[];
+}
+
+// ============================================================================
+// Gate 7: Book Candidate Grouping
+// ============================================================================
+
+/**
+ * Unique identifier for a book candidate within a session
+ */
+export type BookCandidateId = string;
+
+/**
+ * A single line of evidence from OCR with provenance tracking
+ */
+export interface BookEvidenceLine {
+  /** The recognized text content */
+  text: string;
+  /** Normalized text for comparison (lowercase, no punctuation) */
+  normalizedText: string;
+  /** Confidence score [0-1] */
+  confidence: number;
+  /** Which crop this line came from */
+  sourceCropIndex: number;
+  /** Rotation applied when OCR'd (degrees) */
+  rotation: number;
+  /** Bounding box in crop coordinates (optional) */
+  bbox?: OCRBoundingBox;
+}
+
+/**
+ * Merged evidence from multiple crops for a book candidate
+ */
+export interface BookEvidence {
+  /** Top K crop indices selected for evidence (sorted by quality) */
+  topCrops: number[];
+  /** De-duplicated lines with provenance */
+  mergedLines: BookEvidenceLine[];
+  /** Full merged text block (lines joined with newline) */
+  mergedTextBlock: string;
+  /** Per-field hints extracted from evidence (optional, for Gate 8) */
+  perFieldHints?: {
+    titleHints: string[];
+    authorHints: string[];
+  };
+}
+
+/**
+ * A book candidate representing one physical book on the shelf
+ * Groups multiple detections/crops that likely belong to the same book
+ */
+export interface BookCandidate {
+  /** Unique ID within the session */
+  id: BookCandidateId;
+  /** Detection indices that belong to this candidate */
+  detectionIndices: number[];
+  /** Crop indices for this candidate (successful rectifications only) */
+  cropIndices: number[];
+  /** Index of the representative detection (highest score, used for display) */
+  representativeDetectionIndex: number;
+  /** Stable ordering key (for left-to-right shelf order) */
+  orderingKey: number;
+  /** Average angle of detections in radians */
+  angleRad: number;
+  /** Combined confidence score (max of all detections) */
+  confidenceScore: number;
+  /** Merged OCR evidence */
+  evidence: BookEvidence;
+}
+
+/**
+ * Summary of book candidate grouping results
+ */
+export interface BookCandidatesSummary {
+  /** Number of raw detections before grouping */
+  rawDetections: number;
+  /** Number of successful crops */
+  rawCrops: number;
+  /** Number of book candidates after grouping */
+  candidates: number;
+  /** Average crops per candidate */
+  avgCropsPerCandidate: number;
+}
+
+// ============================================================================
+// Gate 8: Metadata Resolution Types
+// ============================================================================
+
+/**
+ * Evidence quality tier based on crop and OCR quality
+ * Used to adjust scoring thresholds and confidence levels
+ */
+export type EvidenceTier = 'strong' | 'usable' | 'weak' | 'unusable';
+
+/**
+ * Search candidate generated from OCR evidence
+ * Used to query metadata sources
+ */
+export interface SearchCandidate {
+  /** The search query string */
+  query: string;
+  /** Extracted title hint (may be partial) */
+  titleHint?: string;
+  /** Extracted author hint (may be partial) */
+  authorHint?: string;
+  /** ISBN if detected (ISBN-10 or ISBN-13, normalized) */
+  isbn?: string;
+  /** Publisher hint (from spine field extraction) */
+  publisherHint?: string;
+  /** Edition hint (from spine field extraction) */
+  editionHint?: string;
+  /** Year hint (from spine field extraction) */
+  yearHint?: string;
+  /** Confidence in this candidate [0-1] */
+  confidence: number;
+  /** Source crop index */
+  cropIndex: number;
+  /** Evidence tier of source */
+  tier: EvidenceTier;
+  /** Tokenized query for coverage scoring */
+  tokens: string[];
+}
+
+/**
+ * Signals used to compute match score
+ */
+export interface MatchSignals {
+  /** Query title (normalized) */
+  queryTitle: string;
+  /** Result title (normalized) */
+  resultTitle: string;
+  /** Query author (normalized, optional) */
+  queryAuthor?: string;
+  /** Result author (normalized, optional) */
+  resultAuthor?: string;
+  /** Whether query had an author hint */
+  queryHadAuthor: boolean;
+  /** Whether ISBN matched between query and result */
+  isbnMatched: boolean;
+  /** Number of query tokens found in result */
+  queryTokensInResult: number;
+  /** Total query token count */
+  queryTokenCount: number;
+  /** Position of result in search results (0-indexed) */
+  resultPosition: number;
+}
+
+/**
+ * Resolved book with composite score
+ */
+export interface ScoredMatch {
+  /** The resolved book metadata */
+  book: ResolvedBook;
+  /** Composite score [0-1] */
+  composite: number;
+  /** Normalized signal values (each 0-1) */
+  normalizedSignals: Record<string, number>;
+  /** Raw match signals */
+  signals: MatchSignals;
+}
+
+/**
+ * Resolved book metadata (enhanced MetadataMatch)
+ */
+export interface ResolvedBook {
+  /** Book title */
+  title: string;
+  /** Author name(s) */
+  authors: string[];
+  /** ISBN-13 (preferred) */
+  isbn13?: string;
+  /** ISBN-10 */
+  isbn10?: string;
+  /** Publisher name */
+  publisher?: string;
+  /** Publication year */
+  publishYear?: string;
+  /** Edition info */
+  edition?: string;
+  /** Cover image URL */
+  coverUrl?: string;
+  /** Source of the metadata */
+  source: 'openLibrary' | 'googleBooks' | 'manual' | 'ocr';
+  /** Source-specific ID */
+  sourceId?: string;
+}
+
+/**
+ * Verification flags indicating potential issues with a match
+ */
+export type VerificationFlag =
+  | 'author-mismatch'
+  | 'isbn-mismatch'
+  | 'token-coverage-low'
+  | 'suspicious-edition'
+  | 'year-implausible'
+  | 'publisher-mismatch'
+  | 'edition-conflict';
+
+/**
+ * Result of match verification
+ */
+export interface VerificationResult {
+  /** Whether verification passed (no flags) */
+  passed: boolean;
+  /** Flags indicating issues found */
+  flags: VerificationFlag[];
+  /** Confidence after penalty adjustments [0-1] */
+  adjustedConfidence: number;
+  /** Total penalty applied */
+  penalty: number;
+}
+
+/**
+ * Auto-accept decision - high confidence match
+ */
+export interface AcceptanceAutoAccept {
+  action: 'auto-accept';
+  book: ResolvedBook;
+  confidence: number;
+}
+
+/**
+ * Suggest decision - good match but needs confirmation
+ */
+export interface AcceptanceSuggest {
+  action: 'suggest';
+  book: ResolvedBook;
+  alternatives: ResolvedBook[];
+  warnings?: VerificationFlag[];
+  confidence: number;
+}
+
+/**
+ * Ambiguous decision - multiple viable candidates
+ */
+export interface AcceptanceAmbiguous {
+  action: 'ambiguous';
+  candidates: ResolvedBook[];
+  reason?: string;
+  warnings?: VerificationFlag[];
+}
+
+/**
+ * No match decision - fallback to manual or OCR
+ */
+export interface AcceptanceNoMatch {
+  action: 'no-match';
+  fallback: 'manual-entry' | 'ocr-only';
+}
+
+/**
+ * Acceptance decision union type
+ */
+export type AcceptanceDecision =
+  | AcceptanceAutoAccept
+  | AcceptanceSuggest
+  | AcceptanceAmbiguous
+  | AcceptanceNoMatch;
+
+/**
+ * Per-crop evidence classification
+ */
+export interface CropEvidenceClassification {
+  /** Crop/detection index */
+  cropIndex: number;
+  /** Evidence tier */
+  tier: EvidenceTier;
+  /** OCR confidence */
+  ocrConfidence: number;
+  /** Character count */
+  charCount: number;
+  /** Alnum ratio */
+  alnumRatio: number;
+  /** Rectification status */
+  rectificationStatus: 'success' | 'skipped' | 'failed';
+  /** Blur score if available */
+  blurScore?: number;
+}
+
+/**
+ * Session-level evidence summary
+ */
+export interface EvidenceSummary {
+  /** Overall session tier (best available) */
+  sessionTier: EvidenceTier;
+  /** Per-crop classifications */
+  cropClassifications: CropEvidenceClassification[];
+  /** Count by tier */
+  tierCounts: Record<EvidenceTier, number>;
+}
+
+/**
+ * Metadata resolution state for a book candidate
+ */
+export interface MetadataResolutionState {
+  /** Evidence tier used for resolution */
+  evidenceTier: EvidenceTier;
+  /** Search candidates generated (for debugging) */
+  searchCandidates?: SearchCandidate[];
+  /** The acceptance decision */
+  decision: AcceptanceDecision;
+  /** Resolved book if any */
+  resolvedBook?: ResolvedBook;
+  /** Alternative matches if any */
+  alternatives?: ResolvedBook[];
+  /** Verification flags if any */
+  verificationFlags?: VerificationFlag[];
+  /** Resolution timestamp */
+  resolvedAt?: string;
+  /** Whether resolution was from offline queue */
+  fromOfflineQueue?: boolean;
+}
+
+// ============================================================================
+// Spine Field Extraction Types (Enhanced Field Extraction)
+// ============================================================================
+
+/**
+ * ISBN type discriminator
+ */
+export type ISBNType = 'isbn10' | 'isbn13';
+
+/**
+ * Base field candidate with provenance
+ */
+export interface BaseFieldCandidate {
+  /** Extracted value */
+  value: string;
+  /** Confidence score [0-1] */
+  confidence: number;
+  /** Source line index in merged evidence */
+  sourceLineIndex: number;
+  /** Source crop index */
+  cropIndex: number;
+}
+
+/**
+ * ISBN candidate with type and normalization
+ */
+export interface ISBNCandidate extends BaseFieldCandidate {
+  /** ISBN type (10 or 13) */
+  type: ISBNType;
+  /** Normalized ISBN (digits only, uppercase X for ISBN-10) */
+  normalized: string;
+  /** Original raw text before normalization */
+  raw: string;
+}
+
+/**
+ * Publisher candidate
+ */
+export interface PublisherCandidate extends BaseFieldCandidate {
+  /** Detection method */
+  method: 'keyword' | 'pattern' | 'known-publisher';
+}
+
+/**
+ * Edition candidate
+ */
+export interface EditionCandidate extends BaseFieldCandidate {
+  /** Detected edition number if any */
+  editionNumber?: number;
+  /** Edition type (numbered, revised, etc.) */
+  editionType?: 'numbered' | 'revised' | 'updated' | 'reprint' | 'other';
+}
+
+/**
+ * Year candidate
+ */
+export interface YearCandidate extends BaseFieldCandidate {
+  /** Parsed year number */
+  year: number;
+  /** Context where year was found */
+  context?: 'copyright' | 'edition' | 'publisher' | 'standalone';
+}
+
+/**
+ * Title candidate with classification info
+ */
+export interface TitleCandidate extends BaseFieldCandidate {
+  /** Whether this came from splitting a combined line */
+  fromSplit?: boolean;
+  /** Character count (used for ranking) */
+  charCount: number;
+  /** Word count */
+  wordCount: number;
+}
+
+/**
+ * Author candidate with classification info
+ */
+export interface AuthorCandidate extends BaseFieldCandidate {
+  /** Whether this came from splitting a combined line */
+  fromSplit?: boolean;
+  /** Detected via "by" pattern */
+  fromByPattern?: boolean;
+  /** Person name confidence (heuristic) */
+  nameConfidence: number;
+}
+
+/**
+ * Complete spine field evidence extracted from OCR
+ */
+export interface SpineFieldEvidence {
+  /** ISBN candidates (validated) */
+  isbnCandidates: ISBNCandidate[];
+  /** Publisher candidates */
+  publisherCandidates: PublisherCandidate[];
+  /** Edition candidates */
+  editionCandidates: EditionCandidate[];
+  /** Year candidates */
+  yearCandidates: YearCandidate[];
+  /** Title candidates (ranked by confidence) */
+  titleCandidates: TitleCandidate[];
+  /** Author candidates (ranked by confidence) */
+  authorCandidates: AuthorCandidate[];
+  /** Full normalized text for verification */
+  fullTextNormalized: string;
+  /** Best ISBN (if any) */
+  bestIsbn?: string;
+  /** Best title (if any) */
+  bestTitle?: string;
+  /** Best author (if any) */
+  bestAuthor?: string;
+  /** Best publisher (if any) */
+  bestPublisher?: string;
+  /** Best edition (if any) */
+  bestEdition?: string;
+  /** Best year (if any) */
+  bestYear?: number;
 }

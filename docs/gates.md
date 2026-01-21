@@ -2,6 +2,26 @@
 
 Hard pass/fail checklist. Each gate must pass before proceeding to the next.
 
+**Related Documentation:**
+- [docs/project_plan.md](./project_plan.md) - Project roadmap and Gates 7-10
+- [docs/pipeline.md](./pipeline.md) - Pipeline stage documentation
+- [docs/build.md](./build.md) - Build troubleshooting
+
+---
+
+## Gate Overview
+
+| Gate | Stage | Status |
+|------|-------|--------|
+| 0 | Dataset Integrity | Core pipeline |
+| 1 | Model Training | Core pipeline |
+| 2 | TFLite Export | Core pipeline |
+| 3 | Model IO Contract | Core pipeline |
+| 4 | Decode Logic | Core pipeline |
+| 5 | End-to-End Pipeline | Core pipeline |
+| 6 | OCR + Post-processing | Core pipeline |
+| 7-10 | Metadata Extraction | See [project_plan.md](./project_plan.md) |
+
 ---
 
 ## Gate 0: Dataset Integrity
@@ -99,7 +119,7 @@ npm test -- --testPathPattern="inference"
 - [ ] Fixture → detection → overlay works on device
 - [ ] `debug_manifest.json` contains valid detections
 - [ ] Overlay polygons align with visible book spines
-- [ ] Rectified crops show upright text
+- [ ] Rectified crops show upright text (iOS only)
 
 **Verify:**
 ```bash
@@ -110,18 +130,113 @@ npm test -- --testPathPattern="inference"
 
 ---
 
+## Gate 6: OCR + Post-Processing Works
+
+**Pass criteria:**
+- [ ] iOS: Vision framework text recognition produces output
+- [ ] Android: ML Kit text recognition produces output (or graceful fallback)
+- [ ] Rotation trials (0°, 90°, 180°, 270°) select best by confidence
+- [ ] OCR results stored in `SessionMeta.ocrResultsByCropIndex`
+- [ ] Title/author candidates extracted via heuristics
+- [ ] Noise filtered (ISBN patterns, URLs, prices)
+- [ ] Results UI shows OCR text below each crop
+- [ ] Edit modal allows user corrections
+
+**Verify:**
+```bash
+# Run OCR service tests
+npx jest src/services/__tests__/textRecognitionService.test.ts --watchman=false
+npx jest src/services/__tests__/ocrPostProcessingService.test.ts --watchman=false
+
+# TypeScript check
+npx tsc --noEmit
+
+# Manual device test
+# 1. Scan a bookshelf
+# 2. Go to Results → Crops tab
+# 3. Verify OCR text appears below each crop
+# 4. Tap to edit, save changes
+```
+
+**Fail action:** Check native module implementation, rotation trial logic, heuristics.
+
+---
+
+## Gates 7-10: Structured Metadata Extraction
+
+Gates 7-10 cover advanced metadata extraction and are documented separately:
+
+| Gate | Description | Documentation |
+|------|-------------|---------------|
+| 7 | Book Candidate Grouping + Evidence Merge | [project_plan.md#gate-7](./project_plan.md#gate-7-book-candidate-grouping--evidence-merge) |
+| 8 | Field Extraction with Ranked Candidates | [project_plan.md#gate-8](./project_plan.md#gate-8-field-extraction-with-ranked-candidates) |
+| 9 | Resolver (External Lookup) | [project_plan.md#gate-9](./project_plan.md#gate-9-resolver-external-lookup) |
+| 10 | Corrections Memory | [project_plan.md#gate-10](./project_plan.md#gate-10-corrections-memory) |
+
+See [project_plan.md](./project_plan.md) for full details including:
+- Problem statements
+- Deliverables and file locations
+- Data contracts (TypeScript interfaces)
+- Algorithms and pseudocode
+- UI changes
+- Tests and validation commands
+- Acceptance criteria
+- Risks and mitigations
+
+---
+
 ## Gate Status Template
 
 Copy this to track progress:
 
 ```
-Gate 0: [ ] PASS / [ ] FAIL
-Gate 1: [ ] PASS / [ ] FAIL
-Gate 2: [ ] PASS / [ ] FAIL
-Gate 3: [ ] PASS / [ ] FAIL
-Gate 4: [ ] PASS / [ ] FAIL
-Gate 5: [ ] PASS / [ ] FAIL
+Gate 0:  [ ] PASS / [ ] FAIL
+Gate 1:  [ ] PASS / [ ] FAIL
+Gate 2:  [ ] PASS / [ ] FAIL
+Gate 3:  [ ] PASS / [ ] FAIL
+Gate 4:  [ ] PASS / [ ] FAIL
+Gate 5:  [ ] PASS / [ ] FAIL
+Gate 6:  [ ] PASS / [ ] FAIL
+Gate 7:  [ ] PASS / [ ] FAIL  (see project_plan.md)
+Gate 8:  [ ] PASS / [ ] FAIL  (see project_plan.md)
+Gate 9:  [ ] PASS / [ ] FAIL  (see project_plan.md)
+Gate 10: [ ] PASS / [ ] FAIL  (see project_plan.md)
 ```
+
+---
+
+## Current Status (as of 2026-01-20)
+
+| Gate | Status | Notes |
+|------|--------|-------|
+| 0 | PASS | Dataset validated |
+| 1 | PASS | Model trained, mAP50 satisfactory |
+| 2 | PASS | TFLite export successful |
+| 3 | PASS | IO contract documented |
+| 4 | PASS | Decode logic verified |
+| 5 | PASS | End-to-end working on iOS |
+| 6 | PASS | OCR working on iOS (Vision) and Android (ML Kit) |
+| 7 | PASS | **Conservative grouping algorithm** - 19 tests passing |
+| 8 | NOT STARTED | Field extraction |
+| 9 | IN PROGRESS | Metadata resolution services implemented (feature-flagged OFF) |
+| 10 | NOT STARTED | Corrections memory |
+
+### Gate 7 Details
+
+The grouping algorithm uses a **conservative-by-default** approach:
+- **Only merges** on high IoU (≥0.50) for duplicates OR OCR-confirmed split-detection
+- **Safety cap**: If any candidate would have >3 crops, falls back to 1:1 mapping
+- **19 unit tests** covering all merge paths and edge cases
+- **Debug artifact**: `grouping_assignments.json` written when enabled
+
+### Gate 9 Details
+
+Metadata resolution services are implemented but feature-flagged OFF:
+- `searchCandidateService.ts` - Generate search candidates from evidence
+- `matchVerificationService.ts` - Verify matches with evidence
+- `acceptanceDecisionService.ts` - Make acceptance decisions
+- `spineFieldExtractionService.ts` - Extract title/author/ISBN/publisher fields
+- **Total: 424 tests passing**
 
 ---
 
@@ -131,3 +246,4 @@ Gate 5: [ ] PASS / [ ] FAIL
 - Document the failure artifact (screenshot, log, JSON)
 - Fix the root cause before retrying
 - No "close enough" - gates are binary
+- Gates 7-10 must be implemented sequentially (see [execution strategy](./project_plan.md#execution-strategy))

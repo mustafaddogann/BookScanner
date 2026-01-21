@@ -27,6 +27,7 @@ import type {
   InputTensorMeta,
 } from '../types';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
+import type { GroupingAssignments } from './bookCandidateGrouper';
 
 const SESSIONS_DIR = 'sessions';
 
@@ -1033,6 +1034,31 @@ export async function writeFilteredDetections(
 
   await RNFS.mkdir(sessionDir);
   return writeJsonAtomic(detPath, data, sessionDir);
+}
+
+/**
+ * Write grouping_assignments.json - shows how detections were grouped into candidates (atomic)
+ *
+ * Includes:
+ * - Which crops/detections belong to each candidate
+ * - Merge decisions made (reason, IoU, angle diff, center dist, text similarity)
+ * - Whether safety fallback was triggered
+ * - Configuration thresholds used
+ */
+export async function writeGroupingAssignments(
+  sessionId: string,
+  assignments: GroupingAssignments
+): Promise<WriteResult> {
+  // GATE: Skip if artifact writing is disabled
+  if (!shouldWriteArtifact('grouping_assignments.json')) {
+    return SKIPPED_WRITE_RESULT;
+  }
+
+  const sessionDir = getSessionDir(sessionId);
+  const assignmentsPath = `${sessionDir}/grouping_assignments.json`;
+
+  await RNFS.mkdir(sessionDir);
+  return writeJsonAtomic(assignmentsPath, assignments, sessionDir);
 }
 
 /**

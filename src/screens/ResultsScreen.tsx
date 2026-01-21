@@ -2,7 +2,7 @@
  * ResultsScreen - Shows image with SVG overlay and tap selection
  */
 
-import React, { useCallback, useEffect, useState, useMemo } from 'react';
+import React, { useCallback, useEffect, useState, useMemo, useRef } from 'react';
 import {
   StyleSheet,
   View,
@@ -25,16 +25,18 @@ import {
 import Svg, { Polygon, Circle, Text as SvgText } from 'react-native-svg';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo, OCRResult } from '../types';
+import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo, OCRResult, BookCandidate, ResolvedBook, AcceptanceDecision, VerificationFlag } from '../types';
 import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../utils/letterbox';
 import { useAppStore, type SessionMeta, type DetectionRectifyInfo } from '../store/useAppStore';
 import { readDebugManifest, getSessionDir } from '../services/debugArtifacts';
 import { recognizeCropText, isTextRecognitionAvailable } from '../services/textRecognitionService';
 import { ensureFileUri, stripFileUri, getFilename } from '../utils/fileUri';
+import { isMetadataResolutionEnabled } from '../config/debug';
+import { retryMetadataResolution } from '../services/metadataResolutionOrchestrator';
 import RNFS from 'react-native-fs';
 
-// Tab options for switching between overlay and crops views
-type ResultsTab = 'overlay' | 'crops';
+// Tab options for switching between overlay, crops, and books views
+type ResultsTab = 'overlay' | 'crops' | 'books';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Results'>;
 type ResultsRouteProp = RouteProp<RootStackParamList, 'Results'>;
@@ -76,6 +78,15 @@ export function ResultsScreen(): React.JSX.Element {
   const ocrSummary = sessionMeta?.ocrSummary;
   const userEdits = sessionMeta?.userEdits || {};
 
+  // Get book candidates from sessionMeta (Gate 7)
+  const bookCandidates = sessionMeta?.bookCandidates || [];
+  const bookCandidatesSummary = sessionMeta?.bookCandidatesSummary;
+
+  // Get metadata resolution state (Gate 8+) - feature flagged
+  const metadataResolution = sessionMeta?.metadataResolution;
+  const evidenceSummary = sessionMeta?.evidenceSummary;
+  const metadataQueuedForOffline = sessionMeta?.metadataQueuedForOffline;
+
   // State for OCR processing
   const [ocrProcessing, setOcrProcessing] = useState<number | null>(null);
   const [ocrAvailable, setOcrAvailable] = useState<boolean | null>(null);
@@ -90,11 +101,18 @@ export function ResultsScreen(): React.JSX.Element {
   const [previewModalVisible, setPreviewModalVisible] = useState(false);
   const [previewCropIndex, setPreviewCropIndex] = useState<number | null>(null);
 
+  // State for metadata resolution UI (Gate 8+)
+  const [metadataRetrying, setMetadataRetrying] = useState(false);
+  const [userSelectedBook, setUserSelectedBook] = useState<ResolvedBook | null>(null);
+
   // Track image load errors per crop index
   const [imageLoadErrors, setImageLoadErrors] = useState<Record<number, string>>({});
 
   // Fallback rectification results loaded from disk
   const [fallbackRectResults, setFallbackRectResults] = useState<DetectionRectifyInfo[] | null>(null);
+
+  // Track if fallback was already attempted for this sessionId to prevent infinite loops
+  const fallbackAttemptedRef = useRef<string | null>(null);
 
   // Check OCR availability on mount
   useEffect(() => {
@@ -104,103 +122,123 @@ export function ResultsScreen(): React.JSX.Element {
   }, []);
 
   // TASK E: Defensive verification and fallback loader
-  // If store has no rectificationResults but crops exist on disk, load them
+  // If store has no rectificationResults but crops exist on disk, load them ONCE
   useEffect(() => {
     async function verifyAndFallbackLoad() {
       const sessionDir = getSessionDir(sessionId);
       const cropsDir = `${sessionDir}/crops`;
 
-      // Log summary of what we have from store
-      console.log(`[Results] === CROPS VERIFICATION ===`);
-      console.log(`[Results] rectificationResults from store: ${rectificationResults.length}`);
+      // Get FRESH state to avoid stale closure issues
+      const currentMeta = useAppStore.getState().sessionMeta;
+      const currentRectResults = currentMeta?.rectificationResults || [];
 
-      if (rectificationResults.length > 0) {
-        const first = rectificationResults[0];
-        console.log(`[Results] First cropUri: ${first.cropUri || 'null'}`);
-        console.log(`[Results] First cropUri starts with file://: ${first.cropUri?.startsWith('file://') || false}`);
-
-        // Verify first 3 crops exist on disk
-        for (let i = 0; i < Math.min(3, rectificationResults.length); i++) {
-          const crop = rectificationResults[i];
-          if (crop.cropPath) {
-            const exists = await RNFS.exists(crop.cropPath);
-            console.log(`[Results] Crop ${i} exists: ${exists} (${crop.cropPath.split('/').pop()})`);
-          }
-        }
+      // Only log verification once per sessionId
+      const isFirstCheck = fallbackAttemptedRef.current !== sessionId;
+      if (isFirstCheck) {
+        console.log(`[Results] === CROPS VERIFICATION (sessionId: ${sessionId.substring(0, 8)}...) ===`);
+        console.log(`[Results] rectificationResults from store: ${currentRectResults.length}`);
       }
 
-      // If store is empty but crops might exist on disk, try fallback loading
-      if (rectificationResults.length === 0) {
-        console.log(`[Results] No rectificationResults in store, attempting disk fallback...`);
+      if (currentRectResults.length > 0) {
+        // Store has results - no fallback needed
+        if (isFirstCheck) {
+          const first = currentRectResults[0];
+          console.log(`[Results] First cropUri: ${first.cropUri || 'null'}`);
+          fallbackAttemptedRef.current = sessionId;
+        }
+        return;
+      }
 
-        try {
-          const dirExists = await RNFS.exists(cropsDir);
-          if (!dirExists) {
-            console.log(`[Results] Crops directory does not exist: ${cropsDir}`);
-            return;
-          }
+      // Check if we already attempted fallback for this sessionId
+      if (fallbackAttemptedRef.current === sessionId) {
+        // Already attempted fallback - don't repeat
+        return;
+      }
 
-          const files = await RNFS.readDir(cropsDir);
-          const cropFiles = files.filter(f =>
-            f.isFile() && f.name.startsWith('crop_') && f.name.endsWith('.jpg')
-          ).sort((a, b) => {
-            // Sort by detection index: crop_0.jpg, crop_1.jpg, etc.
-            const indexA = parseInt(a.name.replace('crop_', '').replace('.jpg', ''), 10);
-            const indexB = parseInt(b.name.replace('crop_', '').replace('.jpg', ''), 10);
-            return indexA - indexB;
+      // Mark fallback as attempted BEFORE starting (prevents race conditions)
+      fallbackAttemptedRef.current = sessionId;
+      console.log(`[Results] No rectificationResults in store, attempting disk fallback (once)...`);
+
+      try {
+        const dirExists = await RNFS.exists(cropsDir);
+        if (!dirExists) {
+          console.log(`[Results] Crops directory does not exist: ${cropsDir}`);
+          return;
+        }
+
+        const files = await RNFS.readDir(cropsDir);
+        const cropFiles = files.filter(f =>
+          f.isFile() && f.name.startsWith('crop_') && f.name.endsWith('.jpg')
+        ).sort((a, b) => {
+          // Sort by detection index: crop_0.jpg, crop_1.jpg, etc.
+          const indexA = parseInt(a.name.replace('crop_', '').replace('.jpg', ''), 10);
+          const indexB = parseInt(b.name.replace('crop_', '').replace('.jpg', ''), 10);
+          return indexA - indexB;
+        });
+
+        console.log(`[Results] Found ${cropFiles.length} crop files on disk`);
+
+        if (cropFiles.length > 0) {
+          const fallbackResults: DetectionRectifyInfo[] = await Promise.all(
+            cropFiles.map(async (file, idx) => {
+              const indexMatch = file.name.match(/crop_(\d+)\.jpg/);
+              const detectionIndex = indexMatch ? parseInt(indexMatch[1], 10) : idx;
+              const cropPath = file.path;
+              const cropUri = ensureFileUri(cropPath);
+
+              // Try to get dimensions via Image.getSize
+              let width = 0;
+              let height = 0;
+              try {
+                await new Promise<void>((resolve) => {
+                  Image.getSize(
+                    cropUri,
+                    (w, h) => { width = w; height = h; resolve(); },
+                    () => { resolve(); }
+                  );
+                });
+              } catch {
+                // Ignore dimension fetch errors
+              }
+
+              return {
+                detectionIndex,
+                cropPath,
+                cropUri,
+                cropWidth: width,
+                cropHeight: height,
+                rectificationMethod: 'native_opencv',
+              };
+            })
+          );
+
+          console.log(`[Results] Loaded ${fallbackResults.length} crops from disk fallback`);
+
+          // Write fallback results BACK to store (merge semantics)
+          // This ensures subsequent renders use store instead of repeating fallback
+          useAppStore.getState().setSessionMeta({
+            rectificationResults: fallbackResults,
+            rectificationSummary: {
+              total: fallbackResults.length,
+              succeeded: fallbackResults.filter(r => r.cropUri).length,
+              skipped: fallbackResults.filter(r => !r.cropUri).length,
+            },
           });
 
-          console.log(`[Results] Found ${cropFiles.length} crop files on disk`);
-
-          if (cropFiles.length > 0) {
-            const fallbackResults: DetectionRectifyInfo[] = await Promise.all(
-              cropFiles.map(async (file, idx) => {
-                const indexMatch = file.name.match(/crop_(\d+)\.jpg/);
-                const detectionIndex = indexMatch ? parseInt(indexMatch[1], 10) : idx;
-                const cropPath = file.path;
-                const cropUri = ensureFileUri(cropPath);
-
-                // Try to get dimensions via Image.getSize
-                let width = 0;
-                let height = 0;
-                try {
-                  await new Promise<void>((resolve) => {
-                    Image.getSize(
-                      cropUri,
-                      (w, h) => { width = w; height = h; resolve(); },
-                      () => { resolve(); }
-                    );
-                  });
-                } catch {
-                  // Ignore dimension fetch errors
-                }
-
-                return {
-                  detectionIndex,
-                  cropPath,
-                  cropUri,
-                  cropWidth: width,
-                  cropHeight: height,
-                  rectificationMethod: 'native_opencv',
-                };
-              })
-            );
-
-            console.log(`[Results] Loaded ${fallbackResults.length} crops from disk fallback`);
-            setFallbackRectResults(fallbackResults);
-          }
-        } catch (err: any) {
-          console.warn(`[Results] Fallback crop loading failed: ${err.message}`);
+          // Also set local state for immediate UI update
+          setFallbackRectResults(fallbackResults);
         }
+      } catch (err: any) {
+        console.warn(`[Results] Fallback crop loading failed: ${err.message}`);
       }
-
-      console.log(`[Results] ========================`);
     }
 
     if (!loading) {
       verifyAndFallbackLoad();
     }
-  }, [sessionId, rectificationResults, loading]);
+    // IMPORTANT: Only depend on sessionId and loading, NOT rectificationResults
+    // This prevents infinite loops when store is updated
+  }, [sessionId, loading]);
 
   // Effective rectification results: prefer store, fallback to disk-loaded
   const effectiveRectResults = useMemo(() => {
@@ -683,6 +721,62 @@ export function ResultsScreen(): React.JSX.Element {
     return width > height * 2;
   }, []);
 
+  // Handle retry metadata resolution (Gate 8+)
+  const handleRetryMetadata = useCallback(async () => {
+    if (!isMetadataResolutionEnabled() || metadataRetrying) return;
+
+    const currentMeta = useAppStore.getState().sessionMeta;
+    const rectResults = currentMeta?.rectificationResults || [];
+    const ocrByCrop = currentMeta?.ocrResultsByCropIndex || {};
+    const bookCands = currentMeta?.bookCandidates || [];
+
+    if (rectResults.length === 0 || Object.keys(ocrByCrop).length === 0) {
+      Alert.alert('Cannot Retry', 'No OCR results available for metadata resolution.');
+      return;
+    }
+
+    setMetadataRetrying(true);
+
+    try {
+      const result = await retryMetadataResolution({
+        sessionId,
+        rectificationResults: rectResults,
+        ocrResultsByCropIndex: ocrByCrop,
+        bookCandidates: bookCands,
+      });
+
+      // Update store with new results
+      useAppStore.getState().setSessionMeta({
+        evidenceSummary: result.evidenceSummary,
+        metadataResolution: result.resolutionState,
+        metadataQueuedForOffline: result.queuedForOffline,
+      });
+
+      console.log(`[Results] Metadata retry complete: ${result.decision.action}`);
+    } catch (error: any) {
+      console.error('[Results] Metadata retry failed:', error);
+      Alert.alert('Retry Failed', error.message || 'Failed to resolve metadata.');
+    } finally {
+      setMetadataRetrying(false);
+    }
+  }, [sessionId, metadataRetrying]);
+
+  // Handle user selecting a book from suggestions (Gate 8+)
+  const handleSelectBook = useCallback((book: ResolvedBook) => {
+    setUserSelectedBook(book);
+    // Update store to record user selection
+    const currentMeta = useAppStore.getState().sessionMeta;
+    if (currentMeta?.metadataResolution) {
+      useAppStore.getState().setSessionMeta({
+        metadataResolution: {
+          ...currentMeta.metadataResolution,
+          resolvedBook: book,
+        },
+      });
+    }
+    console.log(`[Results] User selected book: "${book.title}"`);
+  }, []);
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -713,7 +807,7 @@ export function ResultsScreen(): React.JSX.Element {
         <Text style={styles.detectionCount}>{detections.length} detected</Text>
       </View>
 
-      {/* Tab bar for switching between Overlay and Crops views */}
+      {/* Tab bar for switching between Overlay, Crops, and Books views */}
       <View style={styles.tabBar}>
         <TouchableOpacity
           style={[styles.tab, activeTab === 'overlay' && styles.tabActive]}
@@ -729,6 +823,14 @@ export function ResultsScreen(): React.JSX.Element {
         >
           <Text style={[styles.tabText, activeTab === 'crops' && styles.tabTextActive]}>
             Crops {hasSuccessfulCrops && `(${rectificationSummary?.succeeded || rectificationResults.filter(r => r.cropUri).length})`}
+          </Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={[styles.tab, activeTab === 'books' && styles.tabActive]}
+          onPress={() => setActiveTab('books')}
+        >
+          <Text style={[styles.tabText, activeTab === 'books' && styles.tabTextActive]}>
+            Books {bookCandidates.length > 0 && `(${bookCandidates.length})`}
           </Text>
         </TouchableOpacity>
       </View>
@@ -995,6 +1097,138 @@ export function ResultsScreen(): React.JSX.Element {
         </View>
       )}
 
+      {/* BOOKS VIEW - Grouped book candidates (Gate 7) */}
+      {activeTab === 'books' && (
+        <View style={styles.booksContainer}>
+          {bookCandidates.length === 0 ? (
+            // No candidates available message
+            <View style={styles.noCropsContainer}>
+              <Text style={styles.noCropsTitle}>No Book Candidates</Text>
+              <Text style={styles.noCropsMessage}>
+                {detections.length === 0
+                  ? 'No detections were found in this scan.'
+                  : 'Book candidates will appear here after the pipeline groups detections.'}
+              </Text>
+              {bookCandidatesSummary && (
+                <Text style={styles.noCropsStats}>
+                  {bookCandidatesSummary.rawDetections} detections, {bookCandidatesSummary.rawCrops} crops
+                </Text>
+              )}
+            </View>
+          ) : (
+            // Books list
+            <ScrollView contentContainerStyle={styles.booksScrollContent}>
+              {/* Summary header */}
+              {bookCandidatesSummary && (
+                <View style={styles.booksSummaryHeader}>
+                  <Text style={styles.booksSummaryText}>
+                    {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
+                  </Text>
+                  <Text style={styles.booksSummarySubtext}>
+                    Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
+                  </Text>
+                </View>
+              )}
+
+              {/* Book candidates list */}
+              {bookCandidates.map((candidate, index) => {
+                const repCrop = effectiveRectResults.find(
+                  r => r.detectionIndex === candidate.representativeDetectionIndex
+                );
+                const hasThumb = repCrop?.cropUri;
+                const evidenceText = candidate.evidence.mergedTextBlock || 'No text extracted';
+                const titleHint = candidate.evidence.perFieldHints?.titleHints[0];
+                const authorHint = candidate.evidence.perFieldHints?.authorHints[0];
+                const cropCount = candidate.cropIndices.length;
+
+                return (
+                  <View key={candidate.id} style={styles.bookCard}>
+                    <View style={styles.bookCardHeader}>
+                      <View style={styles.bookCardThumbnail}>
+                        {hasThumb ? (
+                          <Image
+                            source={{ uri: ensureFileUri(repCrop.cropUri) }}
+                            style={styles.bookThumbnailImage}
+                            resizeMode="cover"
+                          />
+                        ) : (
+                          <View style={styles.bookThumbnailPlaceholder}>
+                            <Text style={styles.bookThumbnailText}>{index + 1}</Text>
+                          </View>
+                        )}
+                      </View>
+                      <View style={styles.bookCardInfo}>
+                        <Text style={styles.bookCardIndex}>Book {index + 1}</Text>
+                        {titleHint ? (
+                          <Text style={styles.bookCardTitle} numberOfLines={2}>
+                            {titleHint}
+                          </Text>
+                        ) : (
+                          <Text style={styles.bookCardNoTitle}>No title detected</Text>
+                        )}
+                        {authorHint && (
+                          <Text style={styles.bookCardAuthor} numberOfLines={1}>
+                            {authorHint}
+                          </Text>
+                        )}
+                        <View style={styles.bookCardMeta}>
+                          <Text style={styles.bookCardMetaText}>
+                            {cropCount} crop{cropCount !== 1 ? 's' : ''} • {Math.round(candidate.confidenceScore * 100)}% conf
+                          </Text>
+                        </View>
+                      </View>
+                    </View>
+
+                    {/* Evidence preview */}
+                    <View style={styles.bookEvidenceContainer}>
+                      <Text style={styles.bookEvidenceLabel}>Merged Evidence:</Text>
+                      <Text style={styles.bookEvidenceText} numberOfLines={4}>
+                        {evidenceText}
+                      </Text>
+                      {candidate.evidence.mergedLines.length > 0 && (
+                        <Text style={styles.bookEvidenceCount}>
+                          {candidate.evidence.mergedLines.length} lines from {candidate.evidence.topCrops.length} crops
+                        </Text>
+                      )}
+                    </View>
+
+                    {/* Crop thumbnails strip */}
+                    {candidate.evidence.topCrops.length > 0 && (
+                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.bookCropsStrip}>
+                        {candidate.evidence.topCrops.map((cropIdx) => {
+                          const crop = effectiveRectResults[cropIdx];
+                          return crop?.cropUri ? (
+                            <Image
+                              key={cropIdx}
+                              source={{ uri: ensureFileUri(crop.cropUri) }}
+                              style={styles.bookCropThumb}
+                              resizeMode="cover"
+                            />
+                          ) : null;
+                        })}
+                      </ScrollView>
+                    )}
+                  </View>
+                );
+              })}
+
+              {/* Metadata Resolution Section (Gate 8+) - Feature flagged */}
+              {isMetadataResolutionEnabled() && (
+                <MetadataResolutionCard
+                  resolution={metadataResolution}
+                  evidenceSummary={evidenceSummary}
+                  userSelectedBook={userSelectedBook}
+                  queuedForOffline={metadataQueuedForOffline}
+                  onSelectBook={handleSelectBook}
+                  onRetry={handleRetryMetadata}
+                  isRetrying={metadataRetrying}
+                />
+              )}
+            </ScrollView>
+          )}
+        </View>
+      )}
+
       {/* Detection info panel */}
       {selectedDetectionIndex !== null && detections[selectedDetectionIndex] && (
         <View style={styles.infoPanel}>
@@ -1205,6 +1439,217 @@ function InfoItem({ label, value }: { label: string; value: string }) {
     <View style={styles.infoItem}>
       <Text style={styles.infoLabel}>{label}</Text>
       <Text style={styles.infoValue}>{value}</Text>
+    </View>
+  );
+}
+
+// Metadata Resolution Card component (Gate 8+)
+interface MetadataResolutionCardProps {
+  resolution: SessionMeta['metadataResolution'];
+  evidenceSummary: SessionMeta['evidenceSummary'];
+  userSelectedBook: ResolvedBook | null;
+  queuedForOffline?: boolean;
+  onSelectBook: (book: ResolvedBook) => void;
+  onRetry: () => void;
+  isRetrying: boolean;
+}
+
+function MetadataResolutionCard({
+  resolution,
+  evidenceSummary,
+  userSelectedBook,
+  queuedForOffline,
+  onSelectBook,
+  onRetry,
+  isRetrying,
+}: MetadataResolutionCardProps) {
+  // No resolution yet
+  if (!resolution) {
+    return (
+      <View style={styles.metadataCard}>
+        <Text style={styles.metadataCardTitle}>Metadata Resolution</Text>
+        <Text style={styles.metadataNoData}>
+          Resolution not yet run. Tap retry to attempt metadata lookup.
+        </Text>
+        <TouchableOpacity
+          style={[styles.metadataRetryButton, isRetrying && styles.metadataRetryButtonDisabled]}
+          onPress={onRetry}
+          disabled={isRetrying}
+        >
+          <Text style={styles.metadataRetryButtonText}>
+            {isRetrying ? 'Resolving...' : 'Resolve Metadata'}
+          </Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  const decision = resolution.decision;
+  const displayBook = userSelectedBook || resolution.resolvedBook;
+
+  // Get action display info
+  const getActionInfo = (action: AcceptanceDecision['action']) => {
+    switch (action) {
+      case 'auto-accept':
+        return { label: 'Matched', color: '#30D158', icon: '✓' };
+      case 'suggest':
+        return { label: 'Suggested', color: '#FF9F0A', icon: '?' };
+      case 'ambiguous':
+        return { label: 'Ambiguous', color: '#FF453A', icon: '!' };
+      case 'no-match':
+        return { label: 'No Match', color: '#8E8E93', icon: '—' };
+      default:
+        return { label: 'Unknown', color: '#8E8E93', icon: '?' };
+    }
+  };
+
+  const actionInfo = getActionInfo(decision.action);
+
+  // Get verification flag display
+  const getFlagDisplay = (flag: VerificationFlag) => {
+    switch (flag) {
+      case 'author-mismatch':
+        return 'Author mismatch';
+      case 'isbn-mismatch':
+        return 'ISBN mismatch';
+      case 'token-coverage-low':
+        return 'Low text match';
+      case 'suspicious-edition':
+        return 'Suspicious edition';
+      case 'year-implausible':
+        return 'Invalid year';
+      case 'publisher-mismatch':
+        return 'Publisher mismatch';
+      case 'edition-conflict':
+        return 'Edition conflict';
+      default:
+        return flag;
+    }
+  };
+
+  return (
+    <View style={styles.metadataCard}>
+      <View style={styles.metadataCardHeader}>
+        <Text style={styles.metadataCardTitle}>Metadata Resolution</Text>
+        <View style={[styles.metadataStatusBadge, { backgroundColor: actionInfo.color }]}>
+          <Text style={styles.metadataStatusText}>{actionInfo.label}</Text>
+        </View>
+      </View>
+
+      {/* Evidence tier */}
+      {evidenceSummary && (
+        <View style={styles.metadataEvidenceRow}>
+          <Text style={styles.metadataLabel}>Evidence Quality:</Text>
+          <Text style={[
+            styles.metadataEvidenceTier,
+            evidenceSummary.sessionTier === 'strong' && { color: '#30D158' },
+            evidenceSummary.sessionTier === 'usable' && { color: '#FF9F0A' },
+            evidenceSummary.sessionTier === 'weak' && { color: '#FF453A' },
+          ]}>
+            {evidenceSummary.sessionTier.charAt(0).toUpperCase() + evidenceSummary.sessionTier.slice(1)}
+          </Text>
+        </View>
+      )}
+
+      {/* Queued for offline indicator */}
+      {queuedForOffline && (
+        <View style={styles.metadataOfflineBadge}>
+          <Text style={styles.metadataOfflineText}>Queued for retry when online</Text>
+        </View>
+      )}
+
+      {/* Display resolved/selected book */}
+      {displayBook && (
+        <View style={styles.metadataBookInfo}>
+          <Text style={styles.metadataBookTitle}>{displayBook.title}</Text>
+          {displayBook.authors && displayBook.authors.length > 0 && (
+            <Text style={styles.metadataBookAuthor}>
+              by {displayBook.authors.join(', ')}
+            </Text>
+          )}
+          {displayBook.publisher && (
+            <Text style={styles.metadataBookMeta}>{displayBook.publisher}</Text>
+          )}
+          {displayBook.edition && (
+            <Text style={styles.metadataBookMeta}>{displayBook.edition}</Text>
+          )}
+          {displayBook.publishYear && (
+            <Text style={styles.metadataBookMeta}>{displayBook.publishYear}</Text>
+          )}
+          {displayBook.isbn13 && (
+            <Text style={styles.metadataBookIsbn}>ISBN: {displayBook.isbn13}</Text>
+          )}
+          {decision.action === 'auto-accept' && 'confidence' in decision && (
+            <Text style={styles.metadataConfidence}>
+              Confidence: {Math.round(decision.confidence * 100)}%
+            </Text>
+          )}
+        </View>
+      )}
+
+      {/* Warnings/flags */}
+      {resolution.verificationFlags && resolution.verificationFlags.length > 0 && (
+        <View style={styles.metadataWarnings}>
+          <Text style={styles.metadataWarningsLabel}>Warnings:</Text>
+          {resolution.verificationFlags.map((flag, idx) => (
+            <View key={idx} style={styles.metadataWarningBadge}>
+              <Text style={styles.metadataWarningText}>{getFlagDisplay(flag)}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* Alternatives for suggest/ambiguous */}
+      {(decision.action === 'suggest' || decision.action === 'ambiguous') && (
+        <View style={styles.metadataAlternatives}>
+          <Text style={styles.metadataAlternativesLabel}>
+            {decision.action === 'suggest' ? 'Alternatives:' : 'Candidates:'}
+          </Text>
+          {(decision.action === 'suggest' ? decision.alternatives : decision.candidates).map((book, idx) => (
+            <TouchableOpacity
+              key={idx}
+              style={[
+                styles.metadataAlternativeItem,
+                userSelectedBook?.title === book.title && styles.metadataAlternativeSelected,
+              ]}
+              onPress={() => onSelectBook(book)}
+            >
+              <Text style={styles.metadataAlternativeTitle} numberOfLines={1}>
+                {book.title}
+              </Text>
+              {book.authors && book.authors.length > 0 && (
+                <Text style={styles.metadataAlternativeAuthor} numberOfLines={1}>
+                  {book.authors.join(', ')}
+                </Text>
+              )}
+            </TouchableOpacity>
+          ))}
+        </View>
+      )}
+
+      {/* No match fallback info */}
+      {decision.action === 'no-match' && (
+        <View style={styles.metadataNoMatch}>
+          <Text style={styles.metadataNoMatchText}>
+            {decision.fallback === 'ocr-only'
+              ? 'Using OCR-extracted text. Edit title/author manually if needed.'
+              : 'No metadata found. Enter book details manually.'}
+          </Text>
+        </View>
+      )}
+
+      {/* Retry button */}
+      <TouchableOpacity
+        style={[styles.metadataRetryButton, isRetrying && styles.metadataRetryButtonDisabled]}
+        onPress={onRetry}
+        disabled={isRetrying}
+      >
+        {isRetrying ? (
+          <ActivityIndicator size="small" color="#fff" />
+        ) : (
+          <Text style={styles.metadataRetryButtonText}>Retry Resolution</Text>
+        )}
+      </TouchableOpacity>
     </View>
   );
 }
@@ -1738,5 +2183,304 @@ const styles = StyleSheet.create({
     color: '#007AFF',
     fontSize: 15,
     fontWeight: '500',
+  },
+  // Books view styles (Gate 7)
+  booksContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  booksScrollContent: {
+    padding: 16,
+  },
+  booksSummaryHeader: {
+    backgroundColor: '#1c1c1e',
+    padding: 12,
+    borderRadius: 8,
+    marginBottom: 16,
+  },
+  booksSummaryText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  booksSummarySubtext: {
+    color: '#8e8e93',
+    fontSize: 13,
+    marginTop: 4,
+  },
+  bookCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 12,
+    marginBottom: 16,
+    overflow: 'hidden',
+  },
+  bookCardHeader: {
+    flexDirection: 'row',
+    padding: 12,
+  },
+  bookCardThumbnail: {
+    width: 60,
+    height: 80,
+    borderRadius: 6,
+    backgroundColor: '#38383a',
+    overflow: 'hidden',
+  },
+  bookThumbnailImage: {
+    width: '100%',
+    height: '100%',
+  },
+  bookThumbnailPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  bookThumbnailText: {
+    color: '#636366',
+    fontSize: 20,
+    fontWeight: '600',
+  },
+  bookCardInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  bookCardIndex: {
+    color: '#8e8e93',
+    fontSize: 11,
+    fontWeight: '500',
+    marginBottom: 4,
+  },
+  bookCardTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 20,
+  },
+  bookCardNoTitle: {
+    color: '#636366',
+    fontSize: 14,
+    fontStyle: 'italic',
+  },
+  bookCardAuthor: {
+    color: '#8e8e93',
+    fontSize: 13,
+    marginTop: 2,
+  },
+  bookCardMeta: {
+    marginTop: 8,
+  },
+  bookCardMetaText: {
+    color: '#636366',
+    fontSize: 11,
+  },
+  bookEvidenceContainer: {
+    padding: 12,
+    paddingTop: 0,
+    borderTopWidth: 1,
+    borderTopColor: '#38383a',
+    marginTop: 4,
+  },
+  bookEvidenceLabel: {
+    color: '#8e8e93',
+    fontSize: 11,
+    fontWeight: '500',
+    marginBottom: 6,
+    marginTop: 12,
+  },
+  bookEvidenceText: {
+    color: '#a0a0a5',
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  bookEvidenceCount: {
+    color: '#636366',
+    fontSize: 10,
+    marginTop: 8,
+  },
+  bookCropsStrip: {
+    paddingHorizontal: 12,
+    paddingBottom: 12,
+    marginTop: 8,
+  },
+  bookCropThumb: {
+    width: 44,
+    height: 60,
+    borderRadius: 4,
+    marginRight: 8,
+    backgroundColor: '#38383a',
+  },
+  // Metadata Resolution Card styles (Gate 8+)
+  metadataCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 12,
+    padding: 16,
+    marginTop: 16,
+    marginBottom: 16,
+  },
+  metadataCardHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  metadataCardTitle: {
+    color: '#fff',
+    fontSize: 17,
+    fontWeight: '600',
+  },
+  metadataStatusBadge: {
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  metadataStatusText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  metadataNoData: {
+    color: '#8e8e93',
+    fontSize: 14,
+    marginBottom: 16,
+    textAlign: 'center',
+  },
+  metadataLabel: {
+    color: '#8e8e93',
+    fontSize: 13,
+  },
+  metadataEvidenceRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  metadataEvidenceTier: {
+    color: '#8e8e93',
+    fontSize: 13,
+    fontWeight: '600',
+    marginLeft: 8,
+  },
+  metadataOfflineBadge: {
+    backgroundColor: '#3a3a3c',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginBottom: 12,
+  },
+  metadataOfflineText: {
+    color: '#FF9F0A',
+    fontSize: 12,
+    textAlign: 'center',
+  },
+  metadataBookInfo: {
+    backgroundColor: '#2c2c2e',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 12,
+  },
+  metadataBookTitle: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+    marginBottom: 4,
+  },
+  metadataBookAuthor: {
+    color: '#a0a0a5',
+    fontSize: 14,
+    marginBottom: 8,
+  },
+  metadataBookMeta: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginBottom: 2,
+  },
+  metadataBookIsbn: {
+    color: '#636366',
+    fontSize: 11,
+    marginTop: 6,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+  metadataConfidence: {
+    color: '#30D158',
+    fontSize: 12,
+    fontWeight: '500',
+    marginTop: 8,
+  },
+  metadataWarnings: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  metadataWarningsLabel: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginRight: 8,
+  },
+  metadataWarningBadge: {
+    backgroundColor: '#FF453A33',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    marginRight: 6,
+    marginBottom: 4,
+  },
+  metadataWarningText: {
+    color: '#FF453A',
+    fontSize: 11,
+  },
+  metadataAlternatives: {
+    marginBottom: 12,
+  },
+  metadataAlternativesLabel: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  metadataAlternativeItem: {
+    backgroundColor: '#2c2c2e',
+    borderRadius: 6,
+    padding: 10,
+    marginBottom: 6,
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  metadataAlternativeSelected: {
+    borderColor: '#007AFF',
+  },
+  metadataAlternativeTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  metadataAlternativeAuthor: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  metadataNoMatch: {
+    backgroundColor: '#3a3a3c',
+    borderRadius: 6,
+    padding: 12,
+    marginBottom: 12,
+  },
+  metadataNoMatchText: {
+    color: '#8e8e93',
+    fontSize: 13,
+    textAlign: 'center',
+  },
+  metadataRetryButton: {
+    backgroundColor: '#007AFF',
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    minHeight: 44,
+  },
+  metadataRetryButtonDisabled: {
+    backgroundColor: '#38383a',
+  },
+  metadataRetryButtonText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

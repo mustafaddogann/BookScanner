@@ -1,6 +1,13 @@
 # Build Troubleshooting Guide
 
-This document covers common iOS build issues and their fixes.
+This document covers common build issues and their fixes, with focus on iOS.
+
+**Related Documentation:**
+- [docs/project_plan.md](./project_plan.md) - Project roadmap and future gates
+- [docs/pipeline.md](./pipeline.md) - Pipeline stage documentation
+- [docs/gates.md](./gates.md) - Stop-the-line gate checklist
+
+---
 
 ## iOS Build Failures
 
@@ -251,3 +258,101 @@ All native modules should:
 - [ ] Is the model file included in "Copy Bundle Resources"?
 - [ ] Did you add Podfile hardening settings?
 - [ ] Are there any syntax errors in Objective-C handlers?
+
+---
+
+## Platform Support Summary
+
+| Feature | iOS | Android |
+|---------|-----|---------|
+| Camera capture | Yes | Yes |
+| YOLOv8 OBB detection | Yes | Yes |
+| SVG overlay | Yes | Yes |
+| Rectification | Yes (CoreImage) | Not yet (returns `skipped`) |
+| OCR | Yes (Vision) | Yes (ML Kit) |
+| Results UI | Yes | Yes |
+
+---
+
+## Testing
+
+### Run All Tests
+
+```bash
+# All tests (use --watchman=false to avoid watchman issues)
+npx jest --watchman=false
+
+# With coverage
+npx jest --watchman=false --coverage
+
+# Specific test file
+npx jest src/services/__tests__/textRecognitionService.test.ts --watchman=false
+```
+
+### TypeScript Check
+
+```bash
+npx tsc --noEmit
+```
+
+### Lint
+
+```bash
+npx eslint src/
+```
+
+### Full Validation (before PR)
+
+```bash
+# Run all checks
+npx tsc --noEmit && npx jest --watchman=false && npx eslint src/
+```
+
+---
+
+## Environment Setup
+
+### Prerequisites
+
+- Node.js 18+
+- Xcode 15+ (for iOS)
+- Android Studio (for Android)
+- CocoaPods (`gem install cocoapods`)
+
+### Initial Setup
+
+```bash
+# Clone and install
+git clone <repo-url>
+cd BookScanner
+npm install
+
+# iOS pods
+cd ios && pod install && cd ..
+
+# Verify model file exists
+ls -la src/models/yolov8_obb.tflite
+```
+
+### Development Server
+
+```bash
+# Start Metro
+npx react-native start --reset-cache
+
+# For physical device (LAN access)
+npx react-native start --reset-cache --host 0.0.0.0 --port 8081
+```
+
+### Build and Run
+
+```bash
+# iOS simulator
+npx react-native run-ios
+
+# iOS device
+npx react-native run-ios --device
+
+# Android
+npx react-native run-android
+```

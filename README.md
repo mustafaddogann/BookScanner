@@ -7,7 +7,10 @@ A React Native application for detecting book spines using YOLOv8 Oriented Bound
 - **Camera Capture**: High-quality still image capture using VisionCamera
 - **OBB Detection**: YOLOv8 OBB model inference for oriented bounding box detection
 - **SVG Overlay**: Visual overlay of detections with tap selection
-- **Rectification**: Perspective transform to generate upright crop images
+- **Rectification**: Perspective transform to generate upright crop images (iOS)
+- **OCR**: Text recognition on book spine crops (iOS Vision, Android ML Kit)
+- **Conservative Grouping**: Smart clustering of detections into book candidates
+- **Metadata Resolution**: Field extraction and search candidate generation (feature-flagged)
 - **Fixture System**: Bundled and device fixtures for testing
 - **Debug Artifacts**: Comprehensive logging and JSON debug outputs
 
@@ -46,11 +49,21 @@ BookScanner/
 │   ├── runs/             # Training outputs
 │   └── scripts/          # Training and export scripts
 ├── docs/                 # Documentation
-│   └── gates.md          # Stop-the-line gate checklist
+│   ├── project_plan.md   # Project roadmap and Gates 7-10
+│   ├── pipeline.md       # Pipeline stage documentation
+│   ├── gates.md          # Stop-the-line gate checklist (0-5)
+│   └── build.md          # Build and environment setup
 ├── backend/              # FastAPI rectification service
 ├── ios/                  # iOS native project
 └── android/              # Android native project
 ```
+
+## Documentation
+
+- **[Project Plan](docs/project_plan.md)** - Current state, architecture overview, and roadmap for Gates 7-10 (metadata extraction)
+- **[Pipeline](docs/pipeline.md)** - Detailed pipeline stage documentation
+- **[Gates](docs/gates.md)** - Stop-the-line gate checklist for ML and core pipeline
+- **[Build](docs/build.md)** - Build setup and environment configuration
 
 ## ML Training
 
@@ -122,14 +135,21 @@ The decode logic in `inferenceService.ts` MUST match the actual output format.
 
 See `docs/gates.md` for the full checklist. Summary:
 
-| Gate | Description | Pass Criteria |
-|------|-------------|---------------|
-| 0 | Dataset Integrity | train/valid dirs exist, labels in OBB format |
-| 1 | Training Complete | `best.pt` exists, mAP50 > 0.1 |
-| 2 | TFLite Export | `yolov8_obb.tflite` exists, size > 1MB |
-| 3 | Model IO Contract | `model_io_contract.json` written, output understood |
-| 4 | Decode Logic Matches | Test image produces valid detections |
-| 5 | End-to-End Works | Overlay aligns, crops show upright text |
+| Gate | Description | Status |
+|------|-------------|--------|
+| 0 | Dataset Integrity | ✅ PASS |
+| 1 | Training Complete | ✅ PASS |
+| 2 | TFLite Export | ✅ PASS |
+| 3 | Model IO Contract | ✅ PASS |
+| 4 | Decode Logic Matches | ✅ PASS |
+| 5 | End-to-End Works | ✅ PASS |
+| 6 | OCR + Post-Processing | ✅ PASS |
+| 7 | Book Candidate Grouping | ✅ PASS (conservative algorithm, 19 tests) |
+| 8 | Field Extraction | ⏳ Not Started |
+| 9 | Metadata Resolution | 🔄 In Progress (services implemented, feature-flagged OFF) |
+| 10 | Corrections Memory | ⏳ Not Started |
+
+**Test Coverage:** 424 tests passing
 
 **IMPORTANT**: Do NOT proceed past a failed gate.
 
@@ -181,6 +201,7 @@ Each pipeline run creates `Documents/sessions/{sessionId}/`:
 - `coordinate_test.json` - Mapping verification
 - `angle_test.json` - Angle convention check
 - `crops/crop_*.jpg` - Rectified crops
+- `grouping_assignments.json` - How detections were grouped into candidates (includes merge decisions, IoU values, OCR similarity)
 
 ## Backend Rectification
 
