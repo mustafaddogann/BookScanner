@@ -149,6 +149,8 @@ function toEvidenceLine(
 
 /**
  * Analyze a single rotation trial
+ * NOTE: We do NOT filter here - filtering is done later by filterSpineLines
+ * with full context of all lines (needed for publisher name detection)
  */
 function analyzeRotation(
   trial: RotationTrialResult,
@@ -162,17 +164,18 @@ function analyzeRotation(
     const text = ocrLine.text.trim();
     if (text.length < 2) continue;
 
-    // Check if it's an OTHER line (noise)
-    const { isOther } = isOtherLine(text);
-    if (isOther) continue;
-
+    // Collect ALL lines - filtering is done later by filterSpineLines
+    // with full context of all lines (needed for publisher name detection)
     const line = toEvidenceLine(ocrLine, cropIndex, trial.rotation);
     lines.push(line);
 
-    // Score for title/author
-    const { titleScore, authorScore } = scoreLine(text);
-    bestTitleScore = Math.max(bestTitleScore, titleScore);
-    bestAuthorScore = Math.max(bestAuthorScore, authorScore);
+    // Score for title/author (skip scoring for obvious OTHER lines)
+    const { isOther } = isOtherLine(text);
+    if (!isOther) {
+      const { titleScore, authorScore } = scoreLine(text);
+      bestTitleScore = Math.max(bestTitleScore, titleScore);
+      bestAuthorScore = Math.max(bestAuthorScore, authorScore);
+    }
   }
 
   const hasUsefulContent =

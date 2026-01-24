@@ -87,7 +87,7 @@ const PUBLISHER_PATTERNS = [
   /\bbasim\b/i,
 ];
 
-/** Known publisher names (exact match) */
+/** Known publisher names (exact match or partial) */
 const KNOWN_PUBLISHERS = new Set([
   'scribner',
   'penguin',
@@ -107,6 +107,64 @@ const KNOWN_PUBLISHERS = new Set([
   'anchor',
   'knopf',
   'doubleday',
+  // Common imprints
+  'thomas dunne',
+  'thomas dunne books',
+  'st. martin\'s',
+  'st martin\'s',
+  'st. martins',
+  'picador',
+  'tor books',
+  'tor',
+  'del rey',
+  'bantam',
+  'berkley',
+  'ace',
+  'daw',
+  'orbit',
+  'little brown',
+  'little, brown',
+  'grand central',
+  'atria',
+  'gallery',
+  'pocket books',
+  'avon',
+]);
+
+/** Publisher token words - standalone words that indicate publisher when alone */
+const PUBLISHER_TOKENS = new Set([
+  'books',
+  'book',
+  'press',
+  'publishing',
+  'publishers',
+  'publication',
+  'publications',
+  'editions',
+  'edition',
+  'imprint',
+  'classics',
+  'library',
+]);
+
+/** Common first names that appear in publisher names - used for context */
+const PUBLISHER_FIRST_NAMES = new Set([
+  'thomas',
+  'martin',
+  'martins',
+  'simon',
+  'peter',
+  'john',
+  'james',
+  'william',
+  'henry',
+  'alfred',
+  'george',
+  'charles',
+  'robert',
+  'david',
+  'michael',
+  'richard',
 ]);
 
 /** Price patterns */
@@ -206,6 +264,40 @@ function matchesAnyPattern(text: string, patterns: RegExp[]): boolean {
   return patterns.some(pattern => pattern.test(text));
 }
 
+/**
+ * Check if text is a standalone publisher token
+ * e.g., "Books", "Press", "Publishing" alone on a line
+ */
+function isPublisherToken(text: string): boolean {
+  const normalized = text.toLowerCase().trim();
+  return PUBLISHER_TOKENS.has(normalized);
+}
+
+/**
+ * Check if text looks like a publisher first name component
+ * This is weaker - only blocks if it's a single word that's a known publisher name part
+ * e.g., "Thomas" alone when we have context suggesting it's from "Thomas Dunne Books"
+ */
+function isLikelyPublisherName(text: string, allLines: string[]): boolean {
+  const normalized = text.toLowerCase().trim();
+  const words = normalized.split(/\s+/);
+
+  // Single word that's a publisher first name
+  if (words.length === 1 && PUBLISHER_FIRST_NAMES.has(normalized)) {
+    // Check if nearby lines suggest this is a publisher
+    const hasPublisherContext = allLines.some(line => {
+      const lineLower = line.toLowerCase();
+      return PUBLISHER_TOKENS.has(lineLower.trim()) ||
+             lineLower.includes('books') ||
+             lineLower.includes('press') ||
+             lineLower.includes('publishing');
+    });
+    return hasPublisherContext;
+  }
+
+  return false;
+}
+
 // ============================================================================
 // Main Filter Function
 // ============================================================================
@@ -221,6 +313,9 @@ export function filterSpineLines(lines: BookEvidenceLine[]): LineFilterResult {
   const candidateLines: FilteredLine[] = [];
   const otherLines: FilteredLine[] = [];
   const byReason: Record<string, number> = {};
+
+  // Collect all line texts for context-aware filtering
+  const allTexts = lines.map(l => l.text.trim());
 
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
@@ -285,6 +380,14 @@ export function filterSpineLines(lines: BookEvidenceLine[]): LineFilterResult {
     // Filter 10b: Known publisher names
     else if (KNOWN_PUBLISHERS.has(normalizedText)) {
       filterReason = 'publisher';
+    }
+    // Filter 10c: Standalone publisher tokens ("Books", "Press", etc.)
+    else if (isPublisherToken(text)) {
+      filterReason = 'publisher_token';
+    }
+    // Filter 10d: Publisher name components with context ("Thomas" when "Books" is nearby)
+    else if (isLikelyPublisherName(text, allTexts)) {
+      filterReason = 'publisher_name_context';
     }
     // Filter 11: Too long (likely description or back cover text)
     else if (text.length > MAX_TITLE_LENGTH) {
@@ -359,8 +462,34 @@ export function isOtherLine(text: string): { isOther: boolean; reason?: string }
   if (KNOWN_PUBLISHERS.has(trimmed.toLowerCase())) {
     return { isOther: true, reason: 'publisher' };
   }
+  // Standalone publisher tokens (Books, Press, etc.)
+  if (isPublisherToken(trimmed)) {
+    return { isOther: true, reason: 'publisher_token' };
+  }
   if (trimmed.length > MAX_TITLE_LENGTH) {
     return { isOther: true, reason: 'too_long' };
+  }
+
+  return { isOther: false };
+}
+
+/**
+ * Check if text is a publisher-related token with context
+ * Use this when you have surrounding lines for context
+ */
+export function isOtherLineWithContext(
+  text: string,
+  surroundingLines: string[]
+): { isOther: boolean; reason?: string } {
+  // First check without context
+  const basicCheck = isOtherLine(text);
+  if (basicCheck.isOther) {
+    return basicCheck;
+  }
+
+  // Check with context - publisher name detection
+  if (isLikelyPublisherName(text, surroundingLines)) {
+    return { isOther: true, reason: 'publisher_name_context' };
   }
 
   return { isOther: false };

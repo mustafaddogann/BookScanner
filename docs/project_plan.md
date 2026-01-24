@@ -506,250 +506,201 @@ When `DEBUG_ARTIFACTS_ENABLED` is true, the grouper writes `grouping_assignments
 
 ---
 
-### Gate 8: Field Extraction with Ranked Candidates
+### Gate 8: Field Extraction with Line Labeling
 
 **NO external lookup in this gate.**
 
 #### Problem
 
-Current OCR post-processing produces single `titleCandidate` and `authorCandidate` strings with simple heuristics. This misses:
-- ISBN detection and validation
-- Publisher/edition extraction
-- Handling complex patterns like "Author • Title" or "Title - Author"
-- Confidence ranking for ambiguous cases
+Book spines present unique challenges for title/author extraction:
+- **Mixed orientations**: Title may be vertical (90°) while author is horizontal (0°)
+- **Multi-line names**: "Laura" on one line, "Bates" on the next
+- **Publisher contamination**: "Thomas Dunne Books" mistaken for author name
+- **Combined formats**: "Author • Title" or "Title: Subtitle" patterns
+- **Title/author swaps**: Heuristics may swap fields incorrectly
 
-#### Deliverables
+#### Solution: Line Labeling Pipeline
+
+Gate 8 uses a multi-stage pipeline to classify and assemble fields:
+
+```
+OCR Lines → Filter (OTHER) → Label (scores) → Assemble → Validate
+```
+
+#### Deliverables (Implemented)
 
 | File | Type | Description |
 |------|------|-------------|
-| `src/services/spineFieldExtractor.ts` | Service | Extract and rank field candidates |
-| `src/services/isbnValidator.ts` | Service | ISBN-10/13 parsing and checksum validation |
-| `src/types/index.ts` | Types | `ExtractedFields`, `FieldCandidate` |
-| `src/screens/ResultsScreen.tsx` | UI | Show chosen fields + debug toggle for alternatives |
+| `src/services/spineLineFilter.ts` | Service | Hard filter for ISBN, publisher, price, etc. |
+| `src/services/spineLineLabeler.ts` | Service | Score lines for title vs author likelihood |
+| `src/services/spineTitleAuthorAssembler.ts` | Service | Assemble title/author from scored lines |
+| `src/services/spineSwapGuard.ts` | Service | Validate and detect title/author swaps |
+| `src/services/mixedOrientationMerger.ts` | Service | Merge evidence from multiple rotations |
+| `src/types/index.ts` | Types | `BookEvidenceLine`, `FilteredLine`, `LineLabel` |
 
-#### Data Contracts
+#### Stage 1: Line Filtering (`spineLineFilter.ts`)
+
+Hard filters classify lines as OTHER (not title/author candidates):
+
+| Filter | Pattern | Example |
+|--------|---------|---------|
+| ISBN | `/isbn[-:\s]*(?:97[89][\d-]{10,14})/i` | "ISBN 978-0-06-112008-4" |
+| Publisher | Known publishers + patterns | "Scribner", "Penguin Press" |
+| Publisher Token | Standalone words | "Books", "Press", "Publishing" |
+| Publisher Name (Context) | First names near publisher tokens | "Thomas" when "Books" nearby |
+| Price | Currency patterns | "$14.99", "€12.00" |
+| URL | Web patterns | "www.example.com" |
+| Copyright | © patterns | "© 2023 Author Name" |
+| Edition | Edition patterns | "2nd Edition", "Revised" |
+| Barcode | Numeric sequences | "9780061120084" |
+| Year-only | Four-digit year alone | "2023" |
+| Numeric-heavy | >50% digits | "12345-67890" |
+
+**Context-aware filtering**: When "Books", "Press", or "Publishing" appears as a separate line, nearby first names like "Thomas", "Simon", "Peter" are also filtered as publisher name components.
 
 ```typescript
-// src/types/index.ts
+// Example: Context-aware publisher detection
+const lines = ['Everyday Sexism', 'Laura', 'Bates', 'Thomas', 'Dunne', 'Books'];
+// 'Books' → filtered as publisher_token
+// 'Thomas' → filtered as publisher_name_context (because 'Books' is nearby)
+// 'Dunne' → filtered as publisher (known publisher pattern)
+```
 
-/**
- * A single candidate for a field value
- */
-export interface FieldCandidate {
-  value: string;
+#### Stage 2: Line Labeling (`spineLineLabeler.ts`)
+
+Each candidate line receives title and author scores (0-1):
+
+**Title Score Components:**
+- Position score (top of spine = more likely title)
+- Title heuristics (starts with article, has subtitle indicator)
+- Length bonus (longer text more likely title)
+- All-caps bonus (common for spine titles)
+
+**Author Score Components:**
+- Position score (bottom of spine = more likely author)
+- Name heuristics (2-4 capitalized words, initials, prefixes)
+- "by" pattern detection ("by Author Name")
+- Multiple authors ("and", "&" patterns)
+
+```typescript
+// Scoring example
+'The Great Gatsby' → titleScore: 0.72, authorScore: 0.31 → TITLE
+'F. Scott Fitzgerald' → titleScore: 0.28, authorScore: 0.68 → AUTHOR
+'Random House' → titleScore: 0.35, authorScore: 0.38 → AMBIGUOUS
+```
+
+#### Stage 3: Assembly (`spineTitleAuthorAssembler.ts`)
+
+The assembler builds title/author from labeled lines:
+
+1. **Multi-line joining**: Consecutive name parts are joined
+   - "Laura" + "Bates" → "Laura Bates" (if combined scores well as name)
+
+2. **Combined line splitting**: Patterns like "Author • Title"
+   - Splits on separators: `•`, `·`, `|`, `-`, `–`, `—`
+   - **Skips colon** (subtitle indicator): "Title: Subtitle" stays together
+   - Only splits if one side scores well as name (threshold: 0.55)
+
+3. **Fallback strategies**:
+   - Best title-labeled line + best author-labeled line
+   - Highest confidence line as title if no clear author
+   - Quick assembly from raw lines if labeling fails
+
+```typescript
+interface TitleAuthorResult {
+  title: string | null;
+  author: string | null;
   confidence: number;
-  source: 'ocr' | 'pattern' | 'inferred';
-  /** Which evidence lines contributed */
-  sourceLines: number[];
-}
-
-/**
- * Extracted fields for a book candidate
- */
-export interface ExtractedFields {
-  /** Ranked title candidates (best first) */
-  titleCandidates: FieldCandidate[];
-  /** Ranked author candidates (best first) */
-  authorCandidates: FieldCandidate[];
-  /** ISBN if detected (validated) */
-  isbn: FieldCandidate | null;
-  /** Publisher if detected */
-  publisherCandidates: FieldCandidate[];
-  /** Edition if detected */
-  editionCandidates: FieldCandidate[];
-  /** Chosen values (best candidate for each) */
-  chosen: {
-    title: string | null;
-    author: string | null;
-    isbn: string | null;
-    publisher: string | null;
-    edition: string | null;
-  };
+  strategy: 'combined_split' | 'multi_line_author' | 'labeled' | 'fallback' | 'quick';
+  debug: AssemblyDebug;
 }
 ```
 
-#### Algorithm: spineFieldExtractor
+#### Stage 4: Validation (`spineSwapGuard.ts`)
+
+Detects and optionally corrects title/author swaps:
+
+**Swap Indicators:**
+- Title looks like a name (high name score)
+- Author looks like a title (has subtitle, question mark, starts with article)
+- Title shorter than author (unusual)
+- Title has "by" prefix (author pattern)
 
 ```typescript
-function extract(candidate: BookCandidate): ExtractedFields {
-  const lines = candidate.evidence.lines;
-
-  // 1. ISBN Detection
-  //    - Regex: /(?:ISBN[-: ]?)?(\d{10}|\d{13}|\d[\d-]{11,16}\d)/i
-  //    - OCR-tolerant normalization: 'O'→'0', 'l'→'1', 'I'→'1', 'S'→'5'
-  //    - Validate checksum (ISBN-10 mod 11, ISBN-13 mod 10)
-
-  // 2. Split Detection Patterns
-  //    - "Author • Title" → split on •, ·, |
-  //    - "Title - Author" → split on " - ", " – "
-  //    - "by Author" → extract after "by "
-  //    - "Title\nAuthor" → use line breaks
-
-  // 3. Title/Author Heuristics (improved)
-  //    - Longest capitalized phrase → likely title
-  //    - 2-3 word phrase with capital initials → likely author name
-  //    - Avoid common noise: "HARDCOVER", "PAPERBACK", year patterns
-
-  // 4. Publisher Detection
-  //    - Known publisher database (Penguin, HarperCollins, etc.)
-  //    - Pattern: "Published by X", "X Publishing"
-
-  // 5. Edition Detection
-  //    - Pattern: "1st Edition", "Revised", "Second Edition"
-  //    - Year + "Edition" pattern
-
-  // 6. Rank candidates by confidence
-
-  // 7. Choose best for each field
+interface SwapGuardResult {
+  shouldSwap: boolean;
+  swapConfidence: number;
+  correctedTitle: string | null;
+  correctedAuthor: string | null;
+  analysis: SwapAnalysis;
 }
 ```
 
-#### ISBN Validator
+#### Multi-Rotation Support (`mixedOrientationMerger.ts`)
+
+Preserves evidence from multiple rotation trials (0°, 90°, 180°, 270°):
+
+- **Does NOT select single best rotation** - keeps top 2 by quality
+- Merges lines from multiple orientations after deduplication
+- Enables detection when title is at 90° but publisher at 0°
 
 ```typescript
-// src/services/isbnValidator.ts
-
-export interface IsbnValidationResult {
-  valid: boolean;
-  normalized: string;  // Digits only
-  type: 'isbn10' | 'isbn13' | null;
-  original: string;
-}
-
-export function validateIsbn(input: string): IsbnValidationResult {
-  // 1. OCR-tolerant normalization
-  const normalized = input
-    .replace(/[Oo]/g, '0')
-    .replace(/[lIi]/g, '1')
-    .replace(/[Ss]/g, '5')
-    .replace(/[-\s]/g, '');
-
-  // 2. Extract digits (and X for ISBN-10)
-  const digits = normalized.replace(/[^0-9Xx]/g, '');
-
-  // 3. Validate length and checksum
-  if (digits.length === 10) {
-    return { valid: validateIsbn10(digits), normalized: digits, type: 'isbn10', original: input };
-  }
-  if (digits.length === 13) {
-    return { valid: validateIsbn13(digits), normalized: digits, type: 'isbn13', original: input };
-  }
-
-  return { valid: false, normalized: '', type: null, original: input };
-}
-
-function validateIsbn10(digits: string): boolean {
-  let sum = 0;
-  for (let i = 0; i < 9; i++) {
-    sum += parseInt(digits[i], 10) * (10 - i);
-  }
-  const check = digits[9].toUpperCase() === 'X' ? 10 : parseInt(digits[9], 10);
-  sum += check;
-  return sum % 11 === 0;
-}
-
-function validateIsbn13(digits: string): boolean {
-  let sum = 0;
-  for (let i = 0; i < 13; i++) {
-    sum += parseInt(digits[i], 10) * (i % 2 === 0 ? 1 : 3);
-  }
-  return sum % 10 === 0;
+interface MixedOrientationResult {
+  rotationEvidence: RotationEvidence[];
+  mergedLines: BookEvidenceLine[];
+  titleRotation: number;
+  authorRotation: number;
+  isMixedOrientation: boolean;
 }
 ```
 
-#### UI Changes
-
-Update book candidate card to show extracted fields:
-
-```
-┌────────────────────────────────────────┐
-│ Book 1                          [Edit] │
-├────────────────────────────────────────┤
-│ Title: The Great Gatsby        (94%)   │
-│ Author: F. Scott Fitzgerald    (87%)   │
-│ ISBN: 978-0743273565            ✓      │
-│ Publisher: Scribner            (72%)   │
-│                                        │
-│ [Debug: Show alternatives ▼]           │
-│ ┌────────────────────────────────────┐ │
-│ │ Alternative titles:                │ │
-│ │  • "Great Gatsby, The" (82%)       │ │
-│ │  • "Gatsby" (45%)                  │ │
-│ │ Alternative authors:               │ │
-│ │  • "Fitzgerald" (76%)              │ │
-│ └────────────────────────────────────┘ │
-└────────────────────────────────────────┘
-```
-
-#### Tests
+#### Tests (50 passing)
 
 | Test File | Coverage |
 |-----------|----------|
-| `src/services/__tests__/isbnValidator.test.ts` | ISBN-10/13 validation, OCR normalization |
-| `src/services/__tests__/spineFieldExtractor.test.ts` | Pattern splitting, field extraction |
+| `src/services/__tests__/gate8FieldExtraction.test.ts` | Full pipeline tests |
 
-```typescript
-// Example test cases
-describe('isbnValidator', () => {
-  it('validates correct ISBN-10', () => {
-    expect(validateIsbn('0-306-40615-2').valid).toBe(true);
-  });
-  it('validates correct ISBN-13', () => {
-    expect(validateIsbn('978-0-306-40615-7').valid).toBe(true);
-  });
-  it('rejects invalid checksum', () => {
-    expect(validateIsbn('978-0-306-40615-0').valid).toBe(false);
-  });
-  it('handles OCR errors: O→0, l→1', () => {
-    expect(validateIsbn('O-3O6-4O6l5-2').valid).toBe(true);
-  });
-});
-
-describe('spineFieldExtractor', () => {
-  it('splits "Harper Lee • Bülbülü Öldürmek"', () => {
-    const result = extract(evidenceWithLine('Harper Lee • Bülbülü Öldürmek'));
-    expect(result.chosen.author).toBe('Harper Lee');
-    expect(result.chosen.title).toBe('Bülbülü Öldürmek');
-  });
-  it('splits "Title - Author"', () => {});
-  it('extracts "by Author" pattern', () => {});
-  it('detects and validates ISBN in text', () => {});
-});
-```
+Key test scenarios:
+- Target failure fixture: "Everyday Sexism" by Laura Bates (with Thomas Dunne Books publisher)
+- Multi-line author joining: "Laura" + "Bates" → "Laura Bates"
+- Subtitle preservation: "Clean Code: A Handbook" stays as title
+- Combined line splitting: "Harper Lee • To Kill a Mockingbird"
+- Swap detection and correction
+- Mixed-rotation selection
 
 #### Validation Commands
 
 ```bash
-# Run unit tests
-npx jest src/services/__tests__/isbnValidator.test.ts --watchman=false
-npx jest src/services/__tests__/spineFieldExtractor.test.ts --watchman=false
+# Run Gate 8 tests
+npx jest src/services/__tests__/gate8FieldExtraction.test.ts --watchman=false
+
+# Run all tests
+npm test
 
 # TypeScript check
 npx tsc --noEmit
-
-# Manual validation
-# 1. Scan books with visible ISBNs
-# 2. Verify ISBN detected and shows checkmark
-# 3. Scan "Author • Title" format books
-# 4. Verify correct split (author not as title)
 ```
 
 #### Acceptance Criteria
 
-- [ ] ISBN-10 and ISBN-13 validated with checksums
-- [ ] OCR-tolerant normalization handles O/0, l/1/I, S/5 confusion
-- [ ] "Harper Lee • Bülbülü Öldürmek" correctly splits to author + title
-- [ ] "Title - Author" pattern correctly splits
-- [ ] Ranked alternatives available under debug toggle
-- [ ] Title/author swaps reduced compared to current heuristics
+- [x] Publisher words filtered (Books, Press, Publishing)
+- [x] Context-aware publisher name filtering (Thomas when Books nearby)
+- [x] Multi-line author joining works
+- [x] Subtitle patterns preserved (colon not split)
+- [x] Combined "Author • Title" patterns correctly split
+- [x] Swap guard detects and flags potential swaps
+- [x] Multi-rotation evidence preserved
+- [x] 50 comprehensive tests passing
 
 #### Risks + Mitigations
 
 | Risk | Mitigation |
 |------|------------|
-| False ISBN positives (random numbers) | Require checksum validation |
-| Wrong split direction ("Title - Author" vs "Author - Title") | Use capitalization + name patterns to distinguish |
-| Non-Latin scripts | Ensure Unicode-safe regex and comparison |
+| False publisher filtering | Context-aware: only filters names when publisher tokens nearby |
+| Wrong split direction | Use name scoring (0.55 threshold) to determine author side |
+| Subtitle treated as author | Skip colon separator in combined line splitting |
+| Multi-word names broken | Multi-line joining with combined name scoring |
+| Mixed orientations missed | Preserve top 2 rotations, merge with deduplication |
 
 ---
 

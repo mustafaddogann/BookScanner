@@ -31,6 +31,12 @@ import {
 } from '../utils/isbnUtils';
 import { normalizeForComparison } from '../utils/stringSimilarity';
 
+// Gate 8 services for improved title/author extraction
+import { filterSpineLines } from './spineLineFilter';
+import { labelSpineLines } from './spineLineLabeler';
+import { assembleTitleAuthor, quickAssemble } from './spineTitleAuthorAssembler';
+import { quickSwapCheck } from './spineSwapGuard';
+
 // ============================================================================
 // Configuration
 // ============================================================================
@@ -640,7 +646,13 @@ function extractAuthorFromByPattern(
 }
 
 /**
- * Extract title and author candidates from lines
+ * Extract title and author candidates from lines using Gate 8 pipeline
+ *
+ * Gate 8 Pipeline:
+ * 1. Filter lines (ISBN, publisher, price, etc. → OTHER)
+ * 2. Label remaining lines (title score, author score)
+ * 3. Assemble title/author from labeled lines
+ * 4. Validate with swap guard
  */
 function extractTitlesAndAuthors(
   lines: BookEvidenceLine[]
@@ -648,57 +660,154 @@ function extractTitlesAndAuthors(
   const titles: TitleCandidate[] = [];
   const authors: AuthorCandidate[] = [];
 
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i];
-    const text = line.text.trim();
+  if (lines.length === 0) {
+    return { titles, authors };
+  }
 
-    if (text.length < 2) continue;
+  try {
+    // Gate 8 Pipeline: Filter → Label → Assemble → Validate
 
-    // Skip lines that look like metadata (ISBN, copyright, etc.)
-    if (/^isbn/i.test(text) || /^copyright/i.test(text) || /^\d{4}$/.test(text)) {
-      continue;
+    // Step 1: Filter lines (removes ISBN, publisher, price, etc.)
+    const filterResult = filterSpineLines(lines);
+
+    // Step 2: Label candidate lines with title/author scores
+    const labelResult = labelSpineLines(filterResult.candidateLines);
+
+    // Step 3: Assemble title and author from labeled lines
+    const assemblyResult = assembleTitleAuthor(labelResult);
+
+    // Extract title and author strings from assemblies
+    let finalTitleStr = assemblyResult.bestTitle?.fullTitle;
+    let finalAuthorStr = assemblyResult.bestAuthor?.fullAuthor;
+
+    // Step 4: Validate with swap guard
+    if (finalTitleStr && finalAuthorStr) {
+      const swapResult = quickSwapCheck(finalTitleStr, finalAuthorStr);
+      if (swapResult.shouldSwap && swapResult.confidence > 0.6) {
+        // Swap detected with high confidence
+        finalTitleStr = swapResult.correctedTitle ?? finalTitleStr;
+        finalAuthorStr = swapResult.correctedAuthor ?? finalAuthorStr;
+      }
     }
 
-    // Try to extract author from "by" pattern
-    const byAuthor = extractAuthorFromByPattern(
-      text,
-      i,
-      line.sourceCropIndex,
-      line.confidence
-    );
-    if (byAuthor) {
-      authors.push(byAuthor);
-      continue;
-    }
-
-    // Try to split combined line
-    const splitResult = trySplitCombinedLine(text, i, line.sourceCropIndex, line.confidence);
-    if (splitResult) {
-      if (splitResult.title) titles.push(splitResult.title);
-      if (splitResult.author) authors.push(splitResult.author);
-      continue;
-    }
-
-    // Classify as title or author based on heuristics
-    const personScore = isLikelyPersonName(text);
-    const titleScore = isLikelyTitle(text);
-
-    if (personScore > 0.6 && personScore > titleScore) {
-      authors.push({
-        value: text,
-        confidence: line.confidence * personScore,
-        sourceLineIndex: i,
-        cropIndex: line.sourceCropIndex,
-        nameConfidence: personScore,
-      });
-    } else if (titleScore > 0.4) {
+    // Convert assembly result to TitleCandidate/AuthorCandidate format
+    if (finalTitleStr) {
+      // Find source line for title - use original OCR confidence
+      const sourceLine = labelResult.titleLines[0];
+      const originalLineConfidence = sourceLine?.filteredLine.line.confidence ?? 0.8;
+      const titleScore = sourceLine?.titleScore ?? 0.5;
+      // Confidence combines OCR quality with title classification quality
+      // Use weighted average to avoid penalizing too heavily for ambiguous scoring
+      const confidence = originalLineConfidence * 0.7 + titleScore * 0.3;
       titles.push({
-        value: text,
-        confidence: line.confidence * titleScore,
-        sourceLineIndex: i,
-        cropIndex: line.sourceCropIndex,
-        charCount: text.length,
-        wordCount: text.split(/\s+/).length,
+        value: finalTitleStr,
+        confidence,
+        sourceLineIndex: sourceLine?.filteredLine.lineIndex ?? 0,
+        cropIndex: sourceLine?.filteredLine.line.sourceCropIndex ?? 0,
+        charCount: finalTitleStr.length,
+        wordCount: finalTitleStr.split(/\s+/).length,
+      });
+    }
+
+    if (finalAuthorStr) {
+      // Find source line for author - use original OCR confidence
+      const sourceLine = labelResult.authorLines[0];
+      const originalLineConfidence = sourceLine?.filteredLine.line.confidence ?? 0.8;
+      const authorScore = sourceLine?.authorScore ?? 0.5;
+      const authorAssembly = assemblyResult.bestAuthor;
+      // Confidence combines OCR quality with author classification quality
+      const confidence = originalLineConfidence * 0.7 + authorScore * 0.3;
+      authors.push({
+        value: finalAuthorStr,
+        confidence,
+        sourceLineIndex: sourceLine?.filteredLine.lineIndex ?? 0,
+        cropIndex: sourceLine?.filteredLine.line.sourceCropIndex ?? 0,
+        nameConfidence: authorScore,
+        fromByPattern: authorAssembly?.method === 'by_pattern',
+        fromSplit: authorAssembly?.method === 'split_from_combined',
+      });
+    }
+
+    // Add alternative candidates from assembly pairings
+    for (const pairing of assemblyResult.pairings.slice(1, 4)) {
+      const pairingTitleStr = pairing.title?.fullTitle;
+      const pairingAuthorStr = pairing.author?.fullAuthor;
+
+      if (pairingTitleStr && pairingTitleStr !== finalTitleStr) {
+        titles.push({
+          value: pairingTitleStr,
+          confidence: pairing.confidence * 0.8,
+          sourceLineIndex: pairing.title.sourceLineIndices[0] ?? 0,
+          cropIndex: 0,
+          charCount: pairingTitleStr.length,
+          wordCount: pairingTitleStr.split(/\s+/).length,
+        });
+      }
+      if (pairingAuthorStr && pairingAuthorStr !== finalAuthorStr) {
+        authors.push({
+          value: pairingAuthorStr,
+          confidence: pairing.confidence * 0.8,
+          sourceLineIndex: pairing.author.sourceLineIndices[0] ?? 0,
+          cropIndex: 0,
+          nameConfidence: pairing.confidence * 0.8,
+          fromByPattern: pairing.author.method === 'by_pattern',
+          fromSplit: pairing.author.method === 'split_from_combined',
+        });
+      }
+    }
+
+    // Fallback: If Gate 8 produced no title/author but we have candidate lines,
+    // use them directly (for edge cases like single-line inputs)
+    if (titles.length === 0 && authors.length === 0 && filterResult.candidateLines.length > 0) {
+      // Add candidate lines based on their labels
+      for (const fl of filterResult.candidateLines) {
+        const text = fl.line.text.trim();
+        if (text.length < 2) continue;
+
+        const personScore = isLikelyPersonName(text);
+        const titleScore = isLikelyTitle(text);
+
+        if (personScore > titleScore && personScore > 0.5) {
+          authors.push({
+            value: text,
+            confidence: fl.line.confidence * personScore,
+            sourceLineIndex: fl.lineIndex,
+            cropIndex: fl.line.sourceCropIndex,
+            nameConfidence: personScore,
+          });
+        } else {
+          titles.push({
+            value: text,
+            confidence: fl.line.confidence * Math.max(titleScore, 0.5),
+            sourceLineIndex: fl.lineIndex,
+            cropIndex: fl.line.sourceCropIndex,
+            charCount: text.length,
+            wordCount: text.split(/\s+/).length,
+          });
+        }
+      }
+    }
+  } catch {
+    // Fallback to quick assembly if Gate 8 pipeline fails
+    const lineTexts = lines.map(l => l.text.trim());
+    const quickResult = quickAssemble(lineTexts);
+    if (quickResult.title) {
+      titles.push({
+        value: quickResult.title,
+        confidence: 0.5, // Lower confidence for fallback
+        sourceLineIndex: 0,
+        cropIndex: lines[0]?.sourceCropIndex ?? 0,
+        charCount: quickResult.title.length,
+        wordCount: quickResult.title.split(/\s+/).length,
+      });
+    }
+    if (quickResult.author) {
+      authors.push({
+        value: quickResult.author,
+        confidence: 0.5, // Lower confidence for fallback
+        sourceLineIndex: 0,
+        cropIndex: lines[0]?.sourceCropIndex ?? 0,
+        nameConfidence: 0.5,
       });
     }
   }

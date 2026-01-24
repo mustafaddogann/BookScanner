@@ -40,7 +40,7 @@
 	<key>NSLocationWhenInUseUsageDescription</key>
 	<string></string>
 	<key>NSPhotoLibraryUsageDescription</key>
-	<string>BookScanner needs photo library access to save scanned images</string>
+	<string>Select a photo to scan book spines.</string>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>BookScanner needs local network access to connect to the Metro development server for loading JavaScript bundles during development.</string>
 	<key>NSBonjourServices</key>

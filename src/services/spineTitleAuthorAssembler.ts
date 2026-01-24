@@ -109,6 +109,12 @@ const AUTHOR_SEPARATORS = [' and ', ' & ', ', ', ' with ', ' ve '];
 /** Minimum confidence for inclusion */
 const MIN_CONFIDENCE = 0.3;
 
+/** Maximum characters for a name part (first name, last name, etc.) */
+const MAX_NAME_PART_LENGTH = 20;
+
+/** Minimum characters for a potential name part */
+const MIN_NAME_PART_LENGTH = 2;
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -121,6 +127,9 @@ function trySplitCombined(
   lineIndex: number
 ): { title: string; author: string; separator: string } | null {
   for (const { sep } of COMBINED_SEPARATORS.sort((a, b) => a.priority - b.priority)) {
+    // Skip colon - it's typically Title: Subtitle, not Title: Author
+    if (sep === ': ') continue;
+
     if (text.includes(sep)) {
       const parts = text.split(sep).map(p => p.trim()).filter(p => p.length > 0);
 
@@ -144,10 +153,19 @@ function trySplitCombined(
         }
 
         // Use name detection heuristics
-        const leftWords = left.split(/\s+/).length;
-        const rightWords = right.split(/\s+/).length;
         const leftNameScore = scoreAsName(left);
         const rightNameScore = scoreAsName(right);
+
+        // IMPORTANT: If neither side looks like a name, this is probably
+        // Title - Subtitle, not Title - Author. Don't split.
+        // Use a higher threshold to be conservative - we need at least one
+        // side to CLEARLY look like a person's name.
+        const minNameScore = 0.55;
+        const hasConfidentAuthor = leftNameScore >= minNameScore || rightNameScore >= minNameScore;
+        if (!hasConfidentAuthor) {
+          // Neither side confidently looks like an author name - skip this separator
+          continue;
+        }
 
         // If name scores are significantly different, use that
         if (Math.abs(leftNameScore - rightNameScore) > 0.1) {
@@ -159,18 +177,21 @@ function trySplitCombined(
         }
 
         // Fall back to word count heuristic
+        const leftWords = left.split(/\s+/).length;
+        const rightWords = right.split(/\s+/).length;
+
         // "Title - Author" (right is shorter, likely name)
-        if (rightWords <= 3 && leftWords > rightWords) {
+        if (rightWords <= 3 && leftWords > rightWords && rightNameScore >= minNameScore) {
           return { title: left, author: right, separator: sep };
         }
 
         // "Author - Title" (left is shorter, likely name)
-        if (leftWords <= 3 && rightWords > leftWords) {
+        if (leftWords <= 3 && rightWords > leftWords && leftNameScore >= minNameScore) {
           return { author: left, title: right, separator: sep };
         }
 
         // Last resort: if one has significantly higher name score, use that
-        if (leftNameScore > 0.4 || rightNameScore > 0.4) {
+        if (leftNameScore > 0.5 || rightNameScore > 0.5) {
           if (leftNameScore > rightNameScore) {
             return { author: left, title: right, separator: sep };
           } else {
@@ -242,12 +263,113 @@ function assembleTitle(titleLines: LineLabel[]): TitleAssembly | null {
 }
 
 /**
+ * Check if a text looks like a single name part (first name, last name, etc.)
+ */
+function isNamePart(text: string): boolean {
+  const trimmed = text.trim();
+  // Name parts are typically 2-20 chars, start with capital, no digits
+  if (trimmed.length < MIN_NAME_PART_LENGTH || trimmed.length > MAX_NAME_PART_LENGTH) {
+    return false;
+  }
+  // Should start with capital letter
+  if (!/^[A-Z]/.test(trimmed)) {
+    return false;
+  }
+  // Should not contain digits
+  if (/\d/.test(trimmed)) {
+    return false;
+  }
+  // Should be a single word (possibly with punctuation like "O'Brien" or "Jr.")
+  const words = trimmed.split(/\s+/);
+  return words.length <= 2;
+}
+
+/**
+ * Try to join consecutive author lines into a single name
+ * e.g., "Laura" + "Bates" -> "Laura Bates"
+ */
+function tryJoinAuthorLines(authorLines: LineLabel[]): {
+  joinedName: string;
+  sourceIndices: number[];
+  confidence: number;
+} | null {
+  if (authorLines.length < 2) return null;
+
+  // Sort by position (line index)
+  const sorted = [...authorLines].sort(
+    (a, b) => a.filteredLine.lineIndex - b.filteredLine.lineIndex
+  );
+
+  // Look for consecutive short name parts
+  const nameParts: Array<{ text: string; index: number; confidence: number }> = [];
+
+  for (const line of sorted) {
+    const text = line.filteredLine.line.text.trim();
+
+    // Check if this looks like a name part
+    if (isNamePart(text)) {
+      // Check if consecutive with previous
+      if (nameParts.length > 0) {
+        const lastIndex = nameParts[nameParts.length - 1].index;
+        const currentIndex = line.filteredLine.lineIndex;
+
+        // Allow gap of up to 2 lines (for possible noise in between)
+        if (currentIndex - lastIndex <= 2) {
+          nameParts.push({
+            text,
+            index: currentIndex,
+            confidence: line.confidence * line.authorScore,
+          });
+        }
+      } else {
+        nameParts.push({
+          text,
+          index: line.filteredLine.lineIndex,
+          confidence: line.confidence * line.authorScore,
+        });
+      }
+    }
+  }
+
+  // We need at least 2 parts to join
+  if (nameParts.length >= 2) {
+    const joinedName = nameParts.map(p => p.text).join(' ');
+    const avgConfidence = nameParts.reduce((sum, p) => sum + p.confidence, 0) / nameParts.length;
+
+    // Verify the joined name looks like a real name
+    if (scoreAsName(joinedName) > 0.5) {
+      return {
+        joinedName,
+        sourceIndices: nameParts.map(p => p.index),
+        confidence: avgConfidence,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Assemble author from labeled lines
  */
 function assembleAuthor(authorLines: LineLabel[]): AuthorAssembly | null {
   if (authorLines.length === 0) return null;
 
-  // Take top candidate
+  // Strategy 1: Try to join multiple short name parts
+  const joinResult = tryJoinAuthorLines(authorLines);
+  if (joinResult) {
+    const authorList = parseMultipleAuthors(joinResult.joinedName);
+    return {
+      primaryAuthor: authorList[0],
+      additionalAuthors: authorList.slice(1),
+      fullAuthor: joinResult.joinedName,
+      confidence: joinResult.confidence,
+      sourceLineIndices: joinResult.sourceIndices,
+      method: 'multiple_lines',
+    };
+  }
+
+  // Strategy 2: Take top candidate as single author
   const top = authorLines[0];
   let text = top.filteredLine.line.text.trim();
 
@@ -439,8 +561,11 @@ export function quickAssemble(lines: string[]): {
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Check for combined line with separator
+    // Check for combined line with separator (but skip colon - it's usually subtitle, not author)
     for (const { sep } of COMBINED_SEPARATORS.sort((a, b) => a.priority - b.priority)) {
+      // Skip colon - it's typically Title: Subtitle, not Author: Title
+      if (sep === ': ') continue;
+
       if (trimmed.includes(sep)) {
         const parts = trimmed.split(sep).map(p => p.trim()).filter(p => p.length > 0);
         if (parts.length === 2) {

@@ -95,7 +95,7 @@ Image Capture
 | 7. OCR | Implemented | iOS (Vision), Android (ML Kit) |
 | 8. Grouping | Implemented | iOS, Android |
 | 9. Metadata Resolution | Implemented (feature-flagged) | iOS, Android |
-| 10. Extraction | Planned | See Gate 8 |
+| 10. Extraction | **Implemented** | Gate 8 - Line Labeling Pipeline |
 | 11. Resolver | Planned | See Gate 9 |
 | 12. Corrections | Planned | See Gate 10 |
 
@@ -373,19 +373,45 @@ METADATA_VERBOSE_DEBUG           // Verbose logging (default: false)
 
 ---
 
-## Future Pipeline Stages (Gates 8-10)
+## Implemented: Extraction Stage (Gate 8)
 
-The following stages are planned to improve metadata extraction accuracy. See [project_plan.md](./project_plan.md) for full implementation details.
+Gate 8 is now **fully implemented** with a line labeling pipeline for accurate title/author extraction.
 
-### 10. Extraction Stage (Gate 8)
+### 10. Extraction Stage (Gate 8) - IMPLEMENTED
 
-**Purpose:** Extract structured fields (title, author, ISBN, publisher, edition) from merged evidence.
+**Purpose:** Extract structured fields (title, author, ISBN, publisher, edition) from merged evidence using a multi-stage line labeling pipeline.
 
-**Key Components:**
-- `spineFieldExtractor.ts` - Pattern matching and ranking
-- `isbnValidator.ts` - ISBN-10/13 checksum validation with OCR-tolerant normalization
+**Pipeline Flow:**
+```
+OCR Lines → Filter (OTHER) → Label (scores) → Assemble → Validate
+```
 
-**Output:** `BookCandidate.extractedFields`
+**Key Components (Gate 8 Services):**
+| Service | Purpose |
+|---------|---------|
+| `spineLineFilter.ts` | Hard filter for ISBN, publisher, price, URL, copyright, etc. |
+| `spineLineLabeler.ts` | Score lines for title vs author likelihood |
+| `spineTitleAuthorAssembler.ts` | Assemble title/author from scored lines |
+| `spineSwapGuard.ts` | Validate and detect title/author swaps |
+| `mixedOrientationMerger.ts` | Merge evidence from multiple rotation trials |
+
+**Key Features:**
+- **Context-aware publisher filtering**: Filters "Thomas" when "Books" appears nearby
+- **Multi-line author joining**: "Laura" + "Bates" → "Laura Bates"
+- **Subtitle preservation**: "Title: Subtitle" stays together (colon not split)
+- **Combined line splitting**: "Author • Title" patterns correctly split
+- **Swap detection**: Validates and flags potential title/author swaps
+- **Multi-rotation support**: Preserves evidence from multiple OCR rotation trials
+
+**Tests:** 50 comprehensive tests in `gate8FieldExtraction.test.ts`
+
+**Output:** `BookCandidate.extractedFields` (integrated via `spineFieldExtractionService.ts`)
+
+---
+
+## Future Pipeline Stages (Gates 9-10)
+
+The following stages are planned. See [project_plan.md](./project_plan.md) for full implementation details.
 
 ### 11. Resolver Stage (Gate 9)
 
@@ -617,10 +643,19 @@ The pipeline tracks errors at each stage:
 | `stringSimilarity.ts` | Fuzzy string matching |
 | `isbnUtils.ts` | ISBN parsing and validation |
 
-**Future services (Gates 8-10):**
+**Gate 8 services (Field Extraction - IMPLEMENTED):**
 | Service | Purpose |
 |---------|---------|
-| `spineFieldExtractor.ts` | Extract structured fields |
+| `spineLineFilter.ts` | Hard filter for ISBN, publisher, price, etc. |
+| `spineLineLabeler.ts` | Score lines for title vs author |
+| `spineTitleAuthorAssembler.ts` | Assemble title/author from labeled lines |
+| `spineSwapGuard.ts` | Detect and validate title/author swaps |
+| `mixedOrientationMerger.ts` | Merge multi-rotation OCR evidence |
+| `spineFieldExtractionService.ts` | Orchestrates Gate 8 pipeline |
+
+**Future services (Gates 9-10):**
+| Service | Purpose |
+|---------|---------|
 | `bookResolverService.ts` | External lookup orchestration |
 | `openLibraryProvider.ts` | Open Library API |
 | `resolverCache.ts` | Lookup result caching |

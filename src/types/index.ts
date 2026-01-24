@@ -335,11 +335,13 @@ export interface RawModelOutput {
  * Navigation param types
  */
 export type RootStackParamList = {
-  Scanner: undefined;
+  Home: undefined;
+  Scanner: { importUri?: string } | undefined;
   Results: {
     sessionId: string;
   };
   Debug: undefined;
+  Settings: undefined;
 };
 
 // ============================================================================

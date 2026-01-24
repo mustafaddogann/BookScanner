@@ -9,6 +9,7 @@ import {
   Text,
   Image,
   TouchableOpacity,
+  FlatList,
   ScrollView,
   Dimensions,
   LayoutChangeEvent,
@@ -30,13 +31,18 @@ import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../uti
 import { useAppStore, type SessionMeta, type DetectionRectifyInfo } from '../store/useAppStore';
 import { readDebugManifest, getSessionDir } from '../services/debugArtifacts';
 import { recognizeCropText, isTextRecognitionAvailable } from '../services/textRecognitionService';
-import { ensureFileUri, stripFileUri, getFilename } from '../utils/fileUri';
+import { ensureFileUri, getFilename } from '../utils/fileUri';
 import { isMetadataResolutionEnabled } from '../config/debug';
 import { retryMetadataResolution } from '../services/metadataResolutionOrchestrator';
+import { BookCandidateCard } from '../components/BookCandidateCard';
+import { BookCandidateDetailModal } from '../components/BookCandidateDetailModal';
+import { EditCandidateFieldsModal } from '../components/EditCandidateFieldsModal';
 import RNFS from 'react-native-fs';
 
 // Tab options for switching between overlay, crops, and books views
 type ResultsTab = 'overlay' | 'crops' | 'books';
+
+type BookCandidateListItem = BookCandidate & { candidateId: string };
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Results'>;
 type ResultsRouteProp = RouteProp<RootStackParamList, 'Results'>;
@@ -64,8 +70,9 @@ export function ResultsScreen(): React.JSX.Element {
   const [loadError, setLoadError] = useState<string | null>(null);
 
   // Tab and crop selection state
-  const [activeTab, setActiveTab] = useState<ResultsTab>('overlay');
+  const [activeTab, setActiveTab] = useState<ResultsTab>('books');
   const [selectedCropIndex, setSelectedCropIndex] = useState<number | null>(null);
+  const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
 
   // Get rectification results from sessionMeta
   const rectificationResults = sessionMeta?.rectificationResults || [];
@@ -79,7 +86,13 @@ export function ResultsScreen(): React.JSX.Element {
   const userEdits = sessionMeta?.userEdits || {};
 
   // Get book candidates from sessionMeta (Gate 7)
-  const bookCandidates = sessionMeta?.bookCandidates || [];
+  const bookCandidates = useMemo(() => {
+    const candidates = sessionMeta?.bookCandidates ?? [];
+    return candidates.map((candidate) => ({
+      ...candidate,
+      candidateId: (candidate as { candidateId?: string }).candidateId ?? candidate.id,
+    }));
+  }, [sessionMeta?.bookCandidates]);
   const bookCandidatesSummary = sessionMeta?.bookCandidatesSummary;
 
   // Get metadata resolution state (Gate 8+) - feature flagged
@@ -104,6 +117,11 @@ export function ResultsScreen(): React.JSX.Element {
   // State for metadata resolution UI (Gate 8+)
   const [metadataRetrying, setMetadataRetrying] = useState(false);
   const [userSelectedBook, setUserSelectedBook] = useState<ResolvedBook | null>(null);
+  const [bookDetailCandidate, setBookDetailCandidate] = useState<BookCandidateListItem | null>(null);
+  const [editCandidateModalVisible, setEditCandidateModalVisible] = useState(false);
+  const [editCandidateCropIndex, setEditCandidateCropIndex] = useState<number | null>(null);
+  const [editCandidateTitle, setEditCandidateTitle] = useState('');
+  const [editCandidateAuthor, setEditCandidateAuthor] = useState('');
 
   // Track image load errors per crop index
   const [imageLoadErrors, setImageLoadErrors] = useState<Record<number, string>>({});
@@ -777,6 +795,144 @@ export function ResultsScreen(): React.JSX.Element {
     console.log(`[Results] User selected book: "${book.title}"`);
   }, []);
 
+  const getCandidateEditIndex = useCallback((candidate: BookCandidateListItem): number | null => {
+    if (candidate.cropIndices?.length) return candidate.cropIndices[0];
+    return null;
+  }, []);
+
+  const getCandidateDisplay = useCallback((candidate: BookCandidateListItem) => {
+    const editIndex = getCandidateEditIndex(candidate);
+    const edit = editIndex !== null ? userEdits[editIndex] : undefined;
+    const extracted = (candidate as { extractedFields?: { chosen?: { title?: string | null; author?: string | null } } })
+      .extractedFields?.chosen;
+    const titleHint = candidate.evidence?.perFieldHints?.titleHints?.[0];
+    const authorHint = candidate.evidence?.perFieldHints?.authorHints?.[0];
+
+    return {
+      title: edit?.title ?? extracted?.title ?? titleHint ?? null,
+      author: edit?.author ?? extracted?.author ?? authorHint ?? null,
+      isEdited: !!(edit?.title || edit?.author),
+      editIndex,
+    };
+  }, [getCandidateEditIndex, userEdits]);
+
+  const renderBookCandidate = useCallback(({ item }: { item: BookCandidateListItem }) => {
+    const display = getCandidateDisplay(item);
+    return (
+      <BookCandidateCard
+        candidate={item}
+        onPress={() => setBookDetailCandidate(item)}
+        title={display.title}
+        author={display.author}
+        isEdited={display.isEdited}
+      />
+    );
+  }, [getCandidateDisplay]);
+
+  const bookCandidateKeyExtractor = useCallback((item: BookCandidateListItem) => item.candidateId, []);
+
+  const hasBookCandidates = bookCandidates.length > 0;
+
+  const bookListHeader = useMemo(() => {
+    if (!hasBookCandidates || !bookCandidatesSummary) return null;
+    return (
+      <View style={styles.booksSummaryHeader}>
+        <Text style={styles.booksSummaryText}>
+          {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
+        </Text>
+        <Text style={styles.booksSummarySubtext}>
+          Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
+        </Text>
+      </View>
+    );
+  }, [bookCandidatesSummary, hasBookCandidates]);
+
+  const bookListFooter = useMemo(() => {
+    if (!hasBookCandidates || !isMetadataResolutionEnabled()) return null;
+    return (
+      <MetadataResolutionCard
+        resolution={metadataResolution}
+        evidenceSummary={evidenceSummary}
+        userSelectedBook={userSelectedBook}
+        queuedForOffline={metadataQueuedForOffline}
+        onSelectBook={handleSelectBook}
+        onRetry={handleRetryMetadata}
+        isRetrying={metadataRetrying}
+      />
+    );
+  }, [
+    metadataResolution,
+    evidenceSummary,
+    userSelectedBook,
+    metadataQueuedForOffline,
+    handleSelectBook,
+    handleRetryMetadata,
+    metadataRetrying,
+    hasBookCandidates,
+  ]);
+
+  const bookListEmpty = useMemo(() => (
+    <View style={styles.noCropsContainer}>
+      <Text style={styles.noCropsTitle}>No Book Candidates</Text>
+      <Text style={styles.noCropsMessage}>
+        {detections.length === 0
+          ? 'No detections were found in this scan.'
+          : 'Book candidates will appear here after the pipeline groups detections.'}
+      </Text>
+      {bookCandidatesSummary && (
+        <Text style={styles.noCropsStats}>
+          {bookCandidatesSummary.rawDetections} detections, {bookCandidatesSummary.rawCrops} crops
+        </Text>
+      )}
+    </View>
+  ), [bookCandidatesSummary, detections.length]);
+
+  const handleCloseBookDetail = useCallback(() => {
+    setBookDetailCandidate(null);
+  }, []);
+
+  const handleOpenCandidateEdit = useCallback((candidate: BookCandidateListItem) => {
+    const display = getCandidateDisplay(candidate);
+    setEditCandidateCropIndex(display.editIndex);
+    setEditCandidateTitle(display.title || '');
+    setEditCandidateAuthor(display.author || '');
+    setEditCandidateModalVisible(true);
+  }, [getCandidateDisplay]);
+
+  const handleCloseCandidateEdit = useCallback(() => {
+    setEditCandidateModalVisible(false);
+    setEditCandidateCropIndex(null);
+    setEditCandidateTitle('');
+    setEditCandidateAuthor('');
+  }, []);
+
+  const handleSaveCandidateEdits = useCallback(() => {
+    if (editCandidateCropIndex === null) {
+      handleCloseCandidateEdit();
+      return;
+    }
+
+    const currentMeta = useAppStore.getState().sessionMeta;
+    if (!currentMeta) {
+      handleCloseCandidateEdit();
+      return;
+    }
+
+    const currentEdits = currentMeta.userEdits || {};
+    useAppStore.getState().setSessionMeta({
+      ...currentMeta,
+      userEdits: {
+        ...currentEdits,
+        [editCandidateCropIndex]: {
+          title: editCandidateTitle.trim() || undefined,
+          author: editCandidateAuthor.trim() || undefined,
+        },
+      },
+    });
+
+    handleCloseCandidateEdit();
+  }, [editCandidateCropIndex, editCandidateTitle, editCandidateAuthor, handleCloseCandidateEdit]);
+
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
@@ -807,36 +963,61 @@ export function ResultsScreen(): React.JSX.Element {
         <Text style={styles.detectionCount}>{detections.length} detected</Text>
       </View>
 
-      {/* Tab bar for switching between Overlay, Crops, and Books views */}
-      <View style={styles.tabBar}>
+      {/* Primary view selector */}
+      <View style={styles.primaryBar}>
+        <View style={styles.primaryLeft}>
+          <TouchableOpacity
+            style={[styles.primaryTab, activeTab === 'books' && styles.primaryTabActive]}
+            onPress={() => setActiveTab('books')}
+          >
+            <Text style={[styles.primaryTabText, activeTab === 'books' && styles.primaryTabTextActive]}>
+              Books {bookCandidates.length > 0 && `(${bookCandidates.length})`}
+            </Text>
+          </TouchableOpacity>
+        </View>
         <TouchableOpacity
-          style={[styles.tab, activeTab === 'overlay' && styles.tabActive]}
-          onPress={() => setActiveTab('overlay')}
+          style={[styles.diagnosticsToggle, diagnosticsVisible && styles.diagnosticsToggleActive]}
+          onPress={() => {
+            setDiagnosticsVisible((prev) => {
+              const next = !prev;
+              if (!next) {
+                setActiveTab('books');
+              } else if (activeTab === 'books') {
+                setActiveTab('overlay');
+              }
+              return next;
+            });
+          }}
         >
-          <Text style={[styles.tabText, activeTab === 'overlay' && styles.tabTextActive]}>
-            Overlay
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'crops' && styles.tabActive]}
-          onPress={() => setActiveTab('crops')}
-        >
-          <Text style={[styles.tabText, activeTab === 'crops' && styles.tabTextActive]}>
-            Crops {hasSuccessfulCrops && `(${rectificationSummary?.succeeded || rectificationResults.filter(r => r.cropUri).length})`}
-          </Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.tab, activeTab === 'books' && styles.tabActive]}
-          onPress={() => setActiveTab('books')}
-        >
-          <Text style={[styles.tabText, activeTab === 'books' && styles.tabTextActive]}>
-            Books {bookCandidates.length > 0 && `(${bookCandidates.length})`}
+          <Text style={[styles.diagnosticsToggleText, diagnosticsVisible && styles.diagnosticsToggleTextActive]}>
+            Diagnostics
           </Text>
         </TouchableOpacity>
       </View>
 
+      {diagnosticsVisible && (
+        <View style={styles.tabBar}>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'overlay' && styles.tabActive]}
+            onPress={() => setActiveTab('overlay')}
+          >
+            <Text style={[styles.tabText, activeTab === 'overlay' && styles.tabTextActive]}>
+              Overlay
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tab, activeTab === 'crops' && styles.tabActive]}
+            onPress={() => setActiveTab('crops')}
+          >
+            <Text style={[styles.tabText, activeTab === 'crops' && styles.tabTextActive]}>
+              Crops {hasSuccessfulCrops && `(${rectificationSummary?.succeeded || rectificationResults.filter(r => r.cropUri).length})`}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      )}
+
       {/* OVERLAY VIEW - Image with detection overlay */}
-      {activeTab === 'overlay' && (
+      {diagnosticsVisible && activeTab === 'overlay' && (
         <View style={styles.imageContainer} onLayout={handleContainerLayout}>
           {imageUri && (
             <Image
@@ -893,7 +1074,7 @@ export function ResultsScreen(): React.JSX.Element {
       )}
 
       {/* CROPS VIEW - Grid of rectified crop images */}
-      {activeTab === 'crops' && (
+      {diagnosticsVisible && activeTab === 'crops' && (
         <View style={styles.cropsContainer}>
           {!effectiveHasSuccessfulCrops ? (
             // No crops available message
@@ -1100,132 +1281,16 @@ export function ResultsScreen(): React.JSX.Element {
       {/* BOOKS VIEW - Grouped book candidates (Gate 7) */}
       {activeTab === 'books' && (
         <View style={styles.booksContainer}>
-          {bookCandidates.length === 0 ? (
-            // No candidates available message
-            <View style={styles.noCropsContainer}>
-              <Text style={styles.noCropsTitle}>No Book Candidates</Text>
-              <Text style={styles.noCropsMessage}>
-                {detections.length === 0
-                  ? 'No detections were found in this scan.'
-                  : 'Book candidates will appear here after the pipeline groups detections.'}
-              </Text>
-              {bookCandidatesSummary && (
-                <Text style={styles.noCropsStats}>
-                  {bookCandidatesSummary.rawDetections} detections, {bookCandidatesSummary.rawCrops} crops
-                </Text>
-              )}
-            </View>
-          ) : (
-            // Books list
-            <ScrollView contentContainerStyle={styles.booksScrollContent}>
-              {/* Summary header */}
-              {bookCandidatesSummary && (
-                <View style={styles.booksSummaryHeader}>
-                  <Text style={styles.booksSummaryText}>
-                    {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
-                  </Text>
-                  <Text style={styles.booksSummarySubtext}>
-                    Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
-                  </Text>
-                </View>
-              )}
-
-              {/* Book candidates list */}
-              {bookCandidates.map((candidate, index) => {
-                const repCrop = effectiveRectResults.find(
-                  r => r.detectionIndex === candidate.representativeDetectionIndex
-                );
-                const hasThumb = repCrop?.cropUri;
-                const evidenceText = candidate.evidence.mergedTextBlock || 'No text extracted';
-                const titleHint = candidate.evidence.perFieldHints?.titleHints[0];
-                const authorHint = candidate.evidence.perFieldHints?.authorHints[0];
-                const cropCount = candidate.cropIndices.length;
-
-                return (
-                  <View key={candidate.id} style={styles.bookCard}>
-                    <View style={styles.bookCardHeader}>
-                      <View style={styles.bookCardThumbnail}>
-                        {hasThumb ? (
-                          <Image
-                            source={{ uri: ensureFileUri(repCrop.cropUri) }}
-                            style={styles.bookThumbnailImage}
-                            resizeMode="cover"
-                          />
-                        ) : (
-                          <View style={styles.bookThumbnailPlaceholder}>
-                            <Text style={styles.bookThumbnailText}>{index + 1}</Text>
-                          </View>
-                        )}
-                      </View>
-                      <View style={styles.bookCardInfo}>
-                        <Text style={styles.bookCardIndex}>Book {index + 1}</Text>
-                        {titleHint ? (
-                          <Text style={styles.bookCardTitle} numberOfLines={2}>
-                            {titleHint}
-                          </Text>
-                        ) : (
-                          <Text style={styles.bookCardNoTitle}>No title detected</Text>
-                        )}
-                        {authorHint && (
-                          <Text style={styles.bookCardAuthor} numberOfLines={1}>
-                            {authorHint}
-                          </Text>
-                        )}
-                        <View style={styles.bookCardMeta}>
-                          <Text style={styles.bookCardMetaText}>
-                            {cropCount} crop{cropCount !== 1 ? 's' : ''} • {Math.round(candidate.confidenceScore * 100)}% conf
-                          </Text>
-                        </View>
-                      </View>
-                    </View>
-
-                    {/* Evidence preview */}
-                    <View style={styles.bookEvidenceContainer}>
-                      <Text style={styles.bookEvidenceLabel}>Merged Evidence:</Text>
-                      <Text style={styles.bookEvidenceText} numberOfLines={4}>
-                        {evidenceText}
-                      </Text>
-                      {candidate.evidence.mergedLines.length > 0 && (
-                        <Text style={styles.bookEvidenceCount}>
-                          {candidate.evidence.mergedLines.length} lines from {candidate.evidence.topCrops.length} crops
-                        </Text>
-                      )}
-                    </View>
-
-                    {/* Crop thumbnails strip */}
-                    {candidate.evidence.topCrops.length > 0 && (
-                      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.bookCropsStrip}>
-                        {candidate.evidence.topCrops.map((cropIdx) => {
-                          const crop = effectiveRectResults[cropIdx];
-                          return crop?.cropUri ? (
-                            <Image
-                              key={cropIdx}
-                              source={{ uri: ensureFileUri(crop.cropUri) }}
-                              style={styles.bookCropThumb}
-                              resizeMode="cover"
-                            />
-                          ) : null;
-                        })}
-                      </ScrollView>
-                    )}
-                  </View>
-                );
-              })}
-
-              {/* Metadata Resolution Section (Gate 8+) - Feature flagged */}
-              {isMetadataResolutionEnabled() && (
-                <MetadataResolutionCard
-                  resolution={metadataResolution}
-                  evidenceSummary={evidenceSummary}
-                  userSelectedBook={userSelectedBook}
-                  queuedForOffline={metadataQueuedForOffline}
-                  onSelectBook={handleSelectBook}
-                  onRetry={handleRetryMetadata}
-                  isRetrying={metadataRetrying}
-                />
-              )}
-            </ScrollView>
-          )}
+          <FlatList
+            data={bookCandidates ?? []}
+            keyExtractor={bookCandidateKeyExtractor}
+            renderItem={renderBookCandidate}
+            contentContainerStyle={styles.booksScrollContent}
+            ListHeaderComponent={bookListHeader}
+            ListFooterComponent={bookListFooter}
+            ListEmptyComponent={bookListEmpty}
+            showsVerticalScrollIndicator={false}
+          />
         </View>
       )}
 
@@ -1429,6 +1494,41 @@ export function ResultsScreen(): React.JSX.Element {
           )}
         </View>
       </Modal>
+
+      <BookCandidateDetailModal
+        visible={!!bookDetailCandidate}
+        candidate={bookDetailCandidate}
+        onClose={handleCloseBookDetail}
+        onEdit={
+          bookDetailCandidate
+            ? () => {
+              handleCloseBookDetail();
+              handleOpenCandidateEdit(bookDetailCandidate);
+            }
+            : undefined
+        }
+        canEdit={
+          bookDetailCandidate
+            ? getCandidateDisplay(bookDetailCandidate).editIndex !== null
+            : false
+        }
+        isEdited={
+          bookDetailCandidate
+            ? getCandidateDisplay(bookDetailCandidate).isEdited
+            : false
+        }
+      />
+
+      <EditCandidateFieldsModal
+        visible={editCandidateModalVisible}
+        title={editCandidateTitle}
+        author={editCandidateAuthor}
+        onChangeTitle={setEditCandidateTitle}
+        onChangeAuthor={setEditCandidateAuthor}
+        onSave={handleSaveCandidateEdits}
+        onCancel={handleCloseCandidateEdit}
+        canSave={editCandidateCropIndex !== null}
+      />
     </View>
   );
 }
@@ -1772,6 +1872,52 @@ const styles = StyleSheet.create({
     backgroundColor: '#1c1c1e',
     borderBottomWidth: 1,
     borderBottomColor: '#38383a',
+  },
+  primaryBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: '#1c1c1e',
+    borderBottomWidth: 1,
+    borderBottomColor: '#38383a',
+    paddingHorizontal: 12,
+  },
+  primaryLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  primaryTab: {
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+  },
+  primaryTabActive: {
+    borderBottomWidth: 2,
+    borderBottomColor: '#007AFF',
+  },
+  primaryTabText: {
+    color: '#8e8e93',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  primaryTabTextActive: {
+    color: '#007AFF',
+  },
+  diagnosticsToggle: {
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    backgroundColor: '#2c2c2e',
+  },
+  diagnosticsToggleActive: {
+    backgroundColor: '#007AFF',
+  },
+  diagnosticsToggleText: {
+    color: '#8e8e93',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  diagnosticsToggleTextActive: {
+    color: '#fff',
   },
   tab: {
     flex: 1,

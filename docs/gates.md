@@ -205,7 +205,7 @@ Gate 10: [ ] PASS / [ ] FAIL  (see project_plan.md)
 
 ---
 
-## Current Status (as of 2026-01-20)
+## Current Status (as of 2026-01-23)
 
 | Gate | Status | Notes |
 |------|--------|-------|
@@ -217,7 +217,7 @@ Gate 10: [ ] PASS / [ ] FAIL  (see project_plan.md)
 | 5 | PASS | End-to-end working on iOS |
 | 6 | PASS | OCR working on iOS (Vision) and Android (ML Kit) |
 | 7 | PASS | **Conservative grouping algorithm** - 19 tests passing |
-| 8 | NOT STARTED | Field extraction |
+| 8 | **PASS** | **Line labeling pipeline** - 50 tests passing |
 | 9 | IN PROGRESS | Metadata resolution services implemented (feature-flagged OFF) |
 | 10 | NOT STARTED | Corrections memory |
 
@@ -229,14 +229,39 @@ The grouping algorithm uses a **conservative-by-default** approach:
 - **19 unit tests** covering all merge paths and edge cases
 - **Debug artifact**: `grouping_assignments.json` written when enabled
 
+### Gate 8 Details
+
+Field extraction uses a **line labeling pipeline** for accurate title/author extraction:
+
+**Pipeline:** `Filter → Label → Assemble → Validate`
+
+**Key Services:**
+| Service | Purpose |
+|---------|---------|
+| `spineLineFilter.ts` | Hard filter for ISBN, publisher, price, URL, copyright |
+| `spineLineLabeler.ts` | Score lines for title vs author likelihood |
+| `spineTitleAuthorAssembler.ts` | Assemble title/author from labeled lines |
+| `spineSwapGuard.ts` | Detect and validate title/author swaps |
+| `mixedOrientationMerger.ts` | Merge multi-rotation OCR evidence |
+
+**Key Features:**
+- **Context-aware publisher filtering**: Filters "Thomas" when "Books" nearby
+- **Multi-line author joining**: "Laura" + "Bates" → "Laura Bates"
+- **Subtitle preservation**: "Title: Subtitle" stays together
+- **Combined line splitting**: "Author • Title" patterns correctly split
+- **Swap detection**: Validates and flags potential swaps
+- **Multi-rotation support**: Preserves evidence from multiple rotation trials
+
+**Tests:** 50 comprehensive tests in `gate8FieldExtraction.test.ts`
+**Total:** 474 tests passing
+
 ### Gate 9 Details
 
 Metadata resolution services are implemented but feature-flagged OFF:
 - `searchCandidateService.ts` - Generate search candidates from evidence
 - `matchVerificationService.ts` - Verify matches with evidence
 - `acceptanceDecisionService.ts` - Make acceptance decisions
-- `spineFieldExtractionService.ts` - Extract title/author/ISBN/publisher fields
-- **Total: 424 tests passing**
+- `spineFieldExtractionService.ts` - Orchestrates Gate 8 pipeline for field extraction
 
 ---
 

@@ -10,7 +10,8 @@ A React Native application for detecting book spines using YOLOv8 Oriented Bound
 - **Rectification**: Perspective transform to generate upright crop images (iOS)
 - **OCR**: Text recognition on book spine crops (iOS Vision, Android ML Kit)
 - **Conservative Grouping**: Smart clustering of detections into book candidates
-- **Metadata Resolution**: Field extraction and search candidate generation (feature-flagged)
+- **Field Extraction**: Line labeling pipeline for accurate title/author extraction (Gate 8)
+- **Metadata Resolution**: Search candidate generation and match verification (feature-flagged)
 - **Fixture System**: Bundled and device fixtures for testing
 - **Debug Artifacts**: Comprehensive logging and JSON debug outputs
 
@@ -145,11 +146,11 @@ See `docs/gates.md` for the full checklist. Summary:
 | 5 | End-to-End Works | ✅ PASS |
 | 6 | OCR + Post-Processing | ✅ PASS |
 | 7 | Book Candidate Grouping | ✅ PASS (conservative algorithm, 19 tests) |
-| 8 | Field Extraction | ⏳ Not Started |
+| 8 | Field Extraction | ✅ PASS (line labeling pipeline, 50 tests) |
 | 9 | Metadata Resolution | 🔄 In Progress (services implemented, feature-flagged OFF) |
 | 10 | Corrections Memory | ⏳ Not Started |
 
-**Test Coverage:** 424 tests passing
+**Test Coverage:** 474 tests passing
 
 **IMPORTANT**: Do NOT proceed past a failed gate.
 
