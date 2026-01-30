@@ -82,6 +82,48 @@ jest.mock('react-native-fast-tflite', () => ({
   }),
 }));
 
+// Mock ModelPathResolver native module (iOS only)
+jest.mock('react-native', () => {
+  const RN = jest.requireActual('react-native');
+  RN.NativeModules.ModelPathResolver = {
+    getBundledModelPath: jest.fn().mockResolvedValue('/mock/path/yolov8_obb.tflite'),
+    listBundleResources: jest.fn().mockResolvedValue([]),
+    checkFileExists: jest.fn().mockResolvedValue({ exists: true, size: 10000000, path: '/mock/path/yolov8_obb.tflite' }),
+  };
+  return RN;
+});
+
+// Mock @react-native-community/netinfo
+jest.mock('@react-native-community/netinfo', () => ({
+  addEventListener: jest.fn(() => jest.fn()),
+  fetch: jest.fn().mockResolvedValue({
+    isConnected: true,
+    isInternetReachable: true,
+    type: 'wifi',
+  }),
+}));
+
+// Mock @supabase/supabase-js
+jest.mock('@supabase/supabase-js', () => ({
+  createClient: jest.fn(() => ({
+    auth: {
+      getSession: jest.fn().mockResolvedValue({ data: { session: null } }),
+    },
+    from: jest.fn(() => ({
+      select: jest.fn().mockReturnThis(),
+      eq: jest.fn().mockReturnThis(),
+      gt: jest.fn().mockReturnThis(),
+      single: jest.fn().mockResolvedValue({ data: null, error: null }),
+      insert: jest.fn().mockResolvedValue({ error: null }),
+      update: jest.fn().mockResolvedValue({ error: null }),
+      upsert: jest.fn().mockResolvedValue({ error: null }),
+    })),
+    functions: {
+      invoke: jest.fn().mockResolvedValue({ data: null, error: null }),
+    },
+  })),
+}));
+
 // Silence console during tests (optional)
 // global.console = {
 //   ...console,

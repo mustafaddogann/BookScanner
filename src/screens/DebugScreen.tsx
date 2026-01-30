@@ -20,6 +20,8 @@ import { loadAllFixtures, getDevFixtureInstructions } from '../services/fixtureS
 import { runPipelineOnFixture } from '../services/pipelineService';
 import { listSessions, getSessionDir, readDebugManifest } from '../services/debugArtifacts';
 import { useAppStore } from '../store/useAppStore';
+import { testBooksCatalogWrite } from '../services/booksCatalogService';
+import { testUserCorrectionsWrite } from '../services/correctionsPersistenceService';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Debug'>;
 
@@ -40,6 +42,12 @@ export function DebugScreen(): React.JSX.Element {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [runningFixture, setRunningFixture] = useState<string | null>(null);
+
+  // Smoke test states
+  const [catalogTestRunning, setCatalogTestRunning] = useState(false);
+  const [catalogTestResult, setCatalogTestResult] = useState<string | null>(null);
+  const [correctionsTestRunning, setCorrectionsTestRunning] = useState(false);
+  const [correctionsTestResult, setCorrectionsTestResult] = useState<string | null>(null);
 
   const { isProcessing, processingStage } = useAppStore();
 
@@ -124,6 +132,56 @@ export function DebugScreen(): React.JSX.Element {
   const handleBack = useCallback(() => {
     navigation.goBack();
   }, [navigation]);
+
+  // Smoke test: books_catalog
+  const handleTestBooksCatalog = useCallback(async () => {
+    setCatalogTestRunning(true);
+    setCatalogTestResult(null);
+    console.log('[SmokeTest] books_catalog starting...');
+    try {
+      const result = await testBooksCatalogWrite();
+      console.log('[SmokeTest] books_catalog result=', {
+        success: result.success,
+        bookId: result.bookId,
+        error: result.error,
+      });
+      if (result.success) {
+        setCatalogTestResult(`SUCCESS: ID ${result.bookId?.slice(0, 8)}...`);
+      } else {
+        setCatalogTestResult(`FAILED: ${result.error}`);
+      }
+    } catch (e: any) {
+      console.log('[SmokeTest] books_catalog exception=', e.message);
+      setCatalogTestResult(`ERROR: ${e.message}`);
+    } finally {
+      setCatalogTestRunning(false);
+    }
+  }, []);
+
+  // Smoke test: user_corrections
+  const handleTestUserCorrections = useCallback(async () => {
+    setCorrectionsTestRunning(true);
+    setCorrectionsTestResult(null);
+    console.log('[SmokeTest] user_corrections starting...');
+    try {
+      const result = await testUserCorrectionsWrite();
+      console.log('[SmokeTest] user_corrections result=', {
+        success: result.success,
+        correctionId: result.correctionId,
+        error: result.error,
+      });
+      if (result.success) {
+        setCorrectionsTestResult(`SUCCESS: ID ${result.correctionId?.slice(0, 8)}...`);
+      } else {
+        setCorrectionsTestResult(`FAILED: ${result.error}`);
+      }
+    } catch (e: any) {
+      console.log('[SmokeTest] user_corrections exception=', e.message);
+      setCorrectionsTestResult(`ERROR: ${e.message}`);
+    } finally {
+      setCorrectionsTestRunning(false);
+    }
+  }, []);
 
   if (loading) {
     return (
@@ -253,6 +311,66 @@ export function DebugScreen(): React.JSX.Element {
               </TouchableOpacity>
             ))
           )}
+        </View>
+
+        {/* Supabase Smoke Tests */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Supabase Tests</Text>
+          <Text style={styles.sectionSubtitle}>
+            Test DB write connectivity
+          </Text>
+
+          <View style={styles.testButtonRow}>
+            <TouchableOpacity
+              style={[styles.testButton, catalogTestRunning && styles.testButtonRunning]}
+              onPress={handleTestBooksCatalog}
+              disabled={catalogTestRunning}
+            >
+              {catalogTestRunning ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.testButtonText}>Test books_catalog</Text>
+              )}
+            </TouchableOpacity>
+            {catalogTestResult && (
+              <Text
+                style={[
+                  styles.testResult,
+                  catalogTestResult.startsWith('SUCCESS') && styles.testResultSuccess,
+                  catalogTestResult.startsWith('FAILED') && styles.testResultFailed,
+                  catalogTestResult.startsWith('ERROR') && styles.testResultFailed,
+                ]}
+              >
+                {catalogTestResult}
+              </Text>
+            )}
+          </View>
+
+          <View style={styles.testButtonRow}>
+            <TouchableOpacity
+              style={[styles.testButton, correctionsTestRunning && styles.testButtonRunning]}
+              onPress={handleTestUserCorrections}
+              disabled={correctionsTestRunning}
+            >
+              {correctionsTestRunning ? (
+                <ActivityIndicator size="small" color="#fff" />
+              ) : (
+                <Text style={styles.testButtonText}>Test user_corrections</Text>
+              )}
+            </TouchableOpacity>
+            {correctionsTestResult && (
+              <Text
+                style={[
+                  styles.testResult,
+                  correctionsTestResult.startsWith('SUCCESS') && styles.testResultSuccess,
+                  correctionsTestResult.startsWith('FAILED') && styles.testResultFailed,
+                  correctionsTestResult.startsWith('ERROR') && styles.testResultFailed,
+                ]}
+              >
+                {correctionsTestResult}
+              </Text>
+            )}
+          </View>
         </View>
 
         {/* Recent Sessions */}
@@ -457,5 +575,38 @@ const styles = StyleSheet.create({
   sessionSource: {
     color: '#8e8e93',
     fontSize: 12,
+  },
+  testButtonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  testButton: {
+    backgroundColor: '#2c2c2e',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    minWidth: 180,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  testButtonRunning: {
+    backgroundColor: '#3a3a3c',
+  },
+  testButtonText: {
+    color: '#007AFF',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  testResult: {
+    marginLeft: 12,
+    fontSize: 13,
+    flex: 1,
+  },
+  testResultSuccess: {
+    color: '#32D74B',
+  },
+  testResultFailed: {
+    color: '#FF453A',
   },
 });

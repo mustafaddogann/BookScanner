@@ -1,11 +1,15 @@
-import React, { useState } from 'react';
+import React from 'react';
 import { StyleSheet, View, Text, TouchableOpacity } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
+import { useDebugStore } from '../store/useDebugStore';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
+
+// Diagnostics toggle is only functional in debug builds
+const DIAGNOSTICS_ALLOWED = __DEV__;
 
 interface SettingsScreenProps {
   onBack?: () => void;
@@ -13,7 +17,10 @@ interface SettingsScreenProps {
 
 export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
-  const [diagnosticsEnabled, setDiagnosticsEnabled] = useState(false);
+
+  // Use persistent store for diagnostics setting
+  const diagnosticsEnabled = useDebugStore((state) => state.diagnosticsEnabled);
+  const setDiagnosticsEnabled = useDebugStore((state) => state.setDiagnosticsEnabled);
 
   const handleBack = () => {
     if (onBack) {
@@ -42,13 +49,20 @@ export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Eleme
               style={[
                 styles.toggle,
                 diagnosticsEnabled && styles.toggleActive,
+                !DIAGNOSTICS_ALLOWED && styles.toggleDisabled,
               ]}
-              onPress={() => setDiagnosticsEnabled((prev) => !prev)}
+              onPress={() => {
+                if (DIAGNOSTICS_ALLOWED) {
+                  setDiagnosticsEnabled(!diagnosticsEnabled);
+                }
+              }}
+              disabled={!DIAGNOSTICS_ALLOWED}
             >
               <Text
                 style={[
                   styles.toggleText,
                   diagnosticsEnabled && styles.toggleTextActive,
+                  !DIAGNOSTICS_ALLOWED && styles.toggleTextDisabled,
                 ]}
               >
                 {diagnosticsEnabled ? 'On' : 'Off'}
@@ -56,11 +70,39 @@ export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Eleme
             </TouchableOpacity>
           </View>
           <Text style={styles.settingNote}>
-            {DEBUG_ARTIFACTS_ENABLED
-              ? 'Debug artifacts are available in this build.'
-              : 'Diagnostics require a debug-enabled build. This toggle only updates UI.'}
+            {DIAGNOSTICS_ALLOWED
+              ? (DEBUG_ARTIFACTS_ENABLED
+                  ? 'Debug artifacts are available in this build.'
+                  : 'Diagnostics enabled. Debug artifacts will be generated.')
+              : 'Diagnostics require a debug-enabled build. Toggle is disabled.'}
           </Text>
+
         </View>
+
+        {/* Developer section - only visible in debug builds */}
+        {__DEV__ && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Developer</Text>
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Open Diagnostics</Text>
+              <TouchableOpacity
+                style={styles.devButton}
+                onPress={() => navigation.navigate('Diagnostics', undefined)}
+              >
+                <Text style={styles.devButtonText}>Open</Text>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.settingRow}>
+              <Text style={styles.settingLabel}>Open Debug</Text>
+              <TouchableOpacity
+                style={styles.devButton}
+                onPress={() => navigation.navigate('Debug')}
+              >
+                <Text style={styles.devButtonText}>Open</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
 
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>About</Text>
@@ -155,6 +197,10 @@ const styles = StyleSheet.create({
   toggleActive: {
     backgroundColor: '#007AFF',
   },
+  toggleDisabled: {
+    backgroundColor: '#1c1c1e',
+    opacity: 0.5,
+  },
   toggleText: {
     color: '#8e8e93',
     fontSize: 12,
@@ -163,9 +209,23 @@ const styles = StyleSheet.create({
   toggleTextActive: {
     color: '#fff',
   },
+  toggleTextDisabled: {
+    color: '#636366',
+  },
   helpText: {
     color: '#8e8e93',
     fontSize: 13,
     lineHeight: 18,
+  },
+  devButton: {
+    backgroundColor: '#FF9F0A',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+  },
+  devButtonText: {
+    color: '#000',
+    fontSize: 12,
+    fontWeight: '600',
   },
 });

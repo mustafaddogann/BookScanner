@@ -18,7 +18,9 @@ interface EditCandidateFieldsModalProps {
   onChangeAuthor: (value: string) => void;
   onSave: () => void;
   onCancel: () => void;
+  onRevert?: () => void;
   canSave?: boolean;
+  canRevert?: boolean;
 }
 
 export function EditCandidateFieldsModal({
@@ -29,7 +31,9 @@ export function EditCandidateFieldsModal({
   onChangeAuthor,
   onSave,
   onCancel,
+  onRevert,
   canSave = true,
+  canRevert = false,
 }: EditCandidateFieldsModalProps) {
   return (
     <Modal
@@ -83,6 +87,12 @@ export function EditCandidateFieldsModal({
           >
             <Text style={styles.modalSaveButtonText}>Save</Text>
           </TouchableOpacity>
+
+          {canRevert && onRevert && (
+            <TouchableOpacity style={styles.revertButton} onPress={onRevert}>
+              <Text style={styles.revertButtonText}>Revert to Auto-Detected</Text>
+            </TouchableOpacity>
+          )}
         </View>
       </KeyboardAvoidingView>
     </Modal>
@@ -147,6 +157,20 @@ const styles = StyleSheet.create({
   },
   modalSaveButtonText: {
     color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  revertButton: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: '#FF3B30',
+    borderRadius: 8,
+    padding: 14,
+    alignItems: 'center',
+    marginTop: 12,
+  },
+  revertButtonText: {
+    color: '#FF3B30',
     fontSize: 16,
     fontWeight: '600',
   },

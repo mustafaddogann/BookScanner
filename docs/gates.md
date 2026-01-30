@@ -164,13 +164,15 @@ npx tsc --noEmit
 
 ## Gates 7-10: Structured Metadata Extraction
 
+**RESOLVER-CENTRIC ARCHITECTURE**: Canonical truth comes from the resolver (Gate 9), not local extraction. Gate 8 generates hypotheses for the resolver to verify.
+
 Gates 7-10 cover advanced metadata extraction and are documented separately:
 
 | Gate | Description | Documentation |
 |------|-------------|---------------|
 | 7 | Book Candidate Grouping + Evidence Merge | [project_plan.md#gate-7](./project_plan.md#gate-7-book-candidate-grouping--evidence-merge) |
-| 8 | Field Extraction with Ranked Candidates | [project_plan.md#gate-8](./project_plan.md#gate-8-field-extraction-with-ranked-candidates) |
-| 9 | Resolver (External Lookup) | [project_plan.md#gate-9](./project_plan.md#gate-9-resolver-external-lookup) |
+| 8 | **Hypothesis Generation** (NOT canonical) | [project_plan.md#gate-8](./project_plan.md#gate-8-hypothesis-generation) |
+| 9 | **Resolver + Scoring + Verification** (Supabase Edge Function) | [project_plan.md#gate-9](./project_plan.md#gate-9-resolver--scoring--verification--acceptance) |
 | 10 | Corrections Memory | [project_plan.md#gate-10](./project_plan.md#gate-10-corrections-memory) |
 
 See [project_plan.md](./project_plan.md) for full details including:
@@ -205,7 +207,7 @@ Gate 10: [ ] PASS / [ ] FAIL  (see project_plan.md)
 
 ---
 
-## Current Status (as of 2026-01-23)
+## Current Status (as of 2026-01-26)
 
 | Gate | Status | Notes |
 |------|--------|-------|
@@ -217,9 +219,9 @@ Gate 10: [ ] PASS / [ ] FAIL  (see project_plan.md)
 | 5 | PASS | End-to-end working on iOS |
 | 6 | PASS | OCR working on iOS (Vision) and Android (ML Kit) |
 | 7 | PASS | **Conservative grouping algorithm** - 19 tests passing |
-| 8 | **PASS** | **Line labeling pipeline** - 50 tests passing |
-| 9 | IN PROGRESS | Metadata resolution services implemented (feature-flagged OFF) |
-| 10 | NOT STARTED | Corrections memory |
+| 8 | **PASS** | **Hypothesis Generation** (NOT canonical) - 92 tests (50 line labeling + 32 hypothesis + 10 display invariance) |
+| 9 | **PASS** | **Resolver (Supabase Edge Function)** - concurrency cap, retry policy, 10 unit tests, feature-flagged ON |
+| 10 | **PASS** | **Corrections Memory** - 34 unit tests, UI badges, revert button, diagnostic logging |
 
 ### Gate 7 Details
 
@@ -229,39 +231,218 @@ The grouping algorithm uses a **conservative-by-default** approach:
 - **19 unit tests** covering all merge paths and edge cases
 - **Debug artifact**: `grouping_assignments.json` written when enabled
 
-### Gate 8 Details
+### Gate 8 Details (Hypothesis Generation)
 
-Field extraction uses a **line labeling pipeline** for accurate title/author extraction:
+**IMPORTANT: Gate 8 output is NOT canonical.** It generates hypotheses for the resolver (Gate 9) to verify.
 
-**Pipeline:** `Filter → Label → Assemble → Validate`
+**UI DISPLAY ISOLATION:** Gate 8 hypothesis is resolver-input only; UI display uses legacy extraction (`evidence.perFieldHints` or OCR results) unless resolver output is accepted. Hypothesis fields are isolated under `candidate.hypothesis` sub-object and are NEVER used for display. Regression tests in `displayInvariance.test.ts` enforce this invariant.
+
+Gate 8 has two parts:
+1. **Line Labeling Pipeline** - for uiGuess generation
+2. **Hypothesis Generation** - evidenceTier, searchCandidates, isbnCandidates, uiGuess
+
+**Hypothesis Generation outputs:**
+- `evidenceTier`: 'strong' | 'usable' | 'weak' | 'unusable'
+- `searchCandidates`: queries for resolver lookup
+- `isbnCandidates`: validated ISBNs for direct lookup
+- `uiGuess`: title/author/confidence for immediate display (NOT canonical)
 
 **Key Services:**
 | Service | Purpose |
 |---------|---------|
+| `hypothesisGenerationService.ts` | Orchestrate Gate 8 hypothesis generation |
+| `evidenceQualityService.ts` | Classify evidence tier |
 | `spineLineFilter.ts` | Hard filter for ISBN, publisher, price, URL, copyright |
 | `spineLineLabeler.ts` | Score lines for title vs author likelihood |
 | `spineTitleAuthorAssembler.ts` | Assemble title/author from labeled lines |
 | `spineSwapGuard.ts` | Detect and validate title/author swaps |
-| `mixedOrientationMerger.ts` | Merge multi-rotation OCR evidence |
 
-**Key Features:**
-- **Context-aware publisher filtering**: Filters "Thomas" when "Books" nearby
-- **Multi-line author joining**: "Laura" + "Bates" → "Laura Bates"
-- **Subtitle preservation**: "Title: Subtitle" stays together
-- **Combined line splitting**: "Author • Title" patterns correctly split
-- **Swap detection**: Validates and flags potential swaps
-- **Multi-rotation support**: Preserves evidence from multiple rotation trials
+**Evidence Tier Rules:**
+| Tier | Multiplier | Criteria |
+|------|------------|----------|
+| strong | 1.0 | avgConf ≥ 0.85, ≥3 lines, alnum ≥ 0.80 |
+| usable | 0.85 | avgConf ≥ 0.70, ≥2 lines, alnum ≥ 0.65 |
+| weak | 0.6 | avgConf ≥ 0.50, ≥1 line |
+| unusable | 0 | Skip resolver call |
 
-**Tests:** 50 comprehensive tests in `gate8FieldExtraction.test.ts`
-**Total:** 474 tests passing
+**Tests:**
+- 50 line labeling tests in `gate8FieldExtraction.test.ts`
+- 32 hypothesis generation tests in `hypothesisGenerationService.test.ts`
+- 10 display invariance regression tests in `displayInvariance.test.ts`
+**Total (Gate 8):** 92 tests
 
-### Gate 9 Details
+**Total Project Tests:** 587 tests passing
 
-Metadata resolution services are implemented but feature-flagged OFF:
-- `searchCandidateService.ts` - Generate search candidates from evidence
-- `matchVerificationService.ts` - Verify matches with evidence
-- `acceptanceDecisionService.ts` - Make acceptance decisions
-- `spineFieldExtractionService.ts` - Orchestrates Gate 8 pipeline for field extraction
+### Gate 9 Details (Resolver - Supabase Implementation)
+
+**RESOLVER-CENTRIC**: Gate 9 provides CANONICAL truth via Supabase Edge Function.
+
+The resolver:
+1. Receives hypothesis from Gate 8 (searchCandidates, isbnCandidates, evidenceTier)
+2. Checks resolver_cache (7-day TTL) to avoid duplicate API calls
+3. Performs lookup against Open Library API (ISBN endpoint + search endpoint)
+4. Scores matches using weighted signals and tier multipliers
+5. Verifies matches and applies penalties for mismatches
+6. Makes acceptance decisions: auto-accept/suggest/ambiguous/no-match
+7. Returns canonical `ResolvedBook` to the app
+
+**Implementation Files:**
+
+| File | Purpose |
+|------|---------|
+| `supabase/migrations/20260123000001_resolver_tables.sql` | DB schema (resolver_cache, user_corrections, resolver_events) |
+| `supabase/functions/resolve_candidates/index.ts` | Edge Function with rate limiting (30 req/min/IP) |
+| `supabase/functions/_shared/types.ts` | Types, scoring weights, acceptance thresholds |
+| `supabase/functions/_shared/utils.ts` | Scoring, verification, Open Library mapping |
+| `src/config/supabase.ts` | Supabase client config with MMKV auth storage |
+| `src/services/supabaseResolverClient.ts` | Client service (buildResolveRequest, resolveCandidate, applyResolverResult) |
+| `src/services/offlineResolverQueue.ts` | MMKV offline queue with NetInfo auto-processing |
+| `src/utils/evidenceHash.ts` | Evidence hash for cache keys |
+| `scripts/evaluate_fixtures.ts` | Evaluation script for fixture testing |
+
+**Scoring Weights:**
+| Signal | Weight |
+|--------|--------|
+| titleSimilarity | 0.35 |
+| authorPresence | 0.25 |
+| isbnMatch | 0.25 |
+| tokenCoverage | 0.10 |
+| positionBonus | 0.05 |
+
+**Acceptance Thresholds (by tier):**
+| Tier | Threshold |
+|------|-----------|
+| strong | 0.72 |
+| usable | 0.78 |
+| weak | 0.88 |
+| unusable | Skip resolver |
+
+**Verification Flags:**
+- `author-mismatch` (severity: warning, penalty: 0.10)
+- `isbn-mismatch` (severity: critical, penalty: 0.30)
+- `token-coverage-low` (severity: info, penalty: 0.05)
+
+**Tests:** 20 unit tests in `supabaseResolverClient.test.ts`
+
+**Feature Flag:** `METADATA_RESOLUTION_ENABLED` (default: OFF)
+
+**To Enable:** Configure `src/config/supabase.ts` with your Supabase project URL and anon key, then set `METADATA_RESOLUTION_ENABLED = true` in `src/config/debug.ts`.
+
+### Persistent Book Identity (books_catalog)
+
+**Gate 9 Extension** - Canonical storage for resolved books with stable UUIDs.
+
+When a book is auto-accepted or user-confirmed, it is upserted to `books_catalog` in Supabase. This provides:
+- **Stable bookId**: Each unique book (by provider+provider_id) gets a persistent UUID
+- **ISBN deduplication**: isbn13/isbn10 are unique-constrained
+- **Corrections linking**: user_corrections.book_id references books_catalog.id
+
+**When upsert happens:**
+| Decision | Upsert? |
+|----------|---------|
+| auto-accept | ✓ Immediately (fire-and-forget) |
+| suggest | ✗ Not until user confirms |
+| ambiguous | ✗ Not until user confirms |
+| no-match | ✗ Never |
+
+**Implementation Files:**
+
+| File | Purpose |
+|------|---------|
+| `supabase/migrations/20260127000001_books_catalog.sql` | DB schema + upsert_book RPC |
+| `src/services/booksCatalogService.ts` | upsertResolvedBook, confirmUserSelection, applyUserSelectionToCandidate |
+| `src/types/index.ts` | ResolvedBook.bookId field |
+| `src/services/metadataResolutionOrchestrator.ts` | Auto-upsert on auto-accept |
+
+**Key Functions:**
+- `upsertResolvedBook(resolved)` - Upsert to books_catalog, returns { bookId }
+- `confirmUserSelection(book, candidateId?)` - User confirms a suggestion
+- `applyUserSelectionToCandidate(candidate, book)` - Apply + upsert in one call
+
+**Database Schema (books_catalog):**
+```sql
+id UUID PRIMARY KEY (stable bookId)
+provider TEXT ('openLibrary' | 'googleBooks')
+provider_id TEXT (OLID, volumeId)
+isbn13 TEXT UNIQUE
+isbn10 TEXT UNIQUE
+title TEXT
+authors TEXT[]
+publisher TEXT
+publish_year TEXT
+cover_url TEXT
+created_at TIMESTAMPTZ
+updated_at TIMESTAMPTZ
+UNIQUE (provider, provider_id)
+```
+
+**Tests:** 14 unit tests in `booksCatalogService.test.ts`
+
+### Gate 10 Details (Corrections Memory)
+
+**STATUS: PASS** - Full implementation complete.
+
+Gate 10 remembers user corrections and auto-applies them on future scans of the same book.
+
+**Implementation Files:**
+
+| File | Purpose |
+|------|---------|
+| `src/types/index.ts` | `Correction`, `CorrectionKey`, `CorrectionApplyResult` types |
+| `src/store/useCorrectionsStore.ts` | MMKV-backed Zustand store for corrections |
+| `src/services/correctionsMemory.ts` | Core service (hash, find, apply, save, delete) |
+| `src/utils/evidenceHash.ts` | Order-independent content hash (FNV-1a) |
+| `src/components/BookCandidateCard.tsx` | "Auto" and "Edited" badge display |
+| `src/components/EditCandidateFieldsModal.tsx` | Edit modal with "Revert to Auto-Detected" button |
+| `src/screens/ResultsScreen.tsx` | UI integration, save/revert handlers |
+| `src/config/debug.ts` | `isDiagnosticLoggingEnabled()` for corrections logging |
+
+**Key Functions:**
+- `generateContentHash(evidence)` - Creates stable, order-independent hash from OCR evidence
+- `getCorrectionKey(candidate)` - Returns `isbn:X` or `hash:Y` key
+- `findCorrection(candidate)` - Looks up stored correction
+- `applyCorrection(candidate)` - Applies correction to candidate
+- `saveCorrection(candidate, title, author)` - Saves user correction
+- `deleteCorrection(candidate)` - Reverts to auto-detected values
+
+**Order-Independence Guarantee:**
+Same OCR lines in different orders produce identical hashes because:
+1. Lines are sorted alphabetically before hashing
+2. Per-field hints are also sorted
+3. Uses shared `computeEvidenceHash` utility
+
+**Matching Priority:**
+1. ISBN (most reliable)
+2. Content hash (fallback)
+
+**Storage:**
+- MMKV-backed with 500 correction limit
+- LRU eviction when limit exceeded
+- Corrections persist across app sessions
+
+**UI Features:**
+- "Auto" badge on candidates with auto-applied corrections
+- "Edited" badge on manually edited candidates
+- "Revert to Auto-Detected" button in edit modal
+
+**Diagnostic Logging:**
+When `DEBUG_ARTIFACTS_ENABLED = true` or `METADATA_VERBOSE_DEBUG = true`:
+- Logs correction key, matched status, title/author for each apply attempt
+
+**Tests:** 34 unit tests in `correctionsMemory.test.ts`
+- Order-independence test verifies same lines in different order produce identical hash
+- Persistence tests via mock MMKV
+- Apply/save/revert flow tests
+
+**Completed:**
+- [x] Core services (save, find, apply, delete)
+- [x] MMKV persistence with LRU eviction
+- [x] Order-independent content hash
+- [x] UI indicator for "Edited" corrections
+- [x] UI indicator for "Auto-applied" corrections
+- [x] "Revert to auto" button in edit modal
+- [x] Diagnostic logging
+- [x] Integration with pipeline (Stage 10)
 
 ---
 

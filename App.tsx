@@ -19,7 +19,7 @@ import { NavigationContainer } from '@react-navigation/native';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
 import { GestureHandlerRootView } from 'react-native-gesture-handler';
 
-import { ScannerScreen, ResultsScreen, DebugScreen, SettingsScreen, TabsScreen } from './src/screens';
+import { ScannerScreen, ResultsScreen, DebugScreen, SettingsScreen, TabsScreen, DiagnosticsScreen } from './src/screens';
 import { useAppStore } from './src/store/useAppStore';
 import { warmupModel } from './src/services/inferenceService';
 import type { RootStackParamList } from './src/types';
@@ -101,6 +101,7 @@ function App(): React.JSX.Element {
             <Stack.Screen name="Results" component={ResultsScreen} />
             <Stack.Screen name="Debug" component={DebugScreen} />
             <Stack.Screen name="Settings" component={SettingsScreen} />
+            <Stack.Screen name="Diagnostics" component={DiagnosticsScreen} />
           </Stack.Navigator>
         </NavigationContainer>
       </SafeAreaProvider>

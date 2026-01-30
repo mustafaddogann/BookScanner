@@ -1,6 +1,7 @@
 import React, { memo, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import type { BookCandidate } from '../types';
+import { BookCandidateDiagnosticsRow } from './BookCandidateDiagnosticsRow';
 
 interface BookCandidateCardProps {
   candidate: BookCandidate;
@@ -97,6 +98,10 @@ function BookCandidateCardBase({
       <Text style={styles.evidence} numberOfLines={3}>
         {mergedText.length > 0 ? mergedText : 'No evidence text'}
       </Text>
+      <BookCandidateDiagnosticsRow
+        candidate={candidate}
+        testID="book-candidate-diagnostics-row"
+      />
     </View>
   );
 

@@ -24,6 +24,12 @@ interface BookCandidateDetailModalProps {
   isEdited?: boolean;
   onRevert?: () => void;
   canRevert?: boolean;
+  /** Called when user accepts a suggested book match */
+  onAccept?: () => void;
+  /** Called when user selects a specific candidate from suggestions */
+  onSelectCandidate?: (candidateIndex: number) => void;
+  /** Whether accept is currently running */
+  isAccepting?: boolean;
 }
 
 type EvidenceSnapshot = {
@@ -83,6 +89,9 @@ export function BookCandidateDetailModal({
   isEdited,
   onRevert,
   canRevert,
+  onAccept,
+  onSelectCandidate,
+  isAccepting,
 }: BookCandidateDetailModalProps) {
   const sessionMeta = useAppStore((state) => state.sessionMeta);
   const rectificationResults = sessionMeta?.rectificationResults ?? [];
@@ -126,7 +135,7 @@ export function BookCandidateDetailModal({
   }, [evidence?.lines, evidence?.mergedLines]);
 
   const resolveCropUri = useCallback((cropIndex: number): string | null => {
-    const info = rectificationResults[cropIndex] as Record<string, unknown> | undefined;
+    const info = rectificationResults[cropIndex] as unknown as Record<string, unknown> | undefined;
     if (!info) return null;
     const candidates = [
       info.cropUri,
@@ -335,6 +344,132 @@ export function BookCandidateDetailModal({
                     {renderCandidateList('Edition candidates', extractedFields.editionCandidates)}
                   </View>
                 )}
+              </View>
+            )}
+
+            {/* Resolved Book Section - Show match and Accept button */}
+            {candidate.resolvedBook && (
+              <View style={styles.resolvedSection}>
+                <Text style={styles.sectionTitle}>Matched Book</Text>
+                <View style={styles.resolvedCard}>
+                  <Text style={styles.resolvedTitle} numberOfLines={2}>
+                    {candidate.resolvedBook.title}
+                  </Text>
+                  {candidate.resolvedBook.authors && candidate.resolvedBook.authors.length > 0 && (
+                    <Text style={styles.resolvedAuthors} numberOfLines={1}>
+                      {candidate.resolvedBook.authors.join(', ')}
+                    </Text>
+                  )}
+                  <View style={styles.resolvedMeta}>
+                    {candidate.resolvedBook.isbn13 && (
+                      <Text style={styles.resolvedIsbn}>ISBN: {candidate.resolvedBook.isbn13}</Text>
+                    )}
+                    {candidate.resolvedBook.source && (
+                      <Text style={styles.resolvedSource}>Source: {candidate.resolvedBook.source}</Text>
+                    )}
+                  </View>
+                  <View style={styles.resolvedStatus}>
+                    <Text style={[
+                      styles.resolvedStatusText,
+                      candidate.resolverDecision === 'accept' && styles.statusAccepted,
+                      candidate.resolverDecision === 'suggested' && styles.statusReview,
+                      candidate.resolverDecision === 'reject' && styles.statusRejected,
+                    ]}>
+                      Status: {candidate.resolverDecision || 'pending'}
+                    </Text>
+                  </View>
+                </View>
+                {/* Accept button - show when not already accepted */}
+                {onAccept && candidate.resolverDecision !== 'accept' && (
+                  <TouchableOpacity
+                    style={[styles.acceptButton, isAccepting && styles.acceptButtonDisabled]}
+                    onPress={onAccept}
+                    disabled={isAccepting}
+                  >
+                    <Text style={styles.acceptButtonText}>
+                      {isAccepting ? 'Accepting...' : 'Accept Match'}
+                    </Text>
+                  </TouchableOpacity>
+                )}
+                {candidate.resolverDecision === 'accept' && (
+                  <View style={styles.acceptedBadge}>
+                    <Text style={styles.acceptedBadgeText}>✓ Accepted & Cataloged</Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Manual Review Candidates Section - Show alternative matches */}
+            {candidate.resolverDecision === 'suggested' &&
+              candidate.resolverSuggestions &&
+              candidate.resolverSuggestions.length > 0 && (
+              <View style={styles.suggestionsSection}>
+                <Text style={styles.sectionTitle}>Alternative Matches</Text>
+                <Text style={styles.suggestionsHint}>
+                  Select a match below or accept the top match above
+                </Text>
+                {candidate.resolverSuggestions.slice(0, 3).map((suggestion, idx) => (
+                  <TouchableOpacity
+                    key={`suggestion-${idx}`}
+                    style={styles.suggestionCard}
+                    onPress={() => onSelectCandidate?.(idx)}
+                    disabled={isAccepting}
+                  >
+                    <View style={styles.suggestionContent}>
+                      <Text style={styles.suggestionTitle} numberOfLines={2}>
+                        {suggestion.title}
+                      </Text>
+                      {suggestion.authors && suggestion.authors.length > 0 && (
+                        <Text style={styles.suggestionAuthors} numberOfLines={1}>
+                          {suggestion.authors.join(', ')}
+                        </Text>
+                      )}
+                      <View style={styles.suggestionMeta}>
+                        {suggestion.isbn13 && (
+                          <Text style={styles.suggestionIsbn}>ISBN: {suggestion.isbn13}</Text>
+                        )}
+                        {suggestion.publishYear && (
+                          <Text style={styles.suggestionYear}>{suggestion.publishYear}</Text>
+                        )}
+                      </View>
+                    </View>
+                    <View style={styles.suggestionAction}>
+                      <Text style={styles.suggestionActionText}>Select</Text>
+                    </View>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            )}
+
+            {/* Evidence Search Debug - Show hypotheses and scores */}
+            {DEBUG_ARTIFACTS_ENABLED && candidate.evidenceSearchDebug && (
+              <View style={styles.debugSection}>
+                <Text style={styles.sectionTitle}>Evidence Search Debug</Text>
+                <View style={styles.debugCard}>
+                  <Text style={styles.debugLabel}>Hypotheses: {candidate.evidenceSearchDebug.hypothesesCount}</Text>
+                  <Text style={styles.debugLabel}>Candidates Found: {candidate.evidenceSearchDebug.candidatesFound}</Text>
+                  <Text style={styles.debugLabel}>Search Time: {candidate.evidenceSearchDebug.searchTimeMs}ms</Text>
+                  {candidate.evidenceSearchDebug.topScores && candidate.evidenceSearchDebug.topScores.length > 0 && (
+                    <View style={styles.topScoresSection}>
+                      <Text style={styles.debugLabel}>Top Scores:</Text>
+                      {candidate.evidenceSearchDebug.topScores.slice(0, 3).map((s, i) => (
+                        <Text key={i} style={styles.debugScore}>
+                          {Math.round(s.score * 100)}% - {s.title}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+                  {candidate.evidenceSearchDebug.queriesTried && (
+                    <View style={styles.queriesSection}>
+                      <Text style={styles.debugLabel}>Queries Tried:</Text>
+                      {candidate.evidenceSearchDebug.queriesTried.slice(0, 5).map((q, i) => (
+                        <Text key={i} style={styles.debugQuery} numberOfLines={1}>
+                          {i + 1}. {q}
+                        </Text>
+                      ))}
+                    </View>
+                  )}
+                </View>
               </View>
             )}
 
@@ -579,6 +714,82 @@ const styles = StyleSheet.create({
     fontSize: 12,
     marginBottom: 2,
   },
+  resolvedSection: {
+    marginTop: 16,
+  },
+  resolvedCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 10,
+    padding: 12,
+  },
+  resolvedTitle: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+  resolvedAuthors: {
+    color: '#8e8e93',
+    fontSize: 13,
+    marginTop: 4,
+  },
+  resolvedMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginTop: 8,
+  },
+  resolvedIsbn: {
+    color: '#636366',
+    fontSize: 11,
+    marginRight: 12,
+  },
+  resolvedSource: {
+    color: '#636366',
+    fontSize: 11,
+  },
+  resolvedStatus: {
+    marginTop: 8,
+  },
+  resolvedStatusText: {
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  statusAccepted: {
+    color: '#30D158',
+  },
+  statusReview: {
+    color: '#FF9F0A',
+  },
+  statusRejected: {
+    color: '#FF453A',
+  },
+  acceptButton: {
+    backgroundColor: '#30D158',
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 8,
+    marginTop: 12,
+    alignItems: 'center',
+  },
+  acceptButtonDisabled: {
+    backgroundColor: '#2c2c2e',
+  },
+  acceptButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  acceptedBadge: {
+    backgroundColor: 'rgba(48, 209, 88, 0.2)',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 8,
+    marginTop: 12,
+  },
+  acceptedBadgeText: {
+    color: '#30D158',
+    fontSize: 13,
+    fontWeight: '500',
+  },
   revertSection: {
     marginTop: 12,
   },
@@ -668,5 +879,89 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 14,
     fontWeight: '600',
+  },
+  // Manual Review Suggestions
+  suggestionsSection: {
+    marginTop: 16,
+  },
+  suggestionsHint: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginBottom: 8,
+  },
+  suggestionCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  suggestionContent: {
+    flex: 1,
+  },
+  suggestionTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  suggestionAuthors: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  suggestionMeta: {
+    flexDirection: 'row',
+    marginTop: 4,
+  },
+  suggestionIsbn: {
+    color: '#636366',
+    fontSize: 10,
+    marginRight: 8,
+  },
+  suggestionYear: {
+    color: '#636366',
+    fontSize: 10,
+  },
+  suggestionAction: {
+    backgroundColor: '#007AFF',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 6,
+    marginLeft: 8,
+  },
+  suggestionActionText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  // Evidence Search Debug
+  debugCard: {
+    backgroundColor: '#1c1c1e',
+    borderRadius: 10,
+    padding: 12,
+  },
+  debugLabel: {
+    color: '#8e8e93',
+    fontSize: 11,
+    marginBottom: 4,
+  },
+  topScoresSection: {
+    marginTop: 8,
+  },
+  debugScore: {
+    color: '#30D158',
+    fontSize: 11,
+    marginLeft: 8,
+    marginBottom: 2,
+  },
+  queriesSection: {
+    marginTop: 8,
+  },
+  debugQuery: {
+    color: '#FF9F0A',
+    fontSize: 10,
+    marginLeft: 8,
+    marginBottom: 2,
   },
 });

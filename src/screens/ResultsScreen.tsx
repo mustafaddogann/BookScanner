@@ -35,8 +35,11 @@ import { ensureFileUri, getFilename } from '../utils/fileUri';
 import { isMetadataResolutionEnabled } from '../config/debug';
 import { retryMetadataResolution } from '../services/metadataResolutionOrchestrator';
 import { BookCandidateCard } from '../components/BookCandidateCard';
+import { useDebugStore } from '../store/useDebugStore';
 import { BookCandidateDetailModal } from '../components/BookCandidateDetailModal';
 import { EditCandidateFieldsModal } from '../components/EditCandidateFieldsModal';
+import { saveCorrection, deleteCorrection, hasAppliedCorrection, hasStoredCorrection } from '../services/correctionsMemory';
+import { confirmUserSelection } from '../services/booksCatalogService';
 import RNFS from 'react-native-fs';
 
 // Tab options for switching between overlay, crops, and books views
@@ -61,6 +64,10 @@ export function ResultsScreen(): React.JSX.Element {
     currentSession,
     sessionMeta,
   } = useAppStore();
+
+  // Diagnostics enabled from user settings
+  const diagnosticsEnabled = useDebugStore((state) => state.diagnosticsEnabled);
+  const showDiagnosticsUI = __DEV__ && diagnosticsEnabled;
 
   const [imageUri, setImageUri] = useState<string | null>(null);
   const [imageDimensions, setImageDimensions] = useState<{ width: number; height: number } | null>(null);
@@ -118,10 +125,12 @@ export function ResultsScreen(): React.JSX.Element {
   const [metadataRetrying, setMetadataRetrying] = useState(false);
   const [userSelectedBook, setUserSelectedBook] = useState<ResolvedBook | null>(null);
   const [bookDetailCandidate, setBookDetailCandidate] = useState<BookCandidateListItem | null>(null);
+  const [isAcceptingBook, setIsAcceptingBook] = useState(false);
   const [editCandidateModalVisible, setEditCandidateModalVisible] = useState(false);
   const [editCandidateCropIndex, setEditCandidateCropIndex] = useState<number | null>(null);
   const [editCandidateTitle, setEditCandidateTitle] = useState('');
   const [editCandidateAuthor, setEditCandidateAuthor] = useState('');
+  const [editingCandidate, setEditingCandidate] = useState<BookCandidateListItem | null>(null);
 
   // Track image load errors per crop index
   const [imageLoadErrors, setImageLoadErrors] = useState<Record<number, string>>({});
@@ -833,19 +842,60 @@ export function ResultsScreen(): React.JSX.Element {
 
   const hasBookCandidates = bookCandidates.length > 0;
 
+  const resolverDebugCounts = useMemo(() => {
+    const counts = {
+      total: bookCandidates.length,
+      accept: 0,
+      suggested: 0,
+      reject: 0,
+      hypothesesZero: 0,
+    };
+    for (const candidate of bookCandidates) {
+      if (candidate.resolverDecision === 'accept') counts.accept += 1;
+      if (candidate.resolverDecision === 'suggested') counts.suggested += 1;
+      if (candidate.resolverDecision === 'reject') counts.reject += 1;
+      const hypothesisCount = candidate.hypothesis?.searchCandidates?.length ?? 0;
+      if (hypothesisCount === 0) counts.hypothesesZero += 1;
+    }
+    return counts;
+  }, [bookCandidates]);
+
   const bookListHeader = useMemo(() => {
-    if (!hasBookCandidates || !bookCandidatesSummary) return null;
+    if (!hasBookCandidates && !showDiagnosticsUI) return null;
     return (
       <View style={styles.booksSummaryHeader}>
-        <Text style={styles.booksSummaryText}>
-          {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
-        </Text>
-        <Text style={styles.booksSummarySubtext}>
-          Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
-        </Text>
+        {hasBookCandidates && bookCandidatesSummary && (
+          <>
+            <Text style={styles.booksSummaryText}>
+              {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
+            </Text>
+            <Text style={styles.booksSummarySubtext}>
+              Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
+            </Text>
+          </>
+        )}
+        {showDiagnosticsUI && (
+          <View style={styles.debugSummary}>
+            <Text style={styles.debugSummaryText}>
+              candidates_total: {resolverDebugCounts.total}
+            </Text>
+            <Text style={styles.debugSummaryText}>
+              resolved_accept: {resolverDebugCounts.accept}
+            </Text>
+            <Text style={styles.debugSummaryText}>
+              resolved_suggested: {resolverDebugCounts.suggested}
+            </Text>
+            <Text style={styles.debugSummaryText}>
+              resolved_reject: {resolverDebugCounts.reject}
+            </Text>
+            <Text style={styles.debugSummaryText}>
+              hypotheses_zero_count: {resolverDebugCounts.hypothesesZero}
+            </Text>
+          </View>
+        )}
       </View>
     );
-  }, [bookCandidatesSummary, hasBookCandidates]);
+  }, [bookCandidatesSummary, hasBookCandidates, showDiagnosticsUI, resolverDebugCounts]);
 
   const bookListFooter = useMemo(() => {
     if (!hasBookCandidates || !isMetadataResolutionEnabled()) return null;
@@ -891,11 +941,116 @@ export function ResultsScreen(): React.JSX.Element {
     setBookDetailCandidate(null);
   }, []);
 
+  // Handle accepting a book match (persists to books_catalog and updates candidate status)
+  const handleAcceptBook = useCallback(async () => {
+    if (!bookDetailCandidate || !bookDetailCandidate.resolvedBook) {
+      console.warn('[ResultsScreen] Cannot accept: no candidate or resolved book');
+      return;
+    }
+
+    setIsAcceptingBook(true);
+    console.log('[ResultsScreen] Accepting book:', bookDetailCandidate.resolvedBook.title);
+
+    try {
+      // Persist to books_catalog
+      const result = await confirmUserSelection(bookDetailCandidate.resolvedBook, bookDetailCandidate.id);
+      console.log('[ResultsScreen] Accept result:', result);
+
+      if (result.success) {
+        // Update the candidate in the store with accepted status
+        const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+        const updatedCandidates = currentCandidates.map((c) => {
+          if (c.id === bookDetailCandidate.id) {
+            return {
+              ...c,
+              resolverDecision: 'accept' as const,
+              resolvedBook: result.updatedBook || c.resolvedBook,
+            };
+          }
+          return c;
+        });
+        useAppStore.getState().setSessionMeta({ bookCandidates: updatedCandidates });
+
+        // Update local state to reflect the change
+        setBookDetailCandidate({
+          ...bookDetailCandidate,
+          resolverDecision: 'accept',
+          resolvedBook: result.updatedBook || bookDetailCandidate.resolvedBook,
+        });
+
+        Alert.alert('Success', `Book accepted and cataloged!\nID: ${result.bookId?.slice(0, 12)}...`);
+      } else {
+        Alert.alert('Error', result.error || 'Failed to accept book');
+      }
+    } catch (e: any) {
+      console.error('[ResultsScreen] Accept error:', e);
+      Alert.alert('Error', e.message || 'Failed to accept book');
+    } finally {
+      setIsAcceptingBook(false);
+    }
+  }, [bookDetailCandidate]);
+
+  // Handle selecting a specific candidate from the suggestions list
+  const handleSelectCandidate = useCallback(async (candidateIndex: number) => {
+    if (!bookDetailCandidate || !bookDetailCandidate.resolverSuggestions) {
+      console.warn('[ResultsScreen] Cannot select: no candidate or suggestions');
+      return;
+    }
+
+    const selectedBook = bookDetailCandidate.resolverSuggestions[candidateIndex];
+    if (!selectedBook) {
+      console.warn('[ResultsScreen] Invalid candidate index:', candidateIndex);
+      return;
+    }
+
+    setIsAcceptingBook(true);
+    console.log('[ResultsScreen] Selecting alternative candidate:', selectedBook.title);
+
+    try {
+      // Persist to books_catalog
+      const result = await confirmUserSelection(selectedBook, bookDetailCandidate.id);
+      console.log('[ResultsScreen] Select result:', result);
+
+      if (result.success) {
+        // Update the candidate in the store with accepted status and new resolved book
+        const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+        const updatedCandidates = currentCandidates.map((c) => {
+          if (c.id === bookDetailCandidate.id) {
+            return {
+              ...c,
+              resolverDecision: 'accept' as const,
+              resolvedBook: result.updatedBook || selectedBook,
+            };
+          }
+          return c;
+        });
+        useAppStore.getState().setSessionMeta({ bookCandidates: updatedCandidates });
+
+        // Update local state to reflect the change
+        setBookDetailCandidate({
+          ...bookDetailCandidate,
+          resolverDecision: 'accept',
+          resolvedBook: result.updatedBook || selectedBook,
+        });
+
+        Alert.alert('Success', `Book selected and cataloged!\nID: ${result.bookId?.slice(0, 12)}...`);
+      } else {
+        Alert.alert('Error', result.error || 'Failed to select book');
+      }
+    } catch (e: any) {
+      console.error('[ResultsScreen] Select error:', e);
+      Alert.alert('Error', e.message || 'Failed to select book');
+    } finally {
+      setIsAcceptingBook(false);
+    }
+  }, [bookDetailCandidate]);
+
   const handleOpenCandidateEdit = useCallback((candidate: BookCandidateListItem) => {
     const display = getCandidateDisplay(candidate);
     setEditCandidateCropIndex(display.editIndex);
     setEditCandidateTitle(display.title || '');
     setEditCandidateAuthor(display.author || '');
+    setEditingCandidate(candidate);
     setEditCandidateModalVisible(true);
   }, [getCandidateDisplay]);
 
@@ -904,6 +1059,7 @@ export function ResultsScreen(): React.JSX.Element {
     setEditCandidateCropIndex(null);
     setEditCandidateTitle('');
     setEditCandidateAuthor('');
+    setEditingCandidate(null);
   }, []);
 
   const handleSaveCandidateEdits = useCallback(() => {
@@ -930,8 +1086,45 @@ export function ResultsScreen(): React.JSX.Element {
       },
     });
 
+    // Persist correction to corrections memory (Gate 10)
+    if (editingCandidate) {
+      const trimmedTitle = editCandidateTitle.trim() || null;
+      const trimmedAuthor = editCandidateAuthor.trim() || null;
+      saveCorrection(editingCandidate, trimmedTitle, trimmedAuthor);
+    }
+
     handleCloseCandidateEdit();
-  }, [editCandidateCropIndex, editCandidateTitle, editCandidateAuthor, handleCloseCandidateEdit]);
+  }, [editCandidateCropIndex, editCandidateTitle, editCandidateAuthor, editingCandidate, handleCloseCandidateEdit]);
+
+  // Handler for reverting a correction
+  const handleRevertCorrection = useCallback(() => {
+    if (!editingCandidate || editCandidateCropIndex === null) {
+      handleCloseCandidateEdit();
+      return;
+    }
+
+    // Delete the stored correction
+    deleteCorrection(editingCandidate);
+
+    // Clear the user edit for this crop index
+    const currentMeta = useAppStore.getState().sessionMeta;
+    if (currentMeta) {
+      const currentEdits = { ...currentMeta.userEdits };
+      delete currentEdits[editCandidateCropIndex];
+      useAppStore.getState().setSessionMeta({
+        ...currentMeta,
+        userEdits: currentEdits,
+      });
+    }
+
+    handleCloseCandidateEdit();
+  }, [editingCandidate, editCandidateCropIndex, handleCloseCandidateEdit]);
+
+  // Check if the current candidate has a stored correction that can be reverted
+  const canRevertCorrection = useMemo(() => {
+    if (!editingCandidate) return false;
+    return hasStoredCorrection(editingCandidate) || hasAppliedCorrection(editingCandidate);
+  }, [editingCandidate]);
 
   if (loading) {
     return (
@@ -975,27 +1168,34 @@ export function ResultsScreen(): React.JSX.Element {
             </Text>
           </TouchableOpacity>
         </View>
-        <TouchableOpacity
-          style={[styles.diagnosticsToggle, diagnosticsVisible && styles.diagnosticsToggleActive]}
-          onPress={() => {
-            setDiagnosticsVisible((prev) => {
-              const next = !prev;
-              if (!next) {
-                setActiveTab('books');
-              } else if (activeTab === 'books') {
-                setActiveTab('overlay');
-              }
-              return next;
-            });
-          }}
-        >
-          <Text style={[styles.diagnosticsToggleText, diagnosticsVisible && styles.diagnosticsToggleTextActive]}>
-            Diagnostics
-          </Text>
-        </TouchableOpacity>
+        {showDiagnosticsUI && (
+          <TouchableOpacity
+            style={[styles.diagnosticsToggle, diagnosticsVisible && styles.diagnosticsToggleActive]}
+            onPress={() => {
+              // Navigate to full DiagnosticsScreen with sessionId
+              navigation.navigate('Diagnostics', { sessionId });
+            }}
+            onLongPress={() => {
+              // Toggle inline overlay/crops on long-press
+              setDiagnosticsVisible((prev) => {
+                const next = !prev;
+                if (!next) {
+                  setActiveTab('books');
+                } else if (activeTab === 'books') {
+                  setActiveTab('overlay');
+                }
+                return next;
+              });
+            }}
+          >
+            <Text style={[styles.diagnosticsToggleText, diagnosticsVisible && styles.diagnosticsToggleTextActive]}>
+              Diagnostics
+            </Text>
+          </TouchableOpacity>
+        )}
       </View>
 
-      {diagnosticsVisible && (
+      {showDiagnosticsUI && diagnosticsVisible && (
         <View style={styles.tabBar}>
           <TouchableOpacity
             style={[styles.tab, activeTab === 'overlay' && styles.tabActive]}
@@ -1017,7 +1217,7 @@ export function ResultsScreen(): React.JSX.Element {
       )}
 
       {/* OVERLAY VIEW - Image with detection overlay */}
-      {diagnosticsVisible && activeTab === 'overlay' && (
+      {showDiagnosticsUI && diagnosticsVisible && activeTab === 'overlay' && (
         <View style={styles.imageContainer} onLayout={handleContainerLayout}>
           {imageUri && (
             <Image
@@ -1074,7 +1274,7 @@ export function ResultsScreen(): React.JSX.Element {
       )}
 
       {/* CROPS VIEW - Grid of rectified crop images */}
-      {diagnosticsVisible && activeTab === 'crops' && (
+      {showDiagnosticsUI && diagnosticsVisible && activeTab === 'crops' && (
         <View style={styles.cropsContainer}>
           {!effectiveHasSuccessfulCrops ? (
             // No crops available message
@@ -1517,6 +1717,18 @@ export function ResultsScreen(): React.JSX.Element {
             ? getCandidateDisplay(bookDetailCandidate).isEdited
             : false
         }
+        onAccept={
+          bookDetailCandidate?.resolvedBook && bookDetailCandidate.resolverDecision !== 'accept'
+            ? handleAcceptBook
+            : undefined
+        }
+        onSelectCandidate={
+          bookDetailCandidate?.resolverDecision === 'suggested' &&
+          bookDetailCandidate?.resolverSuggestions?.length
+            ? handleSelectCandidate
+            : undefined
+        }
+        isAccepting={isAcceptingBook}
       />
 
       <EditCandidateFieldsModal
@@ -1527,7 +1739,9 @@ export function ResultsScreen(): React.JSX.Element {
         onChangeAuthor={setEditCandidateAuthor}
         onSave={handleSaveCandidateEdits}
         onCancel={handleCloseCandidateEdit}
+        onRevert={handleRevertCorrection}
         canSave={editCandidateCropIndex !== null}
+        canRevert={canRevertCorrection}
       />
     </View>
   );
@@ -1590,6 +1804,16 @@ function MetadataResolutionCard({
   // Get action display info
   const getActionInfo = (action: AcceptanceDecision['action']) => {
     switch (action) {
+      // New action types
+      case 'accept_high':
+        return { label: 'Accepted (High)', color: '#30D158', icon: '✓' };
+      case 'accept_medium':
+        return { label: 'Accepted', color: '#30D158', icon: '✓' };
+      case 'suggested':
+        return { label: 'Suggested', color: '#FF9F0A', icon: '~' };
+      case 'reject':
+        return { label: 'No Match', color: '#8E8E93', icon: '✗' };
+      // Legacy action types (backwards compatibility)
       case 'auto-accept':
         return { label: 'Matched', color: '#30D158', icon: '✓' };
       case 'suggest':
@@ -1679,7 +1903,7 @@ function MetadataResolutionCard({
           {displayBook.isbn13 && (
             <Text style={styles.metadataBookIsbn}>ISBN: {displayBook.isbn13}</Text>
           )}
-          {decision.action === 'auto-accept' && 'confidence' in decision && (
+          {'confidence' in decision && (
             <Text style={styles.metadataConfidence}>
               Confidence: {Math.round(decision.confidence * 100)}%
             </Text>
@@ -1699,13 +1923,13 @@ function MetadataResolutionCard({
         </View>
       )}
 
-      {/* Alternatives for suggest/ambiguous */}
-      {(decision.action === 'suggest' || decision.action === 'ambiguous') && (
+      {/* Alternatives for suggested/suggest/ambiguous */}
+      {(decision.action === 'suggested' || decision.action === 'suggest' || decision.action === 'ambiguous') && (
         <View style={styles.metadataAlternatives}>
           <Text style={styles.metadataAlternativesLabel}>
-            {decision.action === 'suggest' ? 'Alternatives:' : 'Candidates:'}
+            {decision.action === 'ambiguous' ? 'Candidates:' : 'Alternatives (optional review):'}
           </Text>
-          {(decision.action === 'suggest' ? decision.alternatives : decision.candidates).map((book, idx) => (
+          {(decision.action === 'suggested' ? decision.alternatives : decision.action === 'suggest' ? decision.alternatives : decision.candidates).map((book, idx) => (
             <TouchableOpacity
               key={idx}
               style={[
@@ -1727,13 +1951,15 @@ function MetadataResolutionCard({
         </View>
       )}
 
-      {/* No match fallback info */}
-      {decision.action === 'no-match' && (
+      {/* No match / reject info */}
+      {(decision.action === 'no-match' || decision.action === 'reject') && (
         <View style={styles.metadataNoMatch}>
           <Text style={styles.metadataNoMatchText}>
-            {decision.fallback === 'ocr-only'
-              ? 'Using OCR-extracted text. Edit title/author manually if needed.'
-              : 'No metadata found. Enter book details manually.'}
+            {decision.action === 'reject'
+              ? `No match found: ${'reason' in decision ? decision.reason : 'Score too low'}`
+              : decision.fallback === 'ocr-only'
+                ? 'Using OCR-extracted text. Edit title/author manually if needed.'
+                : 'No metadata found. Enter book details manually.'}
           </Text>
         </View>
       )}
@@ -2353,6 +2579,17 @@ const styles = StyleSheet.create({
     color: '#8e8e93',
     fontSize: 13,
     marginTop: 4,
+  },
+  debugSummary: {
+    marginTop: 10,
+    paddingTop: 10,
+    borderTopWidth: 1,
+    borderTopColor: '#2c2c2e',
+  },
+  debugSummaryText: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginTop: 2,
   },
   bookCard: {
     backgroundColor: '#1c1c1e',

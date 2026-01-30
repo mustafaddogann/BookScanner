@@ -27,6 +27,7 @@ import type {
   InputTensorMeta,
 } from '../types';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
+import { useDebugStore } from '../store/useDebugStore';
 import type { GroupingAssignments } from './bookCandidateGrouper';
 
 const SESSIONS_DIR = 'sessions';
@@ -39,14 +40,19 @@ const SESSIONS_DIR = 'sessions';
  * Global flag to enable/disable artifact writing
  * Default: DEBUG_ARTIFACTS_ENABLED from config (false for production)
  * Use setArtifactWritingEnabled() to override at runtime
+ *
+ * NOTE: Primary gate is diagnosticsEnabled from useDebugStore.
+ * Artifacts are only written when: __DEV__ && diagnosticsEnabled && artifactWritingEnabled
  */
 let artifactWritingEnabled = DEBUG_ARTIFACTS_ENABLED;
 
 /**
- * Check if artifact writing is currently enabled
+ * Check if artifact writing is currently enabled.
+ * Requires BOTH diagnosticsEnabled (user toggle) AND artifactWritingEnabled (config flag).
  */
 export function isArtifactWritingEnabled(): boolean {
-  return artifactWritingEnabled;
+  const diagnosticsEnabled = useDebugStore.getState().diagnosticsEnabled;
+  return __DEV__ && diagnosticsEnabled && artifactWritingEnabled;
 }
 
 /**
@@ -842,14 +848,24 @@ export async function listSessions(): Promise<string[]> {
 
 /**
  * Read debug manifest for a session
+ * Returns null silently if file doesn't exist (ENOENT)
  */
 export async function readDebugManifest(sessionId: string): Promise<DebugManifest | null> {
   const manifestPath = `${getSessionDir(sessionId)}/debug_manifest.json`;
   try {
+    // Check if file exists first to avoid ENOENT errors
+    const exists = await RNFS.exists(manifestPath);
+    if (!exists) {
+      // Silent return - ENOENT is expected for sessions without diagnostics enabled
+      return null;
+    }
     const content = await RNFS.readFile(manifestPath, 'utf8');
     return JSON.parse(content);
-  } catch (error) {
-    console.error(`[DebugArtifacts] Failed to read manifest for ${sessionId}:`, error);
+  } catch (error: any) {
+    // Only log non-ENOENT errors
+    if (error?.code !== 'ENOENT' && !error?.message?.includes('ENOENT')) {
+      console.error(`[DebugArtifacts] Failed to read manifest for ${sessionId}:`, error);
+    }
     return null;
   }
 }

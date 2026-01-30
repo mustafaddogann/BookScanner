@@ -25,6 +25,8 @@
     "**/Pods",
     "**/android",
     "**/ios",
-    "backend"
+    "backend",
+    "supabase/functions",
+    "scripts"
   ]
 }

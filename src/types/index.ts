@@ -342,6 +342,9 @@ export type RootStackParamList = {
   };
   Debug: undefined;
   Settings: undefined;
+  Diagnostics: {
+    sessionId?: string;
+  } | undefined;
 };
 
 // ============================================================================
@@ -642,6 +645,35 @@ export interface BookEvidence {
 }
 
 /**
+ * UI guess for immediate display (NOT canonical - will be replaced by resolver)
+ * This is resolver-input only, never used for primary UI display.
+ */
+export interface UIGuess {
+  /** Guessed title from local extraction */
+  title: string | null;
+  /** Guessed author from local extraction */
+  author: string | null;
+  /** Confidence in the guess [0-1] */
+  confidence: number;
+}
+
+/**
+ * Hypothesis data for resolver (Gate 8)
+ * IMPORTANT: This is resolver-input ONLY, never used for UI display.
+ * UI display uses legacy extraction (evidence.perFieldHints or OCR results).
+ */
+export interface BookHypothesis {
+  /** Evidence quality tier */
+  evidenceTier: EvidenceTier;
+  /** Search candidates for resolver lookup */
+  searchCandidates: SearchCandidate[];
+  /** ISBN candidates extracted from OCR */
+  isbnCandidates: string[];
+  /** UI guess (resolver-input only, NOT for display) */
+  uiGuess: UIGuess | null;
+}
+
+/**
  * A book candidate representing one physical book on the shelf
  * Groups multiple detections/crops that likely belong to the same book
  */
@@ -662,6 +694,71 @@ export interface BookCandidate {
   confidenceScore: number;
   /** Merged OCR evidence */
   evidence: BookEvidence;
+
+  // ============================================================================
+  // Gate 8: Hypothesis (resolver-input ONLY, gated by METADATA_RESOLUTION_ENABLED)
+  // NEVER use for UI display - use evidence.perFieldHints instead
+  // ============================================================================
+
+  /**
+   * Hypothesis for resolver (Gate 8)
+   * Only populated when METADATA_RESOLUTION_ENABLED is true.
+   * NEVER use for UI display.
+   */
+  hypothesis?: BookHypothesis;
+
+  // ============================================================================
+  // Gate 9: Resolver (CANONICAL)
+  // ============================================================================
+
+  /** Canonical resolved book from resolver (Gate 9) */
+  resolvedBook?: ResolvedBook;
+
+  /** Match confidence from resolver [0-1] (Gate 9) */
+  resolvedConfidence?: number;
+
+  /** Suggestions for manual review (Gate 9) */
+  resolverSuggestions?: ResolvedBook[];
+
+  /** Resolver decision (Gate 9)
+   * - accept: Auto-accepted with high confidence (persisted)
+   * - suggested: Suggested match for optional user review (NOT persisted)
+   * - reject: No matching book found
+   * - pending: Resolution in progress
+   * - disabled: Metadata resolution feature is OFF
+   * - offline: Network unavailable
+   * - error: Resolution failed with error
+   */
+  resolverDecision?: 'accept' | 'reject' | 'suggested' | 'pending' | 'disabled' | 'offline' | 'error';
+
+  /** Verification flags from resolver (Gate 9) */
+  resolverFlags?: ResolverFlag[];
+
+  /** Evidence-driven search debug info (Gate 9) */
+  evidenceSearchDebug?: {
+    hypothesesCount: number;
+    queriesTried: string[];
+    candidatesFound: number;
+    topScores: Array<{ title: string; score: number }>;
+    searchTimeMs: number;
+  };
+
+  // ============================================================================
+  // Gate 10: Corrections Memory
+  // ============================================================================
+
+  /** Applied correction from corrections memory (Gate 10) */
+  appliedCorrection?: Correction;
+}
+
+/**
+ * Verification flag from resolver
+ */
+export interface ResolverFlag {
+  flag: string;
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+  penalty: number;
 }
 
 /**
@@ -679,12 +776,13 @@ export interface BookCandidatesSummary {
 }
 
 // ============================================================================
-// Gate 8: Metadata Resolution Types
+// Gate 8: Hypothesis Generation Types
 // ============================================================================
 
 /**
  * Evidence quality tier based on crop and OCR quality
- * Used to adjust scoring thresholds and confidence levels
+ * Used by Gate 8 to classify evidence and adjust resolver scoring
+ * Tier multipliers: strong=1.0, usable=0.85, weak=0.6, unusable=0
  */
 export type EvidenceTier = 'strong' | 'usable' | 'weak' | 'unusable';
 
@@ -779,6 +877,12 @@ export interface ResolvedBook {
   source: 'openLibrary' | 'googleBooks' | 'manual' | 'ocr';
   /** Source-specific ID */
   sourceId?: string;
+  /**
+   * Stable book ID from books_catalog (Supabase UUID).
+   * Only populated after upsert to books_catalog.
+   * Use as canonical reference for corrections linking.
+   */
+  bookId?: string;
 }
 
 /**
@@ -808,7 +912,45 @@ export interface VerificationResult {
 }
 
 /**
- * Auto-accept decision - high confidence match
+ * Accept high decision - ISBN match + high score (persisted to Supabase)
+ */
+export interface AcceptanceAcceptHigh {
+  action: 'accept_high';
+  book: ResolvedBook;
+  confidence: number;
+}
+
+/**
+ * Accept medium decision - high score + dominance (persisted to Supabase)
+ */
+export interface AcceptanceAcceptMedium {
+  action: 'accept_medium';
+  book: ResolvedBook;
+  confidence: number;
+}
+
+/**
+ * Suggested decision - moderate score, shown to user but NOT persisted
+ * User can optionally review, but no action required
+ */
+export interface AcceptanceSuggested {
+  action: 'suggested';
+  book: ResolvedBook;
+  confidence: number;
+  alternatives: ResolvedBook[];
+}
+
+/**
+ * Reject decision - no viable match found
+ */
+export interface AcceptanceReject {
+  action: 'reject';
+  reason: string;
+}
+
+/**
+ * Legacy types for backwards compatibility
+ * @deprecated Use new action types
  */
 export interface AcceptanceAutoAccept {
   action: 'auto-accept';
@@ -816,9 +958,6 @@ export interface AcceptanceAutoAccept {
   confidence: number;
 }
 
-/**
- * Suggest decision - good match but needs confirmation
- */
 export interface AcceptanceSuggest {
   action: 'suggest';
   book: ResolvedBook;
@@ -827,9 +966,6 @@ export interface AcceptanceSuggest {
   confidence: number;
 }
 
-/**
- * Ambiguous decision - multiple viable candidates
- */
 export interface AcceptanceAmbiguous {
   action: 'ambiguous';
   candidates: ResolvedBook[];
@@ -837,9 +973,6 @@ export interface AcceptanceAmbiguous {
   warnings?: VerificationFlag[];
 }
 
-/**
- * No match decision - fallback to manual or OCR
- */
 export interface AcceptanceNoMatch {
   action: 'no-match';
   fallback: 'manual-entry' | 'ocr-only';
@@ -849,6 +982,11 @@ export interface AcceptanceNoMatch {
  * Acceptance decision union type
  */
 export type AcceptanceDecision =
+  | AcceptanceAcceptHigh
+  | AcceptanceAcceptMedium
+  | AcceptanceSuggested
+  | AcceptanceReject
+  // Legacy types for backwards compatibility
   | AcceptanceAutoAccept
   | AcceptanceSuggest
   | AcceptanceAmbiguous
@@ -906,6 +1044,65 @@ export interface MetadataResolutionState {
   resolvedAt?: string;
   /** Whether resolution was from offline queue */
   fromOfflineQueue?: boolean;
+  /** Resolved candidates from Supabase resolver (Gate 9) */
+  resolvedCandidates?: BookCandidate[];
+  /** Evidence-driven search debug info */
+  evidenceSearchDebug?: {
+    /** Number of hypotheses generated */
+    hypothesesCount: number;
+    /** Query strings tried */
+    queriesTried: string[];
+    /** Total candidates found */
+    candidatesFound: number;
+    /** Top candidate scores */
+    topScores: Array<{ title: string; score: number }>;
+    /** Search time in ms */
+    searchTimeMs: number;
+  };
+}
+
+// ============================================================================
+// Gate 10: Corrections Memory Types
+// ============================================================================
+
+/**
+ * Key for corrections lookup - either ISBN or content hash
+ */
+export type CorrectionKey = string;
+
+/**
+ * A user correction for a book
+ * Stored in MMKV and applied automatically on future scans
+ */
+export interface Correction {
+  /** Hash of original OCR content (for matching when no ISBN) */
+  contentHash: string;
+  /** ISBN if available (preferred key) */
+  isbn: string | null;
+  /** Corrected title (null means unchanged) */
+  correctedTitle: string | null;
+  /** Corrected author (null means unchanged) */
+  correctedAuthor: string | null;
+  /** Original title before correction */
+  originalTitle: string | null;
+  /** Original author before correction */
+  originalAuthor: string | null;
+  /** Timestamp when correction was created */
+  createdAt: string;
+  /** Number of times this correction was auto-applied */
+  applyCount: number;
+}
+
+/**
+ * Result of applying corrections to a candidate
+ */
+export interface CorrectionApplyResult {
+  /** The candidate (possibly modified) */
+  candidate: BookCandidate;
+  /** Whether a correction was applied */
+  applied: boolean;
+  /** The correction that was applied (if any) */
+  correction?: Correction;
 }
 
 // ============================================================================

@@ -1,10 +1,17 @@
 /**
  * Debug configuration for BookScanner
  * Controls expensive debug artifact generation and feature flags
+ *
+ * IMPORTANT: The user-controlled diagnosticsEnabled toggle in useDebugStore
+ * is the PRIMARY gate for all diagnostics features. These flags are SECONDARY
+ * and must be ANDed with diagnosticsEnabled.
  */
 
+import { useDebugStore } from '../store/useDebugStore';
+
 /**
- * Master switch for debug artifact generation
+ * Secondary flag for debug artifact generation.
+ * The primary gate is diagnosticsEnabled from useDebugStore.
  *
  * When false (default for production):
  * - No overlay images written
@@ -22,10 +29,12 @@
 export const DEBUG_ARTIFACTS_ENABLED = false;
 
 /**
- * Check if debug artifacts should be generated
+ * Check if debug artifacts should be generated.
+ * Requires BOTH diagnosticsEnabled AND DEBUG_ARTIFACTS_ENABLED.
  */
 export function isDebugArtifactsEnabled(): boolean {
-  return DEBUG_ARTIFACTS_ENABLED;
+  const diagnosticsEnabled = useDebugStore.getState().diagnosticsEnabled;
+  return __DEV__ && diagnosticsEnabled && DEBUG_ARTIFACTS_ENABLED;
 }
 
 /**
@@ -39,7 +48,7 @@ export function isDebugArtifactsEnabled(): boolean {
  * - Enables Open Library / Google Books lookups
  * - Requires internet connection
  */
-export const METADATA_LOOKUP_ENABLED = false;
+export const METADATA_LOOKUP_ENABLED = true;
 
 /**
  * Check if metadata lookup is enabled
@@ -64,7 +73,7 @@ export function isMetadataLookupEnabled(): boolean {
  *   QUALITY_CLASSIFY → HYPOTHESIZE → RESOLVE → VERIFY → DECIDE
  * - Requires METADATA_LOOKUP_ENABLED for network lookups
  */
-export const METADATA_RESOLUTION_ENABLED = false;
+export const METADATA_RESOLUTION_ENABLED = true;
 
 /**
  * Enable AI-powered refinement of OCR text
@@ -157,4 +166,44 @@ export const METADATA_FIELD_EXTRACTION_ENABLED = false;
  */
 export function isFieldExtractionEnabled(): boolean {
   return METADATA_FIELD_EXTRACTION_ENABLED;
+}
+
+// ============================================================================
+// Diagnostic Logging
+// ============================================================================
+
+/**
+ * Check if diagnostic logging should be enabled.
+ * Diagnostic logs include resolver endpoints, HTTP status, decisions, and correction apply results.
+ *
+ * Primary gate: diagnosticsEnabled from useDebugStore
+ * Secondary gates: DEBUG_ARTIFACTS_ENABLED or METADATA_VERBOSE_DEBUG
+ *
+ * Enabled when: __DEV__ && diagnosticsEnabled && (DEBUG_ARTIFACTS_ENABLED || METADATA_VERBOSE_DEBUG)
+ */
+export function isDiagnosticLoggingEnabled(): boolean {
+  const diagnosticsEnabled = useDebugStore.getState().diagnosticsEnabled;
+  return __DEV__ && diagnosticsEnabled && (DEBUG_ARTIFACTS_ENABLED || METADATA_VERBOSE_DEBUG);
+}
+
+/**
+ * Log a diagnostic message if diagnostic logging is enabled.
+ */
+export function logDiagnostic(tag: string, message: string, data?: unknown): void {
+  if (isDiagnosticLoggingEnabled()) {
+    if (data !== undefined) {
+      console.log(`[${tag}] ${message}`, data);
+    } else {
+      console.log(`[${tag}] ${message}`);
+    }
+  }
+}
+
+/**
+ * Check if diagnostics UI features should be shown.
+ * This is the primary gate for diagnostics UI elements.
+ */
+export function isDiagnosticsUIEnabled(): boolean {
+  const diagnosticsEnabled = useDebugStore.getState().diagnosticsEnabled;
+  return __DEV__ && diagnosticsEnabled;
 }

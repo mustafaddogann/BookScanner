@@ -86,7 +86,9 @@ import { rectifyAll } from './rectificationService';
 import { recognizeAllCrops, isTextRecognitionAvailable } from './textRecognitionService';
 import { groupDetectionsIntoCandidates } from './bookCandidateGrouper';
 import { mergeEvidenceForAllCandidates } from './spineEvidenceMerger';
+import { generateHypotheses } from './hypothesisGenerationService';
 import { runMetadataResolution } from './metadataResolutionOrchestrator';
+import { applyCorrectionsToCandidates } from './correctionsMemory';
 import { isMetadataResolutionEnabled, isMetadataVerboseDebug } from '../config/debug';
 import {
   createSessionDir,
@@ -994,6 +996,16 @@ export async function runPipeline(
           ocrResults
         );
 
+        // Gate 7 validation: log candidate counts + evidence sizes
+        console.log(`[Pipeline] Gate7 candidates: sessionId=${sessionId} count=${candidatesWithEvidence.length}`);
+        for (const candidate of candidatesWithEvidence) {
+          const textLen = candidate.evidence?.mergedTextBlock?.length ?? 0;
+          const lineLen = candidate.evidence?.mergedLines?.length ?? 0;
+          console.log(
+            `[Pipeline] Gate7 candidate=${candidate.id} crops=${JSON.stringify(candidate.cropIndices)} textLen=${textLen} lines=${lineLen}`
+          );
+        }
+
         // Update sessionMeta with book candidates (MERGE semantics)
         // NOTE: setSessionMeta now merges, so we don't need to spread freshMeta
         store.setSessionMeta({
@@ -1024,12 +1036,100 @@ export async function runPipeline(
     timer.endStage('grouping');
 
     // =========================================================================
-    // STAGE 10: Metadata Resolution (Gate 8+) - Feature-flagged
+    // STAGE 9.5: Hypothesis Generation (Gate 8) - GATED by resolver flag
+    // Only runs when METADATA_RESOLUTION_ENABLED is true.
+    // Generates: hypothesis.{evidenceTier, searchCandidates, isbnCandidates, uiGuess}
+    // NOTE: Hypothesis is resolver-input ONLY, never used for UI display.
     // =========================================================================
     if (isMetadataResolutionEnabled() && !isDebugAlignmentMode) {
-      timer.startStage('metadata');
-      store.setProcessing(true, 'metadata');
+      timer.startStage('hypothesis');
+      store.setProcessing(true, 'hypothesis');
 
+      // Get fresh state to access book candidates from grouping
+      const hypothesisMeta = useAppStore.getState().sessionMeta;
+      const hypothesisCandidates = hypothesisMeta?.bookCandidates || [];
+
+      if (hypothesisCandidates.length > 0) {
+        try {
+          console.log(`[Pipeline] Generating hypotheses for ${hypothesisCandidates.length} book candidates`);
+
+          // Apply hypothesis generation to all candidates
+          const candidatesWithHypotheses = generateHypotheses(hypothesisCandidates);
+
+          // Update sessionMeta with hypothesis-enhanced candidates
+          store.setSessionMeta({
+            bookCandidates: candidatesWithHypotheses,
+          });
+
+          // Log summary
+          const tierCounts = candidatesWithHypotheses.reduce(
+            (acc, c) => {
+              const tier = c.hypothesis?.evidenceTier || 'unknown';
+              acc[tier] = (acc[tier] || 0) + 1;
+              return acc;
+            },
+            {} as Record<string, number>
+          );
+          console.log(`[Pipeline] Hypothesis generation complete: ${JSON.stringify(tierCounts)}`);
+        } catch (hypothesisError: any) {
+          // Non-fatal: log error but continue
+          const errMsg = `Hypothesis generation failed: ${hypothesisError.message}`;
+          console.warn(`[Pipeline] ${errMsg}`);
+          // Don't add to errors array - candidates still have basic info
+        }
+      } else {
+        console.log('[Pipeline] Hypothesis generation skipped: no book candidates');
+      }
+
+      timer.endStage('hypothesis');
+    } else if (!isMetadataResolutionEnabled()) {
+      // Hypothesis generation OFF by default - UI uses legacy extraction path
+      console.log('[Pipeline] Hypothesis generation skipped: METADATA_RESOLUTION_ENABLED is false');
+    }
+
+    // =========================================================================
+    // STAGE 10: Corrections Memory (Gate 10)
+    // Apply user corrections from previous sessions
+    // Runs regardless of METADATA_RESOLUTION_ENABLED flag
+    // =========================================================================
+    if (!isDebugAlignmentMode) {
+      timer.startStage('corrections');
+      store.setProcessing(true, 'corrections');
+
+      const correctionsMeta = useAppStore.getState().sessionMeta;
+      const candidatesForCorrections = correctionsMeta?.bookCandidates || [];
+
+      if (candidatesForCorrections.length > 0) {
+        try {
+          console.log(`[Pipeline] Applying corrections to ${candidatesForCorrections.length} candidates`);
+
+          // Apply corrections from memory
+          const candidatesWithCorrections = applyCorrectionsToCandidates(candidatesForCorrections);
+
+          // Count how many corrections were applied
+          const appliedCount = candidatesWithCorrections.filter((c) => c.appliedCorrection).length;
+
+          // Update sessionMeta with corrected candidates
+          store.setSessionMeta({
+            bookCandidates: candidatesWithCorrections,
+          });
+
+          console.log(`[Pipeline] Corrections applied: ${appliedCount} of ${candidatesForCorrections.length}`);
+        } catch (correctionsError: any) {
+          // Non-fatal: log error but continue
+          console.warn(`[Pipeline] Corrections failed: ${correctionsError.message}`);
+        }
+      }
+
+      timer.endStage('corrections');
+    }
+
+    // =========================================================================
+    // STAGE 11: Metadata Resolution (Gate 9) - Feature-flagged, NON-BLOCKING
+    // Resolver runs in Supabase Edge Function, provides CANONICAL truth
+    // IMPORTANT: This is async (non-blocking) to avoid UI latency regression
+    // =========================================================================
+    if (isMetadataResolutionEnabled() && !isDebugAlignmentMode) {
       // Get FRESH state to access OCR and grouping results
       const metaMeta = useAppStore.getState().sessionMeta;
       const metaRectResults = metaMeta?.rectificationResults || [];
@@ -1037,48 +1137,92 @@ export async function runPipeline(
       const metaBookCandidates = metaMeta?.bookCandidates || [];
 
       if (Object.keys(metaOcrResults).length > 0) {
-        try {
-          if (isMetadataVerboseDebug()) {
-            console.log(`[Pipeline] Running metadata resolution: ${metaRectResults.length} crops, ${Object.keys(metaOcrResults).length} OCR results`);
-          }
+        console.log(
+          `[Pipeline] Resolver invoke: sessionId=${sessionId} candidates=${metaBookCandidates.length} ocr=${Object.keys(metaOcrResults).length}`
+        );
+        // Mark as resolving (non-blocking indicator)
+        store.setSessionMeta({
+          metadataResolution: {
+            evidenceTier: 'unusable',
+            decision: { action: 'pending' as any, fallback: 'ocr-only' },
+            resolvedAt: new Date().toISOString(),
+          },
+        });
 
-          const metadataResult = await runMetadataResolution({
-            sessionId,
-            rectificationResults: metaRectResults,
-            ocrResultsByCropIndex: metaOcrResults,
-            bookCandidates: metaBookCandidates,
+        // Fire async - DO NOT await, update sessionMeta when complete
+        const resolverStartMs = Date.now();
+        runMetadataResolution({
+          sessionId,
+          rectificationResults: metaRectResults,
+          ocrResultsByCropIndex: metaOcrResults,
+          bookCandidates: metaBookCandidates,
+        })
+          .then((metadataResult) => {
+            const resolverMs = Date.now() - resolverStartMs;
+            // ALWAYS-ON: Log resolution result
+            console.log(`[MetadataResolution] completed: action=${metadataResult.decision.action}, resolverMs=${resolverMs}ms`);
+
+            // Extract resolved candidates from result (with updated resolverDecision)
+            const resolvedCandidates = metadataResult.resolutionState.resolvedCandidates;
+
+            // Store results in sessionMeta (MERGE semantics)
+            // CRITICAL: Also update bookCandidates with resolved status
+            store.setSessionMeta({
+              evidenceSummary: metadataResult.evidenceSummary,
+              metadataResolution: metadataResult.resolutionState,
+              metadataQueuedForOffline: metadataResult.queuedForOffline,
+              // Update bookCandidates with resolver results if available
+              ...(resolvedCandidates && resolvedCandidates.length > 0
+                ? { bookCandidates: resolvedCandidates }
+                : {}),
+            });
+          })
+          .catch((metadataError: any) => {
+            // ALWAYS-ON: Log resolution error
+            console.warn(`[MetadataResolution] failed: ${metadataError.message}`);
+
+            // Mark all candidates as error status
+            const errorCandidates = metaBookCandidates.map((c) => ({
+              ...c,
+              resolverDecision: 'reject' as const,
+            }));
+
+            store.setSessionMeta({
+              metadataResolution: {
+                evidenceTier: 'unusable',
+                decision: { action: 'no-match', fallback: 'ocr-only' },
+                resolvedAt: new Date().toISOString(),
+              },
+              bookCandidates: errorCandidates,
+            });
           });
 
-          // Store results in sessionMeta (MERGE semantics)
-          store.setSessionMeta({
-            evidenceSummary: metadataResult.evidenceSummary,
-            metadataResolution: metadataResult.resolutionState,
-            metadataQueuedForOffline: metadataResult.queuedForOffline,
-          });
-
-          console.log(`[Pipeline] Metadata resolution complete: action=${metadataResult.decision.action}`);
-        } catch (metadataError: any) {
-          // Non-fatal: log error but continue
-          const errMsg = `Metadata resolution failed: ${metadataError.message}`;
-          console.warn(`[Pipeline] ${errMsg}`);
-          // Don't add to errors array - this is non-fatal
-          // Store a no-match fallback so UI knows resolution was attempted
-          store.setSessionMeta({
-            metadataResolution: {
-              evidenceTier: 'unusable',
-              decision: { action: 'no-match', fallback: 'ocr-only' },
-              resolvedAt: new Date().toISOString(),
-            },
-          });
+        if (isMetadataVerboseDebug()) {
+          console.log(`[Pipeline] Resolver fired async (non-blocking): ${metaRectResults.length} crops, ${Object.keys(metaOcrResults).length} OCR`);
         }
       } else {
         console.log('[Pipeline] Metadata resolution skipped: no OCR results');
+        // Mark candidates as 'pending' since we have no OCR to work with
+        const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+        if (currentCandidates.length > 0) {
+          const pendingCandidates = currentCandidates.map((c) => ({
+            ...c,
+            resolverDecision: 'pending' as const,
+          }));
+          store.setSessionMeta({ bookCandidates: pendingCandidates });
+        }
       }
-
-      timer.endStage('metadata');
     } else if (!isMetadataResolutionEnabled()) {
-      // Feature flag is OFF - don't add any metadata keys to sessionMeta
-      // This preserves existing behavior
+      // Feature flag is OFF - set all candidates to 'disabled' status
+      console.log('[Pipeline] Metadata resolution disabled by feature flag');
+      const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+      if (currentCandidates.length > 0) {
+        const disabledCandidates = currentCandidates.map((c) => ({
+          ...c,
+          resolverDecision: 'disabled' as const,
+        }));
+        store.setSessionMeta({ bookCandidates: disabledCandidates });
+      }
     }
 
     // Build session object

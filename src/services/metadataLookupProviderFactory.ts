@@ -2,18 +2,16 @@
  * Metadata Lookup Provider Factory
  *
  * Central place to configure and retrieve the active metadata lookup provider.
- * Currently returns DisabledMetadataLookupProvider by default.
+ * Uses OpenLibraryProvider by default when metadata resolution is enabled.
  *
- * To enable a real provider:
- * 1. Implement MetadataLookupProvider interface
- * 2. Update getMetadataLookupProvider() to return the new implementation
- * 3. Configure any required API keys/endpoints
+ * Gate 9: Open Library integration for ISBN fetching
  */
 
 import {
   MetadataLookupProvider,
   DisabledMetadataLookupProvider,
 } from './metadataLookupProvider';
+import { OpenLibraryProvider } from './openLibraryProvider';
 import { isMetadataResolutionEnabled } from '../config/debug';
 
 // Singleton instance of the current provider
@@ -22,9 +20,9 @@ let currentProvider: MetadataLookupProvider | null = null;
 /**
  * Get the current metadata lookup provider
  *
- * Returns DisabledMetadataLookupProvider when:
- * - METADATA_RESOLUTION_ENABLED is false
- * - No other provider is configured
+ * Returns:
+ * - OpenLibraryProvider when METADATA_RESOLUTION_ENABLED is true
+ * - DisabledMetadataLookupProvider when disabled
  *
  * @returns The active MetadataLookupProvider instance
  */
@@ -39,9 +37,9 @@ export function getMetadataLookupProvider(): MetadataLookupProvider {
     return currentProvider;
   }
 
-  // Default to disabled provider until a real one is configured
-  // Future: Check for configured providers (Open Library, Google Books, etc.)
-  currentProvider = new DisabledMetadataLookupProvider();
+  // Use OpenLibraryProvider as the default enabled provider
+  currentProvider = new OpenLibraryProvider();
+  console.log('[MetadataLookup] Initialized OpenLibraryProvider');
   return currentProvider;
 }
 
