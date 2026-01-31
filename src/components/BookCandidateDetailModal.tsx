@@ -104,6 +104,8 @@ export function BookCandidateDetailModal({
     : 'Book';
   const isAutoApplied = !!(candidate as { appliedCorrection?: unknown } | null)?.appliedCorrection;
   const allowRevert = typeof onRevert === 'function' && (canRevert ?? true);
+  const resolverDecision = candidate?.resolverDecision || 'pending';
+  const resolverReason = candidate?.resolverDecisionReason ?? candidate?.evidenceSearchDebug?.reason ?? null;
 
   useEffect(() => {
     if (!visible) {
@@ -347,6 +349,26 @@ export function BookCandidateDetailModal({
               </View>
             )}
 
+            {/* Resolver Status - Always show decision + reason */}
+            {candidate && (
+              <View style={styles.resolvedSection}>
+                <Text style={styles.sectionTitle}>Resolver Status</Text>
+                <View style={styles.resolvedCard}>
+                  <Text style={[
+                    styles.resolvedStatusText,
+                    resolverDecision === 'accept' && styles.statusAccepted,
+                    resolverDecision === 'suggested' && styles.statusReview,
+                    resolverDecision === 'reject' && styles.statusRejected,
+                  ]}>
+                    Status: {resolverDecision}
+                  </Text>
+                  <Text style={styles.resolvedReasonText}>
+                    Reason: {resolverReason || '—'}
+                  </Text>
+                </View>
+              </View>
+            )}
+
             {/* Resolved Book Section - Show match and Accept button */}
             {candidate.resolvedBook && (
               <View style={styles.resolvedSection}>
@@ -376,6 +398,9 @@ export function BookCandidateDetailModal({
                       candidate.resolverDecision === 'reject' && styles.statusRejected,
                     ]}>
                       Status: {candidate.resolverDecision || 'pending'}
+                    </Text>
+                    <Text style={styles.resolvedReasonText}>
+                      Reason: {resolverReason || '—'}
                     </Text>
                   </View>
                 </View>
@@ -752,6 +777,11 @@ const styles = StyleSheet.create({
   resolvedStatusText: {
     fontSize: 12,
     fontWeight: '500',
+  },
+  resolvedReasonText: {
+    color: '#8e8e93',
+    fontSize: 11,
+    marginTop: 4,
   },
   statusAccepted: {
     color: '#30D158',

@@ -43,6 +43,24 @@ function BookCandidateCardBase({
   const mergedText = (evidence?.fullText ?? evidence?.mergedTextBlock ?? '').trim();
   const explicitAvg = evidence?.avgConfidence;
 
+  // Get resolver decision and resolved book
+  const resolverDecision = candidate.resolverDecision;
+  const resolvedBook = candidate.resolvedBook;
+
+  // Determine what to display based on resolver state
+  const isAccepted = resolverDecision === 'accept';
+  const isSuggested = resolverDecision === 'suggested';
+  const isRejected = resolverDecision === 'reject';
+  const hasResolvedBook = !!resolvedBook;
+
+  // Display title and author:
+  // - For accept/suggested with resolvedBook: use resolvedBook info
+  // - Otherwise: use the provided title/author props
+  const displayTitle = hasResolvedBook ? resolvedBook.title : title;
+  const displayAuthor = hasResolvedBook
+    ? resolvedBook.authors?.join(', ')
+    : author;
+
   const avgConfidence = useMemo(() => {
     if (typeof explicitAvg === 'number') return explicitAvg;
     if (mergedLines.length === 0) return null;
@@ -61,6 +79,22 @@ function BookCandidateCardBase({
       <View style={styles.headerRow}>
         <View style={styles.headerLeft}>
           <Text style={styles.title}>{label}</Text>
+          {/* Decision badge: Verified, Suggested, No match */}
+          {isAccepted && (
+            <View style={styles.verifiedBadge}>
+              <Text style={styles.verifiedBadgeText}>Verified</Text>
+            </View>
+          )}
+          {isSuggested && (
+            <View style={styles.suggestedBadge}>
+              <Text style={styles.suggestedBadgeText}>Suggested</Text>
+            </View>
+          )}
+          {isRejected && (
+            <View style={styles.rejectedBadge}>
+              <Text style={styles.rejectedBadgeText}>No match</Text>
+            </View>
+          )}
           {isAutoApplied && (
             <View style={styles.autoBadge}>
               <Text style={styles.autoBadgeText}>Auto</Text>
@@ -76,28 +110,53 @@ function BookCandidateCardBase({
           {cropCount} crop{cropCount === 1 ? '' : 's'}
         </Text>
       </View>
-      {(title || author) && (
-        <View style={styles.fields}>
-          {title && (
-            <Text style={styles.fieldTitle} numberOfLines={1}>
-              Title: {title}
+
+      {/* Show resolved book info for accept/suggested */}
+      {hasResolvedBook && (isAccepted || isSuggested) && (
+        <View style={styles.resolvedInfo}>
+          <Text style={styles.resolvedTitle} numberOfLines={2}>
+            {displayTitle}
+          </Text>
+          {displayAuthor && (
+            <Text style={styles.resolvedAuthor} numberOfLines={1}>
+              {displayAuthor}
             </Text>
           )}
-          {author && (
+          {resolvedBook.isbn13 && (
+            <Text style={styles.resolvedIsbn}>ISBN: {resolvedBook.isbn13}</Text>
+          )}
+        </View>
+      )}
+
+      {/* For reject: show fields fallback */}
+      {!hasResolvedBook && (displayTitle || displayAuthor) && (
+        <View style={styles.fields}>
+          {displayTitle && (
+            <Text style={styles.fieldTitle} numberOfLines={1}>
+              Title: {displayTitle}
+            </Text>
+          )}
+          {displayAuthor && (
             <Text style={styles.fieldAuthor} numberOfLines={1}>
-              Author: {author}
+              Author: {displayAuthor}
             </Text>
           )}
         </View>
       )}
+
       {confidenceLabel && (
         <Text style={styles.confidence}>
           Confidence {confidenceLabel}
         </Text>
       )}
-      <Text style={styles.evidence} numberOfLines={3}>
-        {mergedText.length > 0 ? mergedText : 'No evidence text'}
-      </Text>
+
+      {/* Evidence text: show for reject or when no resolved book */}
+      {(isRejected || !hasResolvedBook) && (
+        <Text style={styles.evidence} numberOfLines={3}>
+          {mergedText.length > 0 ? mergedText : 'No evidence text'}
+        </Text>
+      )}
+
       <BookCandidateDiagnosticsRow
         candidate={candidate}
         testID="book-candidate-diagnostics-row"
@@ -164,6 +223,65 @@ const styles = StyleSheet.create({
     color: '#30D158',
     fontSize: 10,
     fontWeight: '600',
+  },
+  // Decision badges
+  verifiedBadge: {
+    backgroundColor: 'rgba(48, 209, 88, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  verifiedBadgeText: {
+    color: '#30D158',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  suggestedBadge: {
+    backgroundColor: 'rgba(255, 159, 10, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  suggestedBadgeText: {
+    color: '#FF9F0A',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  rejectedBadge: {
+    backgroundColor: 'rgba(255, 69, 58, 0.2)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 8,
+    marginLeft: 8,
+  },
+  rejectedBadgeText: {
+    color: '#FF453A',
+    fontSize: 10,
+    fontWeight: '600',
+  },
+  // Resolved book info
+  resolvedInfo: {
+    backgroundColor: '#2c2c2e',
+    borderRadius: 8,
+    padding: 8,
+    marginBottom: 8,
+  },
+  resolvedTitle: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  resolvedAuthor: {
+    color: '#8e8e93',
+    fontSize: 12,
+    marginTop: 2,
+  },
+  resolvedIsbn: {
+    color: '#636366',
+    fontSize: 10,
+    marginTop: 4,
   },
   meta: {
     color: '#8e8e93',

@@ -8,7 +8,7 @@
  * Gate 9: ISBN fetching and enrichment
  */
 
-import type { ResolvedBook } from '../types';
+import type { ResolvedBook, EvidenceSourceKind } from '../types';
 import type { MetadataLookupProvider } from './metadataLookupProvider';
 import { useDebugStore } from '../store/useDebugStore';
 import {
@@ -23,6 +23,11 @@ import {
   buildEvidenceTokens,
   type EvidenceTokens,
 } from './evidenceNormalization';
+import {
+  determineIsbnPolicy,
+  shouldApplyIsbnBoost,
+  validateIsbnChecksum,
+} from './isbnUtils';
 import {
   scoreAndRankCandidates,
   makeDecisionFromScores,
@@ -557,6 +562,8 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
    * @param ocrAuthor - OCR-extracted author (used as fallback only)
    * @param pass - Which pass (1 = initial, 2 = boost). Default 1.
    * @param excludeQueries - Queries already tried (for pass 2 deduplication)
+   * @param debugContext - Debug context for logging
+   * @param sourceKind - Evidence source kind for ISBN policy (default: 'spine_crop')
    */
   async searchByEvidence(
     evidenceLines: string[],
@@ -564,16 +571,20 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
     ocrAuthor?: string | null,
     pass: 1 | 2 = 1,
     excludeQueries?: Set<string>,
-    debugContext?: HypothesisDebugContext
+    debugContext?: HypothesisDebugContext,
+    sourceKind: EvidenceSourceKind = 'spine_crop'
   ): Promise<EvidenceSearchResult> {
     const startTime = Date.now();
     const candidateLabel = debugContext?.candidateId ? ` candidateId="${debugContext.candidateId}"` : '';
-    console.log(`[OpenLibrary] searchByEvidence START lines=${evidenceLines.length}${candidateLabel}`);
-
     const verbose = shouldLogVerbose();
+    if (verbose) {
+      console.log(`[OpenLibrary] searchByEvidence START lines=${evidenceLines.length}${candidateLabel}`);
+    }
 
-    // Build evidence tokens
-    const evidenceTokens = buildEvidenceTokens(evidenceLines);
+    // Build evidence tokens with source-aware ISBN extraction
+    // For spine_crop: Skip ISBN extraction (spine OCR produces unreliable ISBNs)
+    // For back_cover/inside_page: Extract ISBNs for lookup/boost
+    const evidenceTokens = buildEvidenceTokens(evidenceLines, { sourceKind });
 
     if (verbose) {
       console.log(`[OpenLibrary] Evidence: ${evidenceTokens.tokensSet.size} tokens, ${evidenceTokens.cleanedLines.length} cleaned lines`);
@@ -599,8 +610,8 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
     }
     const hypotheses = hypothesisResult.hypotheses;
 
-    console.log(`[OpenLibrary] Pass ${pass}: Generated ${hypotheses.length} hypotheses (cache size: ${queryCache.size})`);
     if (verbose) {
+      console.log(`[OpenLibrary] Pass ${pass}: Generated ${hypotheses.length} hypotheses (cache size: ${queryCache.size})`);
       for (const h of hypotheses) {
         console.log(`[OpenLibrary]   [${h.priority}] ${h.type}: "${h.query}"`);
       }
@@ -691,8 +702,30 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
       }
     }
 
+    // Build ISBN policy debug info
+    const validIsbns = evidenceTokens.isbns.filter((isbn) => validateIsbnChecksum(isbn));
+    const isbnPolicy = determineIsbnPolicy(
+      sourceKind,
+      validIsbns.map((isbn) => ({
+        raw: isbn,
+        normalized: isbn,
+        type: isbn.length === 10 ? 'isbn10' as const : 'isbn13' as const,
+        checksumValid: true,
+      }))
+    );
+    const isbnPolicyDebug: IsbnPolicyDebugInfo = {
+      sourceKind,
+      policyApplied: isbnPolicy,
+      candidatesRaw: evidenceTokens.isbns,
+      candidatesValid: validIsbns,
+      usedForScoring: shouldApplyIsbnBoost(isbnPolicy),
+      isbnMatchedTopCandidate: false, // Will be updated if we have a top candidate
+    };
+
     if (allCandidates.length === 0) {
-      console.log(`[OpenLibrary] searchByEvidence END pass=${pass} no candidates ms=${Date.now() - startTime}`);
+      if (verbose) {
+        console.log(`[OpenLibrary] searchByEvidence END pass=${pass} no candidates ms=${Date.now() - startTime}`);
+      }
       return {
         decision: 'reject',
         scoredCandidates: [],
@@ -707,11 +740,18 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
         passUsed: pass,
         queriesTriedCount: hypotheses.length,
         boostTriggered: pass === 2,
+        manualReview: false,
+        isbnPolicy: isbnPolicyDebug,
       };
     }
 
-    // Score and rank candidates
-    const scoredCandidates = scoreAndRankCandidates(allCandidates, evidenceTokens);
+    // Score and rank candidates with source-aware ISBN policy
+    // sourceKind determines whether ISBN is used for scoring:
+    // - spine_crop: ISBN is noise, never used for scoring boost
+    // - back_cover/inside_page: Valid ISBN match adds boost
+    const scoredCandidates = scoreAndRankCandidates(allCandidates, evidenceTokens, {
+      sourceKind,
+    });
 
     if (verbose) {
       console.log(`[OpenLibrary] Scored ${scoredCandidates.length} candidates:`);
@@ -724,7 +764,23 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
     const isAfterBoostPass = pass === 2;
     const decisionResult = makeDecisionFromScores(scoredCandidates, isAfterBoostPass);
 
-    console.log(`[OpenLibrary] searchByEvidence END pass=${pass} decision=${decisionResult.decision} topScore=${decisionResult.topCandidate?.scoring.score.toFixed(3) || 'N/A'} gap=${decisionResult.scoreGap.toFixed(3)} ms=${Date.now() - startTime}`);
+    // Get top scoring for logging and ISBN policy debug
+    const topScoring = decisionResult.topCandidate?.scoring;
+
+    // Enhanced instrumentation logging (verbose only to reduce spam)
+    if (verbose) {
+      console.log(`[OpenLibrary] searchByEvidence END ${candidateLabel} pass=${pass} decision=${decisionResult.decision} ` +
+        `topScore=${topScoring?.score.toFixed(3) || 'N/A'} ` +
+        `overlap=${topScoring?.overlapCount ?? 'N/A'} ` +
+        `gap=${decisionResult.scoreGap.toFixed(3)} ` +
+        `isbn=${topScoring?.isbnMatched ? 'yes' : 'no'} ` +
+        `candidates=${allCandidates.length} ` +
+        `hypotheses=${hypotheses.length} ` +
+        `ms=${Date.now() - startTime}`);
+    }
+
+    // Update ISBN policy debug with top candidate match info
+    isbnPolicyDebug.isbnMatchedTopCandidate = topScoring?.isbnMatched ?? false;
 
     return {
       decision: decisionResult.decision,
@@ -740,6 +796,8 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
       passUsed: pass,
       queriesTriedCount: hypotheses.length,
       boostTriggered: pass === 2,
+      manualReview: decisionResult.manualReview,
+      isbnPolicy: isbnPolicyDebug,
     };
   }
 }
@@ -758,6 +816,24 @@ export interface HypothesisSearchResult {
   error?: string;
   /** Which pass this result came from (1 = initial, 2 = boost) */
   pass: 1 | 2;
+}
+
+/**
+ * ISBN policy debug info for evidence search
+ */
+export interface IsbnPolicyDebugInfo {
+  /** Source kind that determined the policy */
+  sourceKind: EvidenceSourceKind;
+  /** Policy that was applied */
+  policyApplied: 'ignore' | 'boost_only' | 'lookup_first';
+  /** Raw ISBN-like strings found in evidence */
+  candidatesRaw: string[];
+  /** Valid ISBN candidates (checksum passed) */
+  candidatesValid: string[];
+  /** Whether ISBN was used for scoring boost */
+  usedForScoring: boolean;
+  /** Whether ISBN match was found with top candidate */
+  isbnMatchedTopCandidate: boolean;
 }
 
 /**
@@ -792,6 +868,10 @@ export interface EvidenceSearchResult {
   queriesTriedCount: number;
   /** Whether boost pass was triggered */
   boostTriggered: boolean;
+  /** Whether this should trigger manual review (ambiguity only) */
+  manualReview?: boolean;
+  /** ISBN policy debug info */
+  isbnPolicy?: IsbnPolicyDebugInfo;
 }
 
 // ============================================================================

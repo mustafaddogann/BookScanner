@@ -3,6 +3,7 @@
  */
 
 import type { ResolvedBook } from '../../types';
+import type { CandidateScore, ScoredCandidate, ResolutionMode } from '../candidateScoring';
 import {
   scoreCandidate,
   scoreAndRankCandidates,
@@ -11,6 +12,46 @@ import {
   AUTO_ACCEPT_THRESHOLD,
   SUGGESTED_THRESHOLD,
 } from '../candidateScoring';
+
+/**
+ * Helper to create a mock CandidateScore with all required fields
+ * Used for tests that need to create mock ScoredCandidate objects
+ */
+function createMockScoring(overrides: Partial<CandidateScore>): CandidateScore {
+  const score = overrides.score ?? 0.5;
+  const rawScore = overrides.rawScore ?? score;
+  const finalScore = overrides.finalScore ?? score;
+  return {
+    score,
+    rawScore,
+    finalScore,
+    overlapRatio: 0.5,
+    coverageRatio: 0.5,
+    orderScore: 1.0,
+    overlapCount: 2,
+    precision: 0.5,
+    recall: 0.5,
+    f1: 0.5,
+    isbnBonus: 0,
+    penalties: [],
+    matchedTokens: [],
+    isbnMatched: false,
+    minSignalCapped: false,
+    // TITLE_ONLY mode fields
+    titleScore: overrides.titleScore ?? score,
+    authorScore: overrides.authorScore ?? 0.5,
+    titleTokenCount: overrides.titleTokenCount ?? 2,
+    authorTokenCount: overrides.authorTokenCount ?? 2,
+    resolutionMode: overrides.resolutionMode ?? 'FULL_MATCH',
+    publisherScore: overrides.publisherScore ?? null,
+    // Legacy fields
+    titleOverlap: 0.5,
+    authorOverlap: 0.5,
+    matchedTitleTokens: [],
+    matchedAuthorTokens: [],
+    ...overrides,
+  };
+}
 
 describe('candidateScoring', () => {
   describe('scoreCandidate', () => {
@@ -54,18 +95,20 @@ describe('candidateScoring', () => {
       expect(score.score).toBeLessThan(0.3);
     });
 
-    it('gives ISBN bonus when matched', () => {
+    it('gives ISBN bonus when matched (back_cover source)', () => {
       // Need enough evidence tokens to pass the min signal check (overlap >= 2)
+      // Use sourceKind: 'back_cover' to enable ISBN extraction (spine_crop skips ISBN)
+      // Note: ISBN must have valid checksum - 9780385121675 is valid for The Shining
       const evidence = buildEvidenceFromLines([
         'THE SHINING',
         'STEPHEN KING',
-        'ISBN 9780307743256',
-      ]);
+        'ISBN 9780385121675',
+      ], { sourceKind: 'back_cover' });
 
       const candidateWithIsbn: ResolvedBook = {
         title: 'The Shining',
         authors: ['Stephen King'],
-        isbn13: '9780307743256',
+        isbn13: '9780385121675',
         source: 'openLibrary',
         sourceId: 'OL123M',
       };
@@ -77,8 +120,9 @@ describe('candidateScoring', () => {
         sourceId: 'OL123M',
       };
 
-      const scoreWith = scoreCandidate(candidateWithIsbn, evidence);
-      const scoreWithout = scoreCandidate(candidateWithoutIsbn, evidence);
+      // Pass sourceKind to enable ISBN boost scoring
+      const scoreWith = scoreCandidate(candidateWithIsbn, evidence, { sourceKind: 'back_cover' });
+      const scoreWithout = scoreCandidate(candidateWithoutIsbn, evidence, { sourceKind: 'back_cover' });
 
       expect(scoreWith.isbnMatched).toBe(true);
       expect(scoreWith.isbnBonus).toBeGreaterThan(0);
@@ -86,15 +130,15 @@ describe('candidateScoring', () => {
       expect(scoreWith.score).toBeGreaterThan(scoreWithout.score);
     });
 
-    it('penalizes generic titles', () => {
+    it('penalizes generic titles without author signal', () => {
       const evidence = buildEvidenceFromLines([
         'THE NOVEL',
-        'AUTHOR NAME',
+        'RANDOM TEXT',
       ]);
 
       const genericCandidate: ResolvedBook = {
         title: 'The',
-        authors: ['Author Name'],
+        authors: ['Unknown Author'], // No match in evidence
         source: 'openLibrary',
         sourceId: 'OL123M',
       };
@@ -103,6 +147,25 @@ describe('candidateScoring', () => {
 
       const genericPenalty = score.penalties.find((p) => p.type === 'generic_title');
       expect(genericPenalty).toBeDefined();
+    });
+
+    it('does NOT penalize generic titles with author signal', () => {
+      const evidence = buildEvidenceFromLines([
+        'THE NOVEL',
+        'AUTHOR NAME',
+      ]);
+
+      const genericCandidate: ResolvedBook = {
+        title: 'The',
+        authors: ['Author Name'], // Matches evidence - provides author signal
+        source: 'openLibrary',
+        sourceId: 'OL123M',
+      };
+
+      const score = scoreCandidate(genericCandidate, evidence);
+
+      const genericPenalty = score.penalties.find((p) => p.type === 'generic_title');
+      expect(genericPenalty).toBeUndefined(); // No penalty when author signal exists
     });
   });
 
@@ -143,7 +206,7 @@ describe('candidateScoring', () => {
 
   describe('makeDecisionFromScores', () => {
     it('accepts high score with ISBN (accept_high)', () => {
-      const scoredCandidates = [
+      const scoredCandidates: ScoredCandidate[] = [
         {
           book: {
             title: 'The Shining',
@@ -152,7 +215,7 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL123M',
           },
-          scoring: {
+          scoring: createMockScoring({
             score: 0.95,
             overlapRatio: 0.9,
             coverageRatio: 0.8,
@@ -160,14 +223,12 @@ describe('candidateScoring', () => {
             overlapCount: 3,
             isbnBonus: 0.15,
             isbnMatched: true,
-            penalties: [],
             matchedTokens: ['shining', 'stephen', 'king'],
-            // Legacy fields
             titleOverlap: 0.9,
             authorOverlap: 0.9,
             matchedTitleTokens: ['shining'],
             matchedAuthorTokens: ['stephen', 'king'],
-          },
+          }),
         },
       ];
 
@@ -177,8 +238,8 @@ describe('candidateScoring', () => {
       expect(result.topCandidate).toBeDefined();
     });
 
-    it('returns suggested for moderate score (0.55-0.82)', () => {
-      const scoredCandidates = [
+    it('returns suggested for moderate score (0.60-0.88) with sufficient overlap', () => {
+      const scoredCandidates: ScoredCandidate[] = [
         {
           book: {
             title: 'The Shining',
@@ -187,33 +248,32 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL123M',
           },
-          scoring: {
-            score: 0.65, // Above suggested threshold (0.55)
+          scoring: createMockScoring({
+            score: 0.65, // Above suggested threshold (0.60)
             overlapRatio: 0.6,
             coverageRatio: 0.5,
             orderScore: 1.0,
-            overlapCount: 2,
-            isbnBonus: 0,
-            isbnMatched: false,
-            penalties: [],
-            matchedTokens: ['shining', 'king'],
-            // Legacy fields
+            overlapCount: 3, // Must be >= 3 for suggested
+            matchedTokens: ['shining', 'stephen', 'king'],
             titleOverlap: 0.6,
             authorOverlap: 0.5,
             matchedTitleTokens: ['shining'],
-            matchedAuthorTokens: ['king'],
-          },
+            matchedAuthorTokens: ['stephen', 'king'],
+            precision: 0.5,
+            recall: 0.6,
+            f1: 0.55,
+          }),
         },
       ];
 
-      // Score 0.65 should return 'suggested' (not persisted)
+      // Score 0.65 with overlap >= 3 should return 'suggested' (not persisted)
       const result = makeDecisionFromScores(scoredCandidates);
 
       expect(result.decision).toBe('suggested');
     });
 
     it('rejects low score', () => {
-      const scoredCandidates = [
+      const scoredCandidates: ScoredCandidate[] = [
         {
           book: {
             title: 'Gone with the Wind',
@@ -221,22 +281,15 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL456M',
           },
-          scoring: {
+          scoring: createMockScoring({
             score: 0.2,
             overlapRatio: 0.1,
             coverageRatio: 0.1,
             orderScore: 0.9,
             overlapCount: 0,
-            isbnBonus: 0,
-            isbnMatched: false,
-            penalties: [],
-            matchedTokens: [],
-            // Legacy fields
             titleOverlap: 0.1,
             authorOverlap: 0.1,
-            matchedTitleTokens: [],
-            matchedAuthorTokens: [],
-          },
+          }),
         },
       ];
 
@@ -252,8 +305,8 @@ describe('candidateScoring', () => {
       expect(result.topCandidate).toBeNull();
     });
 
-    it('returns suggested for moderate score regardless of boost pass', () => {
-      const scoredCandidates = [
+    it('returns suggested for moderate score with sufficient overlap', () => {
+      const scoredCandidates: ScoredCandidate[] = [
         {
           book: {
             title: 'The Shining',
@@ -261,33 +314,33 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL123M',
           },
-          scoring: {
+          scoring: createMockScoring({
             score: 0.75,
             overlapRatio: 0.7,
             coverageRatio: 0.6,
             orderScore: 1.0,
-            overlapCount: 2,
-            isbnBonus: 0,
-            isbnMatched: false,
-            penalties: [],
-            matchedTokens: ['shining', 'king'],
+            overlapCount: 3, // Must be >= 3 for suggested
+            matchedTokens: ['shining', 'stephen', 'king'],
             titleOverlap: 0.7,
             authorOverlap: 0.6,
             matchedTitleTokens: ['shining'],
-            matchedAuthorTokens: ['king'],
-          },
+            matchedAuthorTokens: ['stephen', 'king'],
+            precision: 0.6,
+            recall: 0.7,
+            f1: 0.65,
+          }),
         },
       ];
 
-      // 'suggested' is always returned for scores >= 0.55, regardless of boost pass
+      // 'suggested' is returned for scores >= 0.60 with overlap >= 3
       // This is non-blocking - shows to user but doesn't persist to Supabase
       const result = makeDecisionFromScores(scoredCandidates);
       expect(result.decision).toBe('suggested');
-      expect(result.reason).toContain('suggested match');
+      expect(result.reason).toBe('full_match_suggested');
     });
 
     it('accepts accept_medium without ISBN when thresholds are met', () => {
-      const scoredCandidates = [
+      const scoredCandidates: ScoredCandidate[] = [
         {
           book: {
             title: 'The Shining',
@@ -295,21 +348,18 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL123M',
           },
-          scoring: {
+          scoring: createMockScoring({
             score: 0.90, // >= 0.82
             overlapRatio: 0.85,
             coverageRatio: 0.8,
             orderScore: 1.0,
             overlapCount: 4, // >= 3
-            isbnBonus: 0,
-            isbnMatched: false, // No ISBN
-            penalties: [],
             matchedTokens: ['shining', 'stephen', 'king', 'novel'],
             titleOverlap: 0.9,
             authorOverlap: 0.8,
             matchedTitleTokens: ['shining'],
             matchedAuthorTokens: ['stephen', 'king'],
-          },
+          }),
         },
         {
           book: {
@@ -318,21 +368,17 @@ describe('candidateScoring', () => {
             source: 'openLibrary' as const,
             sourceId: 'OL456M',
           },
-          scoring: {
+          scoring: createMockScoring({
             score: 0.70, // Gap = 0.20 >= 0.18
             overlapRatio: 0.5,
             coverageRatio: 0.4,
             orderScore: 0.9,
             overlapCount: 2,
-            isbnBonus: 0,
-            isbnMatched: false,
-            penalties: [],
             matchedTokens: ['other'],
             titleOverlap: 0.5,
             authorOverlap: 0.4,
             matchedTitleTokens: ['other'],
-            matchedAuthorTokens: [],
-          },
+          }),
         },
       ];
 
@@ -340,6 +386,122 @@ describe('candidateScoring', () => {
 
       expect(result.decision).toBe('accept_medium');
       expect(result.topCandidate?.scoring.isbnMatched).toBe(false);
+    });
+
+    it('treats duplicate editions as single candidate (gap = 1.0, not ambiguous)', () => {
+      // Multiple editions of the same book should NOT trigger ambiguous
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'The Guardian',
+            authors: ['Nicholas Sparks'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M', // Edition 1
+          },
+          scoring: createMockScoring({
+            score: 0.85,
+            overlapRatio: 0.8,
+            coverageRatio: 0.7,
+            orderScore: 1.0,
+            overlapCount: 3,
+            matchedTokens: ['guardian', 'nicholas', 'sparks'],
+            titleOverlap: 0.8,
+            authorOverlap: 0.7,
+            matchedTitleTokens: ['guardian'],
+            matchedAuthorTokens: ['nicholas', 'sparks'],
+            precision: 0.7,
+            recall: 0.8,
+            f1: 0.75,
+          }),
+        },
+        {
+          book: {
+            title: 'The Guardian', // Same title = same book (different edition)
+            authors: ['Nicholas Sparks'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL456M', // Edition 2
+          },
+          scoring: createMockScoring({
+            score: 0.85, // Same score (editions often score identically)
+            overlapRatio: 0.8,
+            coverageRatio: 0.7,
+            orderScore: 1.0,
+            overlapCount: 3,
+            matchedTokens: ['guardian', 'nicholas', 'sparks'],
+            titleOverlap: 0.8,
+            authorOverlap: 0.7,
+            matchedTitleTokens: ['guardian'],
+            matchedAuthorTokens: ['nicholas', 'sparks'],
+            precision: 0.7,
+            recall: 0.8,
+            f1: 0.75,
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Should NOT be ambiguous - duplicate editions don't count as "distinct"
+      expect(result.manualReview).toBeFalsy();
+      expect(result.scoreGap).toBe(1.0); // No distinct second = dominated
+      expect(result.reason).not.toContain('Ambiguous');
+    });
+
+    it('correctly identifies ambiguous when two DISTINCT books have close scores', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'The Guardian',
+            authors: ['Nicholas Sparks'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.80,
+            overlapRatio: 0.75,
+            coverageRatio: 0.65,
+            orderScore: 1.0,
+            overlapCount: 3,
+            matchedTokens: ['guardian', 'nicholas', 'sparks'],
+            titleOverlap: 0.8,
+            authorOverlap: 0.7,
+            matchedTitleTokens: ['guardian'],
+            matchedAuthorTokens: ['nicholas', 'sparks'],
+            precision: 0.65,
+            recall: 0.75,
+            f1: 0.70,
+          }),
+        },
+        {
+          book: {
+            title: 'Guardian Angels', // DIFFERENT title = distinct book
+            authors: ['Fern Michaels'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL456M',
+          },
+          scoring: createMockScoring({
+            score: 0.78, // Close score (gap = 0.02 < 0.08)
+            overlapRatio: 0.7,
+            coverageRatio: 0.6,
+            orderScore: 0.9,
+            overlapCount: 3,
+            matchedTokens: ['guardian', 'angels'],
+            titleOverlap: 0.7,
+            authorOverlap: 0.0,
+            matchedTitleTokens: ['guardian', 'angels'],
+            precision: 0.6,
+            recall: 0.7,
+            f1: 0.65,
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Should be ambiguous - two DISTINCT books with close scores
+      expect(result.manualReview).toBe(true);
+      expect(result.scoreGap).toBeCloseTo(0.02, 2);
+      expect(result.reason).toBe('ambiguous_candidates');
     });
   });
 
@@ -377,6 +539,391 @@ describe('candidateScoring', () => {
       expect(correctScore.score).toBeGreaterThan(wrongScore.score);
       // Should be high enough for at least manual review
       expect(correctScore.score).toBeGreaterThanOrEqual(SUGGESTED_THRESHOLD);
+    });
+  });
+
+  // =========================================================================
+  // TITLE_ONLY mode tests
+  // =========================================================================
+  describe('TITLE_ONLY resolution mode', () => {
+    it('title correct, author missing -> SUGGESTED (never REJECT)', () => {
+      // Create a candidate where title matches but author doesn't
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'The Shining',
+            authors: ['Stephen King'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.75,
+            titleScore: 0.85, // Strong title match
+            authorScore: 0, // No author match
+            titleTokenCount: 2,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY', // Author missing/weak
+            overlapCount: 2,
+            matchedTitleTokens: ['shining'],
+            matchedAuthorTokens: [], // No author tokens matched
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Must NOT be reject - title matches
+      expect(result.decision).not.toBe('reject');
+      // Should be SUGGESTED or TITLE_ONLY accept
+      expect(['suggested', 'suggested_weak', 'accept_medium']).toContain(result.decision);
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+      // Reason explains the situation (title strong + author missing)
+      expect(result.reason).toBe('title_strong_author_missing');
+    });
+
+    it('title correct, high confidence, few candidates -> TITLE_ONLY accept', () => {
+      // High title score with anti-ambiguity signal (few candidates)
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'The Great Gatsby',
+            authors: ['F. Scott Fitzgerald'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.93,
+            titleScore: 0.95, // Very high title match
+            authorScore: 0.1, // Weak author (triggers TITLE_ONLY)
+            titleTokenCount: 3,
+            authorTokenCount: 3,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 3,
+            matchedTitleTokens: ['great', 'gatsby'],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // With high title score and few candidates (distinctCandidateCount = 1),
+      // should be accepted
+      expect(result.decision).toBe('accept_medium');
+      expect(result.reason).toBe('title_only_high_confidence');
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+    });
+
+    it('title correct but many candidates -> SUGGESTED with ambiguous reason', () => {
+      // High title score but ambiguity (multiple distinct candidates)
+      const firstCandidate: ScoredCandidate = {
+        book: {
+          title: 'The Guardian',
+          authors: ['Nicholas Sparks'],
+          source: 'openLibrary' as const,
+          sourceId: 'OL123M',
+        },
+        scoring: createMockScoring({
+          score: 0.93,
+          titleScore: 0.95,
+          authorScore: 0,
+          titleTokenCount: 2,
+          authorTokenCount: 2,
+          resolutionMode: 'TITLE_ONLY',
+          overlapCount: 2,
+          matchedTitleTokens: ['guardian'],
+          matchedAuthorTokens: [],
+        }),
+      };
+
+      // Add multiple distinct candidates to trigger ambiguity
+      const scoredCandidates: ScoredCandidate[] = [
+        firstCandidate,
+        {
+          book: {
+            title: 'Guardian Angels',
+            authors: ['Fern Michaels'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL456M',
+          },
+          scoring: createMockScoring({
+            score: 0.91, // Close to first (gap < 0.12)
+            titleScore: 0.90,
+            authorScore: 0,
+            titleTokenCount: 2,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+          }),
+        },
+        {
+          book: {
+            title: 'Guardian of the Gate',
+            authors: ['Michelle Zink'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL789M',
+          },
+          scoring: createMockScoring({
+            score: 0.88,
+            titleScore: 0.85,
+            authorScore: 0,
+            titleTokenCount: 2,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+          }),
+        },
+        {
+          book: {
+            title: 'The Guardian Herd',
+            authors: ['Jennifer Lynn Alvarez'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL101M',
+          },
+          scoring: createMockScoring({
+            score: 0.85,
+            titleScore: 0.82,
+            authorScore: 0,
+            titleTokenCount: 2,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // With many candidates (>3) and small margin, should be SUGGESTED
+      expect(result.decision).toBe('suggested');
+      expect(result.reason).toBe('title_only_ambiguous');
+      expect(result.manualReview).toBe(true);
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+    });
+
+    it('wrong title -> REJECT', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'Completely Different Book',
+            authors: ['Unknown Author'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.25,
+            titleScore: 0.20, // Low title match
+            authorScore: 0,
+            titleTokenCount: 3,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 1,
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      expect(result.decision).toBe('reject');
+      expect(result.reason).toBe('low_title_confidence');
+    });
+
+    it('numeric fragments on spine do not affect title/author scoring', () => {
+      // Evidence includes numeric fragments (ISBN, price, etc.)
+      const evidence = buildEvidenceFromLines([
+        'THE SHINING',
+        'STEPHEN KING',
+        '978-0-385-12167-5', // ISBN should be filtered
+        '$14.99',           // Price should be filtered
+        '1234567890',       // Random numbers should be filtered
+      ]);
+
+      const candidate: ResolvedBook = {
+        title: 'The Shining',
+        authors: ['Stephen King'],
+        isbn13: '9780385121675',
+        source: 'openLibrary',
+        sourceId: 'OL123M',
+      };
+
+      const score = scoreCandidate(candidate, evidence);
+
+      // Numeric fragments should not be in matchedTokens
+      expect(score.matchedTokens.every((t) => !/^\d+$/.test(t))).toBe(true);
+
+      // Title and author should still match (not zero)
+      // F1 may be lower due to evidence token count, but should be meaningful
+      expect(score.titleScore).toBeGreaterThan(0.3);
+      expect(score.matchedTitleTokens.length).toBeGreaterThan(0);
+    });
+
+    // =========================================================================
+    // Smoke validation: title_strong_author_missing path
+    // Title score between TITLE_ONLY_SUGGESTED_MIN (0.78) and TITLE_ONLY_ACCEPT_MIN (0.92)
+    // =========================================================================
+    it('title_strong_author_missing -> SUGGESTED (not ACCEPT, not REJECT)', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'Brave New World',
+            authors: ['Aldous Huxley'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.80,
+            titleScore: 0.85, // Above TITLE_ONLY_SUGGESTED_MIN (0.78), below TITLE_ONLY_ACCEPT_MIN (0.92)
+            authorScore: 0,   // No author signal
+            titleTokenCount: 3,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 3,
+            matchedTitleTokens: ['brave', 'new', 'world'],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Should be SUGGESTED, not reject (title is strong)
+      expect(result.decision).toBe('suggested');
+      expect(result.reason).toBe('title_strong_author_missing');
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+      // Should NOT have manualReview flag (not ambiguous, just missing author)
+      expect(result.manualReview).toBeFalsy();
+    });
+
+    // =========================================================================
+    // Smoke validation: title_weak_author_missing path
+    // Title score between TITLE_ONLY_REJECT_BELOW (0.70) and TITLE_ONLY_SUGGESTED_MIN (0.78)
+    // Note: Titles below 0.70 are rejected in TITLE_ONLY mode
+    // =========================================================================
+    it('title_weak_author_missing -> SUGGESTED_WEAK (best guess, not rejected)', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'A Brief History',
+            authors: ['Unknown'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.72,
+            titleScore: 0.72, // Above TITLE_ONLY_REJECT_BELOW (0.70), below TITLE_ONLY_SUGGESTED_MIN (0.78)
+            authorScore: 0,   // No author signal
+            titleTokenCount: 3,
+            authorTokenCount: 1,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+            matchedTitleTokens: ['brief', 'history'],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Should be SUGGESTED_WEAK (UI-only best guess)
+      expect(result.decision).toBe('suggested_weak');
+      expect(result.reason).toBe('title_weak_author_missing');
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+    });
+
+    // =========================================================================
+    // REGRESSION TEST: Title score in [0.45, 0.70) must NOT reject
+    // This was a bug where the early reject check used TITLE_ONLY_REJECT_BELOW (0.70)
+    // instead of SUGGESTED_WEAK_THRESHOLD (0.45), causing false rejects
+    // =========================================================================
+    it('REGRESSION: titleScore in [0.45, 0.70) produces suggested_weak, NOT reject', () => {
+      // Test boundary: titleScore = 0.55 (above 0.45, below 0.70)
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'Some Book Title',
+            authors: ['Unknown Author'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.55,
+            titleScore: 0.55, // In the [0.45, 0.70) range
+            authorScore: 0,
+            titleTokenCount: 3,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+            matchedTitleTokens: ['some', 'book'],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // MUST NOT reject - should be suggested_weak
+      expect(result.decision).not.toBe('reject');
+      expect(result.decision).toBe('suggested_weak');
+      expect(result.resolutionMode).toBe('TITLE_ONLY');
+    });
+
+    it('REGRESSION: titleScore at boundary 0.45 produces suggested_weak', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'Boundary Test',
+            authors: ['Author'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.45,
+            titleScore: 0.45, // Exactly at SUGGESTED_WEAK_THRESHOLD
+            authorScore: 0,
+            titleTokenCount: 2,
+            authorTokenCount: 1,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 2,
+            matchedTitleTokens: ['boundary', 'test'],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // At boundary, should still be suggested_weak
+      expect(result.decision).toBe('suggested_weak');
+    });
+
+    it('REGRESSION: titleScore below 0.45 correctly rejects', () => {
+      const scoredCandidates: ScoredCandidate[] = [
+        {
+          book: {
+            title: 'Very Wrong Book',
+            authors: ['Wrong Author'],
+            source: 'openLibrary' as const,
+            sourceId: 'OL123M',
+          },
+          scoring: createMockScoring({
+            score: 0.30,
+            titleScore: 0.30, // Below SUGGESTED_WEAK_THRESHOLD (0.45)
+            authorScore: 0,
+            titleTokenCount: 3,
+            authorTokenCount: 2,
+            resolutionMode: 'TITLE_ONLY',
+            overlapCount: 1,
+            matchedTitleTokens: [],
+            matchedAuthorTokens: [],
+          }),
+        },
+      ];
+
+      const result = makeDecisionFromScores(scoredCandidates);
+
+      // Below threshold, should reject
+      expect(result.decision).toBe('reject');
+      expect(result.reason).toBe('low_title_confidence');
     });
   });
 });

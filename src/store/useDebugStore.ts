@@ -23,6 +23,22 @@ const debugStorage = new MMKV({
 // Store State
 // ============================================================================
 
+/**
+ * Write stats for books_catalog persistence observability
+ */
+export interface WriteStats {
+  /** Number of upsert attempts */
+  writesAttempted: number;
+  /** Number of successful writes */
+  writesSucceeded: number;
+  /** Number of failed writes */
+  writesFailed: number;
+  /** Last error message (if any) */
+  lastWriteError: string | null;
+  /** Timestamp of last write attempt */
+  lastWriteTime: number | null;
+}
+
 interface DebugState {
   /** Whether diagnostics are enabled by user preference */
   diagnosticsEnabled: boolean;
@@ -32,6 +48,21 @@ interface DebugState {
 
   /** Set diagnostics enabled state (persists to storage) */
   setDiagnosticsEnabled: (enabled: boolean) => void;
+
+  /** Write stats for books_catalog persistence */
+  writeStats: WriteStats;
+
+  /** Record a write attempt */
+  recordWriteAttempt: () => void;
+
+  /** Record a successful write */
+  recordWriteSuccess: () => void;
+
+  /** Record a failed write */
+  recordWriteFailure: (error: string) => void;
+
+  /** Reset write stats */
+  resetWriteStats: () => void;
 }
 
 // ============================================================================
@@ -51,9 +82,18 @@ function loadInitialValue(): boolean {
   }
 }
 
+const initialWriteStats: WriteStats = {
+  writesAttempted: 0,
+  writesSucceeded: 0,
+  writesFailed: 0,
+  lastWriteError: null,
+  lastWriteTime: null,
+};
+
 export const useDebugStore = create<DebugState>((set, get) => ({
   diagnosticsEnabled: loadInitialValue(),
   initialized: true,
+  writeStats: { ...initialWriteStats },
 
   setDiagnosticsEnabled: (enabled: boolean) => {
     const previous = get().diagnosticsEnabled;
@@ -76,5 +116,38 @@ export const useDebugStore = create<DebugState>((set, get) => ({
     } catch (error) {
       console.error('[DiagnosticsToggle] Failed to persist:', error);
     }
+  },
+
+  recordWriteAttempt: () => {
+    set((state) => ({
+      writeStats: {
+        ...state.writeStats,
+        writesAttempted: state.writeStats.writesAttempted + 1,
+        lastWriteTime: Date.now(),
+      },
+    }));
+  },
+
+  recordWriteSuccess: () => {
+    set((state) => ({
+      writeStats: {
+        ...state.writeStats,
+        writesSucceeded: state.writeStats.writesSucceeded + 1,
+      },
+    }));
+  },
+
+  recordWriteFailure: (error: string) => {
+    set((state) => ({
+      writeStats: {
+        ...state.writeStats,
+        writesFailed: state.writeStats.writesFailed + 1,
+        lastWriteError: error,
+      },
+    }));
+  },
+
+  resetWriteStats: () => {
+    set({ writeStats: { ...initialWriteStats } });
   },
 }));

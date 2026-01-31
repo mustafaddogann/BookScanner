@@ -18,6 +18,7 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, PipelineTimings, DebugManifest, ResolvedBook } from '../types';
 import { useAppStore } from '../store/useAppStore';
+import { useDebugStore, type WriteStats } from '../store/useDebugStore';
 import { readDebugManifest } from '../services/debugArtifacts';
 import { testOpenLibraryIsbnResolution, buildResolverKey, OpenLibraryProvider } from '../services/openLibraryProvider';
 import { buildEvidenceTokens } from '../services/evidenceNormalization';
@@ -71,6 +72,8 @@ export function DiagnosticsScreen(): React.JSX.Element {
   const hasSessionId = !!sessionId;
 
   const { sessionMeta } = useAppStore();
+  const writeStats = useDebugStore((state) => state.writeStats);
+  const resetWriteStats = useDebugStore((state) => state.resetWriteStats);
   const [manifest, setManifest] = useState<DebugManifest | null>(null);
   const [loading, setLoading] = useState(hasSessionId);
   const [olSmokeTest, setOlSmokeTest] = useState<SmokeTestResult>({ running: false });
@@ -96,7 +99,7 @@ export function DiagnosticsScreen(): React.JSX.Element {
     errorDetail?: string;
   }>({ running: false });
 
-  // ALWAYS-ON: Log on mount
+  // ALWAYS-ON: Log on mount and auto-fetch catalog count
   useEffect(() => {
     console.log('[DiagnosticsScreen] mounted');
 
@@ -110,6 +113,12 @@ export function DiagnosticsScreen(): React.JSX.Element {
     const anonKeyPrefix = anonKey ? anonKey.slice(0, 20) + '...' : 'not configured';
     console.log(`[Supabase] urlHost=${urlHost} anonKeyPrefix=${anonKeyPrefix}`);
     console.log(`[Supabase] configured=${isSupabaseConfigured()}`);
+
+    // Auto-fetch books_catalog count on mount for clarity
+    if (isSupabaseConfigured()) {
+      runSupabaseSanityCheck();
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   useEffect(() => {
@@ -559,25 +568,108 @@ export function DiagnosticsScreen(): React.JSX.Element {
           </View>
         )}
 
-        {/* Resolver Stats */}
+        {/* Session Candidates Breakdown */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Resolver Decisions</Text>
+          <Text style={styles.sectionTitle}>Session Candidates ({resolverStats.total})</Text>
+          <Text style={styles.sectionSubtitle}>Breakdown by resolver decision</Text>
+
+          {/* Decision breakdown */}
+          <View style={styles.decisionGrid}>
+            <View style={styles.decisionItem}>
+              <Text style={[styles.decisionCount, styles.acceptedValue]}>{resolverStats.accepted}</Text>
+              <Text style={styles.decisionLabel}>Accepted</Text>
+              <Text style={styles.decisionDesc}>Persisted to catalog</Text>
+            </View>
+            <View style={styles.decisionItem}>
+              <Text style={[styles.decisionCount, styles.reviewValue]}>{resolverStats.suggested}</Text>
+              <Text style={styles.decisionLabel}>Suggested</Text>
+              <Text style={styles.decisionDesc}>Not persisted</Text>
+            </View>
+            <View style={styles.decisionItem}>
+              <Text style={[styles.decisionCount, styles.rejectedValue]}>{resolverStats.rejected}</Text>
+              <Text style={styles.decisionLabel}>Rejected</Text>
+              <Text style={styles.decisionDesc}>No match</Text>
+            </View>
+            <View style={styles.decisionItem}>
+              <Text style={[styles.decisionCount, { color: '#8e8e93' }]}>{resolverStats.pending}</Text>
+              <Text style={styles.decisionLabel}>Pending</Text>
+              <Text style={styles.decisionDesc}>Not resolved</Text>
+            </View>
+          </View>
+
+          {/* Catalog count comparison */}
+          <View style={styles.catalogComparison}>
+            <View style={styles.row}>
+              <Text style={styles.label}>books_catalog rows (total)</Text>
+              <Text style={[styles.value, styles.catalogValue]}>
+                {supabaseSanity.checking
+                  ? '...'
+                  : supabaseSanity.rowCount !== undefined
+                    ? supabaseSanity.rowCount.toLocaleString()
+                    : supabaseSanity.error
+                      ? 'Error'
+                      : '-'}
+              </Text>
+            </View>
+            {supabaseSanity.error && (
+              <Text style={styles.catalogError}>{supabaseSanity.error}</Text>
+            )}
+          </View>
+        </View>
+
+        {/* Persistence Observability (Task 3) */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Persistence Stats</Text>
+          <Text style={styles.sectionSubtitle}>books_catalog write tracking</Text>
+
           <View style={styles.row}>
-            <Text style={styles.label}>Accepted (Persisted)</Text>
-            <Text style={[styles.value, styles.acceptedValue]}>{resolverStats.accepted}</Text>
+            <Text style={styles.label}>Writes Attempted</Text>
+            <Text style={styles.value}>{writeStats.writesAttempted}</Text>
           </View>
           <View style={styles.row}>
-            <Text style={styles.label}>Suggested (Not Persisted)</Text>
-            <Text style={[styles.value, styles.reviewValue]}>{resolverStats.suggested}</Text>
+            <Text style={styles.label}>Writes Succeeded</Text>
+            <Text style={[styles.value, styles.acceptedValue]}>{writeStats.writesSucceeded}</Text>
           </View>
           <View style={styles.row}>
-            <Text style={styles.label}>Rejected</Text>
-            <Text style={[styles.value, styles.rejectedValue]}>{resolverStats.rejected}</Text>
+            <Text style={styles.label}>Writes Failed</Text>
+            <Text style={[styles.value, writeStats.writesFailed > 0 ? styles.rejectedValue : {}]}>
+              {writeStats.writesFailed}
+            </Text>
           </View>
-          <View style={styles.row}>
-            <Text style={styles.label}>Pending</Text>
-            <Text style={styles.value}>{resolverStats.pending}</Text>
-          </View>
+
+          {/* Alert if accepts exist but writes failed */}
+          {resolverStats.accepted > 0 && writeStats.writesFailed > 0 && (
+            <View style={styles.writeAlert}>
+              <Text style={styles.writeAlertText}>
+                ⚠️ {writeStats.writesFailed} write(s) failed with {resolverStats.accepted} accept(s)
+              </Text>
+            </View>
+          )}
+
+          {writeStats.lastWriteError && (
+            <View style={styles.row}>
+              <Text style={styles.label}>Last Error</Text>
+              <Text style={[styles.value, styles.rejectedValue]} numberOfLines={2}>
+                {writeStats.lastWriteError}
+              </Text>
+            </View>
+          )}
+
+          {writeStats.lastWriteTime && (
+            <View style={styles.row}>
+              <Text style={styles.label}>Last Write</Text>
+              <Text style={styles.value}>
+                {new Date(writeStats.lastWriteTime).toLocaleTimeString()}
+              </Text>
+            </View>
+          )}
+
+          <TouchableOpacity
+            style={styles.resetButton}
+            onPress={resetWriteStats}
+          >
+            <Text style={styles.resetButtonText}>Reset Stats</Text>
+          </TouchableOpacity>
         </View>
 
         {/* Metadata Resolution */}
@@ -1016,6 +1108,11 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 16,
     fontWeight: '600',
+    marginBottom: 4,
+  },
+  sectionSubtitle: {
+    color: '#8e8e93',
+    fontSize: 12,
     marginBottom: 12,
   },
   row: {
@@ -1086,6 +1183,69 @@ const styles = StyleSheet.create({
   },
   rejectedValue: {
     color: '#FF453A',
+  },
+  // Decision grid styles
+  decisionGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    marginHorizontal: -4,
+    marginBottom: 16,
+  },
+  decisionItem: {
+    width: '50%',
+    padding: 4,
+  },
+  decisionCount: {
+    fontSize: 28,
+    fontWeight: '700',
+    marginBottom: 2,
+  },
+  decisionLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  decisionDesc: {
+    color: '#636366',
+    fontSize: 11,
+  },
+  catalogComparison: {
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: '#2c2c2e',
+  },
+  catalogValue: {
+    color: '#007AFF',
+    fontWeight: '600',
+  },
+  catalogError: {
+    color: '#FF453A',
+    fontSize: 11,
+    marginTop: 4,
+  },
+  writeAlert: {
+    backgroundColor: 'rgba(255, 69, 58, 0.2)',
+    padding: 8,
+    borderRadius: 6,
+    marginTop: 8,
+  },
+  writeAlertText: {
+    color: '#FF453A',
+    fontSize: 12,
+    fontWeight: '500',
+  },
+  resetButton: {
+    backgroundColor: '#2c2c2e',
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginTop: 12,
+    alignSelf: 'flex-start',
+  },
+  resetButtonText: {
+    color: '#8e8e93',
+    fontSize: 12,
+    fontWeight: '500',
   },
   errorTitle: {
     color: '#FF453A',

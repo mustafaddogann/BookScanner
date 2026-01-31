@@ -5,27 +5,52 @@
  * This is the core scoring logic for evidence-driven book resolution.
  */
 
-import type { ResolvedBook } from '../types';
+import type { ResolvedBook, EvidenceSourceKind } from '../types';
 import {
   buildEvidenceTokens,
   normalizeForScoring,
   isGenericTitle,
   type EvidenceTokens,
+  type BuildEvidenceTokensOptions,
 } from './evidenceNormalization';
+import {
+  determineIsbnPolicy,
+  shouldApplyIsbnBoost,
+  validateIsbnChecksum,
+} from './isbnUtils';
+import { isMetadataVerboseDebug } from '../config/debug';
+import { levenshteinSimilarity, FUZZY_MATCH_THRESHOLD } from './tokenSetFuzzyScoring';
 import {
   ACCEPT_HIGH_THRESHOLD as CONFIG_ACCEPT_HIGH,
   ACCEPT_MEDIUM_THRESHOLD as CONFIG_ACCEPT_MEDIUM,
   ACCEPT_MEDIUM_GAP as CONFIG_ACCEPT_MEDIUM_GAP,
   ACCEPT_MEDIUM_MIN_OVERLAP as CONFIG_MIN_OVERLAP,
   SUGGESTED_THRESHOLD as CONFIG_SUGGESTED,
+  SUGGESTED_AUTHOR_THRESHOLD as CONFIG_SUGGESTED_AUTHOR,
+  SUGGESTED_AUTHOR_MIN_OVERLAP as CONFIG_SUGGESTED_AUTHOR_MIN_OVERLAP,
+  SUGGESTED_WEAK_THRESHOLD as CONFIG_SUGGESTED_WEAK,
+  SUGGESTED_WEAK_MIN_OVERLAP as CONFIG_SUGGESTED_WEAK_MIN_OVERLAP,
+  MANUAL_REVIEW_THRESHOLD as CONFIG_MANUAL_REVIEW,
+  MANUAL_REVIEW_MAX_GAP as CONFIG_MANUAL_REVIEW_GAP,
+  MANUAL_REVIEW_MIN_OVERLAP as CONFIG_MANUAL_REVIEW_MIN_OVERLAP,
   MIN_OVERLAP_COUNT as CONFIG_MIN_OVERLAP_COUNT,
   MIN_SIGNAL_SCORE_CAP as CONFIG_MIN_SIGNAL_CAP,
   ISBN_BONUS as CONFIG_ISBN_BONUS,
   GENERIC_TITLE_PENALTY as CONFIG_GENERIC_PENALTY,
-  OVERLAP_WEIGHT as CONFIG_OVERLAP_WEIGHT,
-  COVERAGE_WEIGHT as CONFIG_COVERAGE_WEIGHT,
-  ORDER_WEIGHT as CONFIG_ORDER_WEIGHT,
   MAX_REVIEW_CANDIDATES as CONFIG_MAX_REVIEW,
+  // TITLE_ONLY mode thresholds
+  TITLE_ONLY_AUTHOR_THRESHOLD,
+  TITLE_ONLY_ACCEPT_MIN,
+  TITLE_ONLY_SUGGESTED_MIN,
+  TITLE_ONLY_MARGIN_MIN,
+  TITLE_ONLY_MAX_CANDIDATES,
+  TITLE_ONLY_PUBLISHER_MIN,
+  TITLE_ONLY_MIN_TOKENS,
+  TITLE_ONLY_REJECT_BELOW,
+  // FULL_MATCH mode thresholds
+  FULL_MATCH_TITLE_MIN,
+  FULL_MATCH_AUTHOR_MIN,
+  FULL_MATCH_OVERALL_MIN,
 } from '../config/metadataResolutionConfig';
 
 // ============================================================================
@@ -33,28 +58,67 @@ import {
 // ============================================================================
 
 /**
+ * Resolution mode determines which scoring path to use
+ *
+ * - FULL_MATCH: Both title and author evidence available and reliable
+ * - TITLE_ONLY: Author missing or unreliable, stricter title matching required
+ * - NO_MATCH: Insufficient evidence to attempt matching
+ */
+export type ResolutionMode = 'FULL_MATCH' | 'TITLE_ONLY' | 'NO_MATCH';
+
+/**
+ * Ambiguity metrics for anti-false-positive safeguards
+ */
+export interface AmbiguityMetrics {
+  /** Score of top candidate */
+  top1Score: number;
+  /** Score of second distinct candidate (0 if none) */
+  top2Score: number;
+  /** Gap between top1 and top2 */
+  margin: number;
+  /** Number of distinct book candidates (different titles) */
+  distinctCandidateCount: number;
+  /** True if title is unique (few candidates OR large margin) */
+  titleUniqueness: boolean;
+}
+
+/**
  * Score breakdown for a candidate
  *
- * New scoring formula:
- * - overlapRatio = |intersect(candidateTokens, evidenceTokens)| / |candidateTokens|
- * - coverageRatio = |intersect| / |evidenceTokens|
- * - orderScore = 1.0 if first token of title is in evidence, else 0.9
- * - combinedScore = 0.5 * overlapRatio + 0.3 * coverageRatio + 0.2 * orderScore
+ * Scoring formula (set-based F1):
+ * - precision = overlap / |evidenceTokens|
+ * - recall    = overlap / |candidateTokens|
+ * - f1        = 2 * P * R / (P + R)
+ * - score     = f1 + ISBN bonus - penalties
  * - If overlapCount < 2 => score capped at 0.10 (minimum signal required)
- * - Generic-title penalty: if title is single common word, deduct 0.15
+ * - Generic-title penalty: apply only if title is generic and no author signal
  * - ISBN match bonus: +0.15
+ *
+ * IMPORTANT: We track both rawScore and finalScore for debugging:
+ * - rawScore: F1 + ISBN bonus (before min-signal cap and generic penalty)
+ * - finalScore: After all penalties and caps (used for decision gates)
  */
 export interface CandidateScore {
-  /** Overall composite score [0-1] */
+  /** Overall composite score [0-1] (alias for finalScore) */
   score: number;
-  /** Token overlap ratio: |intersect| / |candidateTokens| */
+  /** Raw score before min-signal cap (F1 + ISBN bonus) */
+  rawScore: number;
+  /** Final score after all penalties (used for decision) */
+  finalScore: number;
+  /** Recall (overlap / |candidateTokens|) */
   overlapRatio: number;
-  /** Coverage ratio: |intersect| / |evidenceTokens| */
+  /** Precision (overlap / |evidenceTokens|) */
   coverageRatio: number;
   /** Order score (1.0 if first title token in evidence, else 0.9) */
   orderScore: number;
   /** Number of overlapping tokens */
   overlapCount: number;
+  /** Precision = overlap / |evidenceTokens| */
+  precision: number;
+  /** Recall = overlap / |candidateTokens| */
+  recall: number;
+  /** F1 score */
+  f1: number;
   /** ISBN match bonus */
   isbnBonus: number;
   /** Penalties applied */
@@ -63,6 +127,25 @@ export interface CandidateScore {
   matchedTokens: string[];
   /** Was ISBN matched */
   isbnMatched: boolean;
+  /** Was score capped due to low overlap (min-signal rule) */
+  minSignalCapped: boolean;
+
+  // =========================================================================
+  // TITLE_ONLY mode fields
+  // =========================================================================
+
+  /** Title-specific score [0-1] (F1 on title tokens only) */
+  titleScore: number;
+  /** Author-specific score [0-1] (F1 on author tokens only), null if no author tokens */
+  authorScore: number | null;
+  /** Number of title tokens that matched */
+  titleTokenCount: number;
+  /** Number of author tokens in candidate (0 if none) */
+  authorTokenCount: number;
+  /** Resolution mode determined for this candidate */
+  resolutionMode: ResolutionMode;
+  /** Publisher score if available [0-1] */
+  publisherScore: number | null;
 
   // Legacy fields for backwards compatibility
   titleOverlap: number;
@@ -94,15 +177,6 @@ export interface ScoredCandidate {
 // Configuration (from centralized config)
 // ============================================================================
 
-/** Weight for overlap ratio in combined score */
-const OVERLAP_WEIGHT = CONFIG_OVERLAP_WEIGHT;
-
-/** Weight for coverage ratio in combined score */
-const COVERAGE_WEIGHT = CONFIG_COVERAGE_WEIGHT;
-
-/** Weight for order score in combined score */
-const ORDER_WEIGHT = CONFIG_ORDER_WEIGHT;
-
 /** Bonus for ISBN match */
 const ISBN_BONUS = CONFIG_ISBN_BONUS;
 
@@ -115,70 +189,79 @@ const MIN_OVERLAP_COUNT = CONFIG_MIN_OVERLAP_COUNT;
 /** Maximum score when overlap is below minimum */
 const MIN_SIGNAL_SCORE_CAP = CONFIG_MIN_SIGNAL_CAP;
 
+let hasLoggedScoringDebug = false;
+
 // ============================================================================
 // Scoring Functions
 // ============================================================================
 
 /**
  * Calculate overlap between candidate tokens and evidence tokens
+ * Uses fuzzy Levenshtein matching (threshold >= 0.84) for noise tolerance.
  *
  * @returns Object with:
- * - overlapRatio: |intersect| / |candidateTokens|
- * - coverageRatio: |intersect| / |evidenceTokens|
  * - overlapCount: number of matching tokens
  * - matched: array of matched tokens
+ * - matchedPairs: debug info showing which tokens matched
  */
 function calculateTokenOverlap(
   candidateTokens: string[],
   evidenceTokenSet: Set<string>
 ): {
-  overlapRatio: number;
-  coverageRatio: number;
   overlapCount: number;
   matched: string[];
+  matchedPairs: Array<{ candidate: string; evidence: string; similarity: number }>;
 } {
-  if (candidateTokens.length === 0) {
-    return { overlapRatio: 0, coverageRatio: 0, overlapCount: 0, matched: [] };
+  if (candidateTokens.length === 0 || evidenceTokenSet.size === 0) {
+    return { overlapCount: 0, matched: [], matchedPairs: [] };
   }
 
-  if (evidenceTokenSet.size === 0) {
-    return { overlapRatio: 0, coverageRatio: 0, overlapCount: 0, matched: [] };
-  }
+  const matchedSet = new Set<string>();
+  const usedEvidenceTokens = new Set<string>();
+  const evidenceTokens = Array.from(evidenceTokenSet);
+  const matchedPairs: Array<{ candidate: string; evidence: string; similarity: number }> = [];
 
-  const matched: string[] = [];
+  // For each candidate token, find best matching evidence token
+  for (const candidateToken of candidateTokens) {
+    let bestMatch: string | null = null;
+    let bestSimilarity = 0;
 
-  // Exact matches
-  for (const token of candidateTokens) {
-    if (evidenceTokenSet.has(token) && !matched.includes(token)) {
-      matched.push(token);
+    for (const evidenceToken of evidenceTokens) {
+      // Skip already-used evidence tokens (1:1 matching)
+      if (usedEvidenceTokens.has(evidenceToken)) continue;
+
+      // Quick exact match check
+      if (candidateToken === evidenceToken) {
+        bestMatch = evidenceToken;
+        bestSimilarity = 1.0;
+        break;
+      }
+
+      // Fuzzy Levenshtein match
+      const similarity = levenshteinSimilarity(candidateToken, evidenceToken);
+      if (similarity > bestSimilarity) {
+        bestSimilarity = similarity;
+        bestMatch = evidenceToken;
+      }
+    }
+
+    // Count as overlap if similarity >= threshold
+    if (bestMatch && bestSimilarity >= FUZZY_MATCH_THRESHOLD) {
+      matchedSet.add(candidateToken);
+      usedEvidenceTokens.add(bestMatch);
+      matchedPairs.push({
+        candidate: candidateToken,
+        evidence: bestMatch,
+        similarity: bestSimilarity,
+      });
     }
   }
 
-  // Partial matches (substring matching for compound words, min 4 chars)
-  for (const evidenceToken of evidenceTokenSet) {
-    for (const candidateToken of candidateTokens) {
-      if (matched.includes(candidateToken)) {
-        continue;
-      }
-      if (
-        evidenceToken.length >= 4 &&
-        candidateToken.length >= 4 &&
-        (evidenceToken.includes(candidateToken) || candidateToken.includes(evidenceToken))
-      ) {
-        matched.push(candidateToken);
-      }
-    }
-  }
-
-  const overlapCount = matched.length;
-  const overlapRatio = overlapCount / candidateTokens.length;
-  const coverageRatio = overlapCount / evidenceTokenSet.size;
-
+  const matched = Array.from(matchedSet);
   return {
-    overlapRatio: Math.min(1, overlapRatio),
-    coverageRatio: Math.min(1, coverageRatio),
-    overlapCount,
+    overlapCount: matched.length,
     matched,
+    matchedPairs,
   };
 }
 
@@ -199,18 +282,41 @@ function calculateOrderScore(titleTokens: string[], evidenceTokenSet: Set<string
 }
 
 /**
+ * Options for scoring candidates
+ */
+export interface ScoringOptions {
+  /**
+   * Source kind for ISBN policy (default: 'spine_crop')
+   * - spine_crop: ISBN is non-fatal noise, never used for scoring boost
+   * - back_cover/inside_page: Valid ISBN triggers lookup and boost
+   * - unknown: Conservative, treat as spine_crop
+   */
+  sourceKind?: EvidenceSourceKind;
+}
+
+/**
  * Score a single candidate against evidence
  *
- * New scoring formula:
- * combinedScore = 0.5 * overlapRatio + 0.3 * coverageRatio + 0.2 * orderScore
- * + ISBN bonus (0.15) - generic title penalty (0.15)
+ * Scoring formula:
+ * score = F1(precision, recall) + ISBN bonus - penalties
+ * precision = overlap / |evidenceTokens|
+ * recall    = overlap / |candidateTokens|
+ * f1        = 2 * P * R / (P + R)
  *
  * If overlapCount < 2, score is capped at 0.10 (minimum signal required)
+ *
+ * ISBN POLICY:
+ * - For spine_crop: ISBN is NEVER used for scoring (noise from spine OCR)
+ * - For back_cover/inside_page: Valid ISBN match adds bonus
+ * - ISBN can only INCREASE confidence, never decrease it
+ * - Missing/invalid ISBN is NOT a penalty in any case
  */
 export function scoreCandidate(
   candidate: ResolvedBook,
-  evidenceTokens: EvidenceTokens
+  evidenceTokens: EvidenceTokens,
+  options?: ScoringOptions
 ): CandidateScore {
+  const sourceKind: EvidenceSourceKind = options?.sourceKind ?? 'spine_crop';
   const penalties: ScorePenalty[] = [];
 
   // Get title tokens (using aggressive normalization)
@@ -229,22 +335,54 @@ export function scoreCandidate(
     }
   }
 
-  // Combine title + author tokens for overlap calculation
-  const candidateTokens = [...titleTokens, ...authorTokens];
+  const titleTokenSet = new Set(titleTokens);
+  const authorTokenSet = new Set(authorTokens);
+  const candidateTokenSet = new Set([...titleTokenSet, ...authorTokenSet]);
+  const candidateTokens = Array.from(candidateTokenSet);
 
-  // Calculate overlap metrics
+  // Calculate overlap metrics (set-based)
   const overlapResult = calculateTokenOverlap(candidateTokens, evidenceTokens.tokensSet);
 
-  // Calculate order score based on title's first token
-  const orderScore = calculateOrderScore(titleTokens, evidenceTokens.tokensSet);
+  // Calculate order score based on title's first token (for diagnostics only)
+  const orderScore = calculateOrderScore(Array.from(titleTokenSet), evidenceTokens.tokensSet);
 
-  // ISBN matching
+  const evidenceTokenCount = evidenceTokens.tokensSet.size;
+  const candidateTokenCount = candidateTokens.length;
+  const precision =
+    evidenceTokenCount > 0 ? overlapResult.overlapCount / evidenceTokenCount : 0;
+  const recall =
+    candidateTokenCount > 0 ? overlapResult.overlapCount / candidateTokenCount : 0;
+  const f1 =
+    precision + recall > 0 ? (2 * precision * recall) / (precision + recall) : 0;
+
+  // ISBN matching with source-aware policy
+  // IMPORTANT: ISBN can only INCREASE confidence, never decrease it
+  // For spine_crop: ISBN is noise, never use for scoring
+  // For back_cover/inside_page: ISBN match adds bonus
   let isbnBonus = 0;
   let isbnMatched = false;
 
-  if (evidenceTokens.isbns.length > 0) {
+  // Get valid ISBNs from evidence (checksum-validated)
+  const validEvidenceIsbns = evidenceTokens.isbns.filter((isbn) =>
+    validateIsbnChecksum(isbn)
+  );
+
+  // Determine ISBN policy based on source kind
+  // Note: We pass an empty array for validIsbns since we just need the policy type
+  const isbnPolicy = determineIsbnPolicy(
+    sourceKind,
+    validEvidenceIsbns.map((isbn) => ({
+      raw: isbn,
+      normalized: isbn,
+      type: isbn.length === 10 ? 'isbn10' as const : 'isbn13' as const,
+      checksumValid: true,
+    }))
+  );
+
+  // Only apply ISBN bonus if policy allows it AND we have valid ISBNs
+  if (shouldApplyIsbnBoost(isbnPolicy) && validEvidenceIsbns.length > 0) {
     const candidateIsbns = [candidate.isbn13, candidate.isbn10].filter(Boolean) as string[];
-    for (const evidenceIsbn of evidenceTokens.isbns) {
+    for (const evidenceIsbn of validEvidenceIsbns) {
       for (const candidateIsbn of candidateIsbns) {
         if (evidenceIsbn === candidateIsbn) {
           isbnBonus = ISBN_BONUS;
@@ -255,22 +393,65 @@ export function scoreCandidate(
       if (isbnMatched) break;
     }
   }
+  // NOTE: If isbnPolicy === 'ignore' (spine_crop), we don't even check for matches
+  // This ensures ISBN from spine OCR is never used for scoring
 
-  // Generic title penalty
-  if (candidate.title && isGenericTitle(candidate.title)) {
+  // Compute title and author overlaps separately
+  const titleOnlyResult = calculateTokenOverlap(Array.from(titleTokenSet), evidenceTokens.tokensSet);
+  const authorOnlyResult = calculateTokenOverlap(Array.from(authorTokenSet), evidenceTokens.tokensSet);
+
+  // Calculate title-specific F1 score
+  const titleTokenCount = titleTokenSet.size;
+  const titlePrecision =
+    evidenceTokenCount > 0 ? titleOnlyResult.overlapCount / evidenceTokenCount : 0;
+  const titleRecall =
+    titleTokenCount > 0 ? titleOnlyResult.overlapCount / titleTokenCount : 0;
+  const titleScore =
+    titlePrecision + titleRecall > 0
+      ? (2 * titlePrecision * titleRecall) / (titlePrecision + titleRecall)
+      : 0;
+
+  // Calculate author-specific F1 score (null if no author tokens in candidate)
+  const authorTokenCount = authorTokenSet.size;
+  let authorScore: number | null = null;
+  if (authorTokenCount > 0) {
+    const authorPrecision =
+      evidenceTokenCount > 0 ? authorOnlyResult.overlapCount / evidenceTokenCount : 0;
+    const authorRecall = authorOnlyResult.overlapCount / authorTokenCount;
+    authorScore =
+      authorPrecision + authorRecall > 0
+        ? (2 * authorPrecision * authorRecall) / (authorPrecision + authorRecall)
+        : 0;
+  }
+
+  // Determine resolution mode:
+  // - TITLE_ONLY if author tokens missing OR authorScore < TITLE_ONLY_AUTHOR_THRESHOLD
+  // - FULL_MATCH otherwise
+  // - NO_MATCH if title tokens < TITLE_ONLY_MIN_TOKENS
+  let resolutionMode: ResolutionMode = 'FULL_MATCH';
+  if (titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
+    resolutionMode = 'NO_MATCH';
+  } else if (authorScore === null || authorScore < TITLE_ONLY_AUTHOR_THRESHOLD) {
+    resolutionMode = 'TITLE_ONLY';
+  }
+
+  // Publisher score (not available from Open Library yet, stub for future use)
+  const publisherScore: number | null = null;
+
+  // Generic title penalty (only when no author signal)
+  if (candidate.title && isGenericTitle(candidate.title) && authorOnlyResult.matched.length === 0) {
     penalties.push({
       type: 'generic_title',
       amount: GENERIC_TITLE_PENALTY,
-      reason: `Title "${candidate.title}" is a generic single word`,
+      reason: `Title "${candidate.title}" is a generic single word without author signal`,
     });
   }
 
-  // Calculate combined score using new formula
-  let score =
-    OVERLAP_WEIGHT * overlapResult.overlapRatio +
-    COVERAGE_WEIGHT * overlapResult.coverageRatio +
-    ORDER_WEIGHT * orderScore +
-    isbnBonus;
+  // Calculate combined score using F1
+  // rawScore = F1 + ISBN bonus (before penalties and caps)
+  const rawScore = f1 + isbnBonus;
+
+  let score = rawScore;
 
   // Apply penalties
   for (const penalty of penalties) {
@@ -278,30 +459,65 @@ export function scoreCandidate(
   }
 
   // Minimum signal check: if overlap < 2, cap score at 0.10
+  let minSignalCapped = false;
   if (overlapResult.overlapCount < MIN_OVERLAP_COUNT) {
+    if (score > MIN_SIGNAL_SCORE_CAP) {
+      minSignalCapped = true;
+    }
     score = Math.min(score, MIN_SIGNAL_SCORE_CAP);
   }
 
   // Clamp to [0, 1]
   score = Math.max(0, Math.min(1, score));
 
-  // Compute legacy title/author overlaps for backwards compat
-  const titleOnlyResult = calculateTokenOverlap(titleTokens, evidenceTokens.tokensSet);
-  const authorOnlyResult = calculateTokenOverlap(authorTokens, evidenceTokens.tokensSet);
+  // finalScore = score after all penalties and caps
+  const finalScore = score;
+
+  if (isMetadataVerboseDebug() && !hasLoggedScoringDebug) {
+    hasLoggedScoringDebug = true;
+    const overlapTokens = overlapResult.matched;
+    console.log('[ScoringDebug] candidate:', {
+      title: candidate.title,
+      authors: candidate.authors,
+      evidenceTokens: Array.from(evidenceTokens.tokensSet),
+      candidateTokens: candidateTokens,
+      overlapTokens,
+      overlapCount: overlapResult.overlapCount,
+      precision: Number(precision.toFixed(3)),
+      recall: Number(recall.toFixed(3)),
+      f1: Number(f1.toFixed(3)),
+      isbnMatched,
+      isbnBonus,
+      penalties,
+    });
+  }
 
   return {
-    score,
-    overlapRatio: overlapResult.overlapRatio,
-    coverageRatio: overlapResult.coverageRatio,
+    score: finalScore,
+    rawScore,
+    finalScore,
+    overlapRatio: recall,
+    coverageRatio: precision,
     orderScore,
     overlapCount: overlapResult.overlapCount,
+    precision,
+    recall,
+    f1,
     isbnBonus,
     penalties,
     matchedTokens: overlapResult.matched,
     isbnMatched,
+    minSignalCapped,
+    // TITLE_ONLY mode fields
+    titleScore,
+    authorScore,
+    titleTokenCount,
+    authorTokenCount,
+    resolutionMode,
+    publisherScore,
     // Legacy fields
-    titleOverlap: titleOnlyResult.overlapRatio,
-    authorOverlap: authorOnlyResult.overlapRatio,
+    titleOverlap: titleOnlyResult.overlapCount / Math.max(1, titleTokenSet.size),
+    authorOverlap: authorOnlyResult.overlapCount / Math.max(1, authorTokenSet.size),
     matchedTitleTokens: titleOnlyResult.matched,
     matchedAuthorTokens: authorOnlyResult.matched,
   };
@@ -309,14 +525,19 @@ export function scoreCandidate(
 
 /**
  * Score and rank multiple candidates
+ *
+ * @param candidates - Books to score
+ * @param evidenceTokens - Tokenized evidence
+ * @param options - Scoring options including sourceKind for ISBN policy
  */
 export function scoreAndRankCandidates(
   candidates: ResolvedBook[],
-  evidenceTokens: EvidenceTokens
+  evidenceTokens: EvidenceTokens,
+  options?: ScoringOptions
 ): ScoredCandidate[] {
   const scored: ScoredCandidate[] = candidates.map((book) => ({
     book,
-    scoring: scoreCandidate(book, evidenceTokens),
+    scoring: scoreCandidate(book, evidenceTokens, options),
   }));
 
   // Sort by score descending
@@ -328,8 +549,11 @@ export function scoreAndRankCandidates(
 /**
  * Build evidence tokens from raw lines (convenience wrapper)
  */
-export function buildEvidenceFromLines(lines: string[]): EvidenceTokens {
-  return buildEvidenceTokens(lines);
+export function buildEvidenceFromLines(
+  lines: string[],
+  options?: BuildEvidenceTokensOptions
+): EvidenceTokens {
+  return buildEvidenceTokens(lines, options);
 }
 
 // ============================================================================
@@ -338,9 +562,10 @@ export function buildEvidenceFromLines(lines: string[]): EvidenceTokens {
 
 /**
  * Decision Gates:
- * - accept_high: ISBN matched AND topScore >= 0.70 (persisted to Supabase)
- * - accept_medium: topScore >= 0.82 AND gap >= 0.18 AND overlapCount >= 3 (persisted)
- * - suggested: topScore >= 0.55 (NOT persisted, shown to user, optional review)
+ * - accepted: score >= 0.88 AND overlapCount >= 3 AND (gap >= 0.12 OR ISBN match)
+ * - suggested: score >= 0.60 AND overlapCount >= 3
+ *   OR score >= 0.70 AND overlapCount >= 2 AND author signal present
+ * - manual_review: score >= 0.75 AND overlapCount >= 3 AND gap <= 0.08 (ambiguity only)
  * - reject: else (no viable match)
  */
 
@@ -359,8 +584,26 @@ export const ACCEPT_MEDIUM_MIN_OVERLAP = CONFIG_MIN_OVERLAP;
 /** Minimum score for suggested (replaces manual_review) */
 export const SUGGESTED_THRESHOLD = CONFIG_SUGGESTED;
 
-/** @deprecated Use SUGGESTED_THRESHOLD */
-export const MANUAL_REVIEW_THRESHOLD = SUGGESTED_THRESHOLD;
+/** Alternate suggested threshold when author signal exists */
+export const SUGGESTED_AUTHOR_THRESHOLD = CONFIG_SUGGESTED_AUTHOR;
+
+/** Minimum overlap for alternate suggested path */
+export const SUGGESTED_AUTHOR_MIN_OVERLAP = CONFIG_SUGGESTED_AUTHOR_MIN_OVERLAP;
+
+/** Weak suggested threshold (UI-only, never persisted) */
+export const SUGGESTED_WEAK_THRESHOLD = CONFIG_SUGGESTED_WEAK;
+
+/** Minimum overlap for weak suggested path */
+export const SUGGESTED_WEAK_MIN_OVERLAP = CONFIG_SUGGESTED_WEAK_MIN_OVERLAP;
+
+/** Manual review threshold (ambiguity only) */
+export const MANUAL_REVIEW_THRESHOLD = CONFIG_MANUAL_REVIEW;
+
+/** Manual review max gap */
+export const MANUAL_REVIEW_MAX_GAP = CONFIG_MANUAL_REVIEW_GAP;
+
+/** Manual review minimum overlap */
+export const MANUAL_REVIEW_MIN_OVERLAP = CONFIG_MANUAL_REVIEW_MIN_OVERLAP;
 
 /** Maximum candidates to return for manual review */
 export const MAX_REVIEW_CANDIDATES = CONFIG_MAX_REVIEW;
@@ -373,9 +616,10 @@ export const AUTO_ACCEPT_THRESHOLD = ACCEPT_HIGH_THRESHOLD;
  * - accept_high: ISBN match + high score (persisted)
  * - accept_medium: high score + dominance (persisted)
  * - suggested: moderate score, shown but NOT persisted
+ * - suggested_weak: low score but some signal, shown but NEVER persisted (UI-only best guess)
  * - reject: no viable match
  */
-export type ScoringDecision = 'accept_high' | 'accept_medium' | 'suggested' | 'reject';
+export type ScoringDecision = 'accept_high' | 'accept_medium' | 'suggested' | 'suggested_weak' | 'reject';
 
 /**
  * Decision result with full context
@@ -388,21 +632,56 @@ export interface DecisionResult {
   scoreGap: number;
   /** Explanation for the decision */
   reason: string;
+  /** Whether this should trigger manual review (ambiguity only) */
+  manualReview?: boolean;
+  /** Resolution mode used for decision (FULL_MATCH, TITLE_ONLY, NO_MATCH) */
+  resolutionMode?: ResolutionMode;
+  /** Ambiguity metrics for anti-false-positive safeguards */
+  ambiguityMetrics?: AmbiguityMetrics;
 }
 
 /**
  * Make a decision based on scored candidates
  *
  * Decision Gates:
- * - accept_high: ISBN matched AND topScore >= 0.70 (persisted)
- * - accept_medium: topScore >= 0.82 AND gap >= 0.18 AND overlapCount >= 3 (persisted)
+ * - accept_high: ISBN matched AND topScore >= 0.65 (persisted)
+ * - accept_medium: topScore >= 0.80 AND gap >= 0.15 AND overlapCount >= 2 (persisted)
  *   (demoted to suggested if generic title and no author signal)
- * - suggested: topScore >= 0.55 (NOT persisted, shown to user)
+ * - suggested: topScore >= 0.55 AND overlapCount >= 2 (NOT persisted, shown to user)
  * - reject: else
  *
  * @param scoredCandidates - Candidates sorted by score descending
  * @param isAfterBoostPass - If true, we've already tried boost pass
  */
+/**
+ * Check if two candidates are the same book (by normalized title).
+ * Used to find distinct second candidate for gap computation.
+ */
+function isSameBook(a: ScoredCandidate, b: ScoredCandidate): boolean {
+  const normalizeTitle = (t: string) =>
+    t.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const titleA = normalizeTitle(a.book.title || '');
+  const titleB = normalizeTitle(b.book.title || '');
+  // Same title = same book (even if different editions/OLIDs)
+  return titleA === titleB && titleA.length > 0;
+}
+
+/**
+ * Find the first distinct second candidate (different book from top).
+ * Returns null if no distinct candidate exists.
+ */
+function findDistinctSecond(
+  top: ScoredCandidate,
+  candidates: ScoredCandidate[]
+): ScoredCandidate | null {
+  for (let i = 1; i < candidates.length; i++) {
+    if (!isSameBook(top, candidates[i])) {
+      return candidates[i];
+    }
+  }
+  return null; // No distinct second = top is dominant
+}
+
 export function makeDecisionFromScores(
   scoredCandidates: ScoredCandidate[],
   isAfterBoostPass: boolean = false
@@ -414,77 +693,261 @@ export function makeDecisionFromScores(
       reviewCandidates: [],
       scoreGap: 0,
       reason: 'No candidates found',
+      resolutionMode: 'NO_MATCH',
     };
   }
 
   const top = scoredCandidates[0];
-  const second = scoredCandidates.length > 1 ? scoredCandidates[1] : null;
-  const scoreGap = second ? top.scoring.score - second.scoring.score : 1.0;
+  // Find distinct second candidate (different book, not just different edition)
+  const distinctSecond = findDistinctSecond(top, scoredCandidates);
+  // Gap = 1.0 if no distinct competitor (dominant by default)
+  const scoreGap = distinctSecond
+    ? top.scoring.score - distinctSecond.scoring.score
+    : 1.0;
 
-  // Get alternatives for suggested decisions (top 3)
-  const alternatives = scoredCandidates
-    .slice(1, 4)
-    .filter((c) => c.scoring.score >= SUGGESTED_THRESHOLD * 0.8);
+  // Count distinct candidates for ambiguity metrics
+  const normalizeTitle = (t: string) =>
+    t.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const seenTitles = new Set<string>();
+  seenTitles.add(normalizeTitle(top.book.title || ''));
+  let distinctCandidateCount = 1;
+  for (let i = 1; i < scoredCandidates.length; i++) {
+    const normalizedTitle = normalizeTitle(scoredCandidates[i].book.title || '');
+    if (!seenTitles.has(normalizedTitle)) {
+      seenTitles.add(normalizedTitle);
+      distinctCandidateCount++;
+    }
+  }
 
-  // accept_high: ISBN matched AND topScore >= 0.70
-  if (top.scoring.isbnMatched && top.scoring.score >= ACCEPT_HIGH_THRESHOLD) {
+  // Build ambiguity metrics
+  const ambiguityMetrics: AmbiguityMetrics = {
+    top1Score: top.scoring.score,
+    top2Score: distinctSecond?.scoring.score ?? 0,
+    margin: scoreGap,
+    distinctCandidateCount,
+    titleUniqueness:
+      distinctCandidateCount <= TITLE_ONLY_MAX_CANDIDATES ||
+      scoreGap >= TITLE_ONLY_MARGIN_MIN,
+  };
+
+  // Alternatives for manual review: distinct candidates only (skip duplicates)
+  const distinctAlternatives: ScoredCandidate[] = [];
+  const seenAltTitles = new Set<string>();
+  seenAltTitles.add(normalizeTitle(top.book.title || ''));
+  for (let i = 1; i < scoredCandidates.length && distinctAlternatives.length < MAX_REVIEW_CANDIDATES; i++) {
+    const candidate = scoredCandidates[i];
+    const normalizedTitle = normalizeTitle(candidate.book.title || '');
+    if (!seenAltTitles.has(normalizedTitle)) {
+      seenAltTitles.add(normalizedTitle);
+      distinctAlternatives.push(candidate);
+    }
+  }
+  const alternatives = distinctAlternatives;
+
+  // Get resolution mode from top candidate
+  const resolutionMode = top.scoring.resolutionMode;
+  const titleScore = top.scoring.titleScore;
+  const authorScore = top.scoring.authorScore;
+  const titleTokenCount = top.scoring.titleTokenCount;
+  const publisherScore = top.scoring.publisherScore;
+  const hasAuthorSignal = top.scoring.matchedAuthorTokens.length >= 1;
+
+  // ==========================================================================
+  // DECISION PATH: Route based on resolution mode
+  // ==========================================================================
+
+  if (resolutionMode === 'NO_MATCH') {
+    // Insufficient evidence to match
     return {
-      decision: 'accept_high',
+      decision: 'reject',
       topCandidate: top,
       reviewCandidates: [],
       scoreGap,
-      reason: `ISBN match with score ${formatScore(top.scoring.score)} >= ${formatScore(ACCEPT_HIGH_THRESHOLD)}`,
+      reason: 'insufficient_title_evidence',
+      resolutionMode,
+      ambiguityMetrics,
     };
   }
 
-  // accept_medium: topScore >= 0.82 AND gap >= 0.18 AND overlapCount >= 3
-  if (
-    top.scoring.score >= ACCEPT_MEDIUM_THRESHOLD &&
-    scoreGap >= ACCEPT_MEDIUM_GAP &&
-    top.scoring.overlapCount >= ACCEPT_MEDIUM_MIN_OVERLAP
-  ) {
-    // Generic-title demotion: if title is generic and no strong author signal, demote to suggested
-    const hasGenericTitlePenalty = top.scoring.penalties.some((p) => p.type === 'generic_title');
-    const hasAuthorSignal = top.scoring.matchedAuthorTokens.length >= 1;
+  // ==========================================================================
+  // FULL_MATCH PATH: Both title and author available
+  // ==========================================================================
+  if (resolutionMode === 'FULL_MATCH') {
+    // Standard acceptance gates (existing logic, improved reasons)
+    const isAccepted =
+      top.scoring.score >= ACCEPT_MEDIUM_THRESHOLD &&
+      top.scoring.overlapCount >= ACCEPT_MEDIUM_MIN_OVERLAP &&
+      (scoreGap >= ACCEPT_MEDIUM_GAP || top.scoring.isbnMatched);
 
-    if (hasGenericTitlePenalty && !hasAuthorSignal) {
-      // Demote to suggested (not persisted)
+    if (isAccepted) {
       return {
-        decision: 'suggested',
+        decision: top.scoring.isbnMatched ? 'accept_high' : 'accept_medium',
         topCandidate: top,
-        reviewCandidates: alternatives,
+        reviewCandidates: [],
         scoreGap,
-        reason: `Generic title without author signal - demoted from accept_medium`,
+        reason: 'full_match',
+        resolutionMode,
+        ambiguityMetrics,
       };
     }
 
+    // Manual review for close-call ambiguity
+    const isManualReview =
+      distinctSecond !== null &&
+      top.scoring.score >= MANUAL_REVIEW_THRESHOLD &&
+      top.scoring.overlapCount >= MANUAL_REVIEW_MIN_OVERLAP &&
+      scoreGap <= MANUAL_REVIEW_MAX_GAP;
+
+    // SUGGESTED for FULL_MATCH
+    const isSuggested =
+      (top.scoring.score >= SUGGESTED_THRESHOLD &&
+        top.scoring.overlapCount >= ACCEPT_MEDIUM_MIN_OVERLAP) ||
+      (top.scoring.score >= SUGGESTED_AUTHOR_THRESHOLD &&
+        top.scoring.overlapCount >= SUGGESTED_AUTHOR_MIN_OVERLAP &&
+        hasAuthorSignal);
+
+    if (isSuggested) {
+      return {
+        decision: 'suggested',
+        topCandidate: top,
+        reviewCandidates: isManualReview ? alternatives : [],
+        scoreGap,
+        reason: isManualReview ? 'ambiguous_candidates' : 'full_match_suggested',
+        manualReview: isManualReview,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
+    // SUGGESTED_WEAK for FULL_MATCH
+    const isSuggestedWeak =
+      top.scoring.score >= SUGGESTED_WEAK_THRESHOLD &&
+      top.scoring.overlapCount >= SUGGESTED_WEAK_MIN_OVERLAP;
+
+    if (isSuggestedWeak) {
+      return {
+        decision: 'suggested_weak',
+        topCandidate: top,
+        reviewCandidates: [],
+        scoreGap,
+        reason: 'full_match_weak',
+        manualReview: false,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
+    // Reject in FULL_MATCH mode - due to low title/author confidence
     return {
-      decision: 'accept_medium',
+      decision: 'reject',
       topCandidate: top,
       reviewCandidates: [],
       scoreGap,
-      reason: `High score ${formatScore(top.scoring.score)} with gap ${formatScore(scoreGap)} and ${top.scoring.overlapCount} overlaps`,
+      reason: 'low_title_confidence',
+      resolutionMode,
+      ambiguityMetrics,
     };
   }
 
-  // suggested: topScore >= 0.55 (always shown, never blocks)
-  if (top.scoring.score >= SUGGESTED_THRESHOLD) {
+  // ==========================================================================
+  // TITLE_ONLY PATH: Author missing or unreliable
+  // Stricter anti-false-positive safeguards required
+  // ==========================================================================
+
+  // TITLE_ONLY REJECT: Only reject if titleScore < SUGGESTED_WEAK_THRESHOLD
+  // This ensures "strong title + missing author" always produces at least suggested_weak
+  // Changed from TITLE_ONLY_REJECT_BELOW (0.70) to allow scores in [0.45, 0.70) to fall through
+  if (titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
+    return {
+      decision: 'reject',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'low_title_confidence',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // TITLE_ONLY ACCEPT requires ALL of:
+  // - titleScore >= TITLE_ONLY_ACCEPT_MIN
+  // - titleTokenCount >= 2
+  // - AND at least ONE of:
+  //   - margin >= TITLE_ONLY_MARGIN_MIN (clear winner)
+  //   - distinctCandidateCount <= TITLE_ONLY_MAX_CANDIDATES (few results)
+  //   - publisherScore >= TITLE_ONLY_PUBLISHER_MIN (publisher confirms)
+  const hasAntiAmbiguitySignal =
+    scoreGap >= TITLE_ONLY_MARGIN_MIN ||
+    distinctCandidateCount <= TITLE_ONLY_MAX_CANDIDATES ||
+    (publisherScore !== null && publisherScore >= TITLE_ONLY_PUBLISHER_MIN);
+
+  if (
+    titleScore >= TITLE_ONLY_ACCEPT_MIN &&
+    titleTokenCount >= TITLE_ONLY_MIN_TOKENS &&
+    hasAntiAmbiguitySignal
+  ) {
+    return {
+      decision: 'accept_medium', // TITLE_ONLY accept is medium confidence
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'title_only_high_confidence',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // TITLE_ONLY SUGGESTED: titleScore >= T_ONLY_MIN but ambiguity is high
+  if (titleScore >= TITLE_ONLY_ACCEPT_MIN && !hasAntiAmbiguitySignal) {
     return {
       decision: 'suggested',
       topCandidate: top,
       reviewCandidates: alternatives,
       scoreGap,
-      reason: `Score ${formatScore(top.scoring.score)} - suggested match (optional review)`,
+      reason: 'title_only_ambiguous',
+      manualReview: true,
+      resolutionMode,
+      ambiguityMetrics,
     };
   }
 
-  // reject: score too low
+  // TITLE_ONLY SUGGESTED: titleScore strong but below T_ONLY_MIN
+  if (titleScore >= TITLE_ONLY_SUGGESTED_MIN) {
+    return {
+      decision: 'suggested',
+      topCandidate: top,
+      reviewCandidates: alternatives.length > 0 ? alternatives : [],
+      scoreGap,
+      reason: 'title_strong_author_missing',
+      manualReview: false,
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // TITLE_ONLY SUGGESTED_WEAK: title has some signal but not enough for suggested
+  if (titleScore >= SUGGESTED_WEAK_THRESHOLD) {
+    return {
+      decision: 'suggested_weak',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'title_weak_author_missing',
+      manualReview: false,
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // Final reject - title confidence too low
   return {
     decision: 'reject',
     topCandidate: top,
     reviewCandidates: [],
     scoreGap,
-    reason: `Score ${formatScore(top.scoring.score)} below suggested threshold ${formatScore(SUGGESTED_THRESHOLD)}`,
+    reason: 'low_title_confidence',
+    resolutionMode,
+    ambiguityMetrics,
   };
 }
 
@@ -501,9 +964,10 @@ export function formatScore(score: number): string {
 export function explainScore(scoring: CandidateScore): string {
   const parts: string[] = [
     `Score: ${formatScore(scoring.score)}`,
-    `Overlap: ${scoring.overlapCount} tokens (ratio: ${formatScore(scoring.overlapRatio)})`,
-    `Coverage: ${formatScore(scoring.coverageRatio)}`,
-    `Order: ${formatScore(scoring.orderScore)}`,
+    `Overlap: ${scoring.overlapCount} tokens`,
+    `Precision: ${formatScore(scoring.precision)}`,
+    `Recall: ${formatScore(scoring.recall)}`,
+    `F1: ${formatScore(scoring.f1)}`,
     `Matched: ${scoring.matchedTokens.join(', ') || 'none'}`,
   ];
 
@@ -524,7 +988,21 @@ export function explainScore(scoring: CandidateScore): string {
 
 /**
  * Check if a decision should auto-persist (accept_high or accept_medium)
+ * IMPORTANT: Only accept_high and accept_medium are persisted to database
+ * - suggested: NOT persisted (shown to user)
+ * - suggested_weak: NEVER persisted (UI-only best guess)
+ * - reject: NOT persisted
  */
 export function shouldAutoPersist(decision: ScoringDecision): boolean {
   return decision === 'accept_high' || decision === 'accept_medium';
+}
+
+/**
+ * Check if a decision should show a result in UI (accept, suggested, or suggested_weak)
+ */
+export function shouldShowInUI(decision: ScoringDecision): boolean {
+  return decision === 'accept_high' ||
+    decision === 'accept_medium' ||
+    decision === 'suggested' ||
+    decision === 'suggested_weak';
 }

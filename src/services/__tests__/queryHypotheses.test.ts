@@ -41,7 +41,9 @@ describe('queryHypotheses', () => {
       expect(titleAuthor).toBeDefined();
     });
 
-    it('generates ISBN hypothesis when present', () => {
+    it('does NOT generate ISBN hypothesis from spine_crop (default source)', () => {
+      // By default, buildEvidenceTokens uses sourceKind: 'spine_crop'
+      // which skips ISBN extraction to avoid false negatives from noisy spine OCR
       const lines = [
         'THE SHINING',
         'ISBN 9780307743256',
@@ -49,11 +51,14 @@ describe('queryHypotheses', () => {
 
       const result = generateHypotheses(lines);
 
+      // ISBN hypothesis should NOT be present for spine_crop
       const isbnHypothesis = result.hypotheses.find((h) => h.type === 'isbn');
-      expect(isbnHypothesis).toBeDefined();
-      expect(isbnHypothesis?.query).toBe('9780307743256');
-      // ISBN should be highest priority
-      expect(isbnHypothesis?.priority).toBe(0);
+      expect(isbnHypothesis).toBeUndefined();
+
+      // But other hypotheses should still be generated
+      expect(result.hypotheses.length).toBeGreaterThan(0);
+      const titleHypothesis = result.hypotheses.find((h) => h.type === 'title_only');
+      expect(titleHypothesis).toBeDefined();
     });
 
     it('generates article-stripped variants', () => {
@@ -116,6 +121,45 @@ describe('queryHypotheses', () => {
         (h) => h.query.toLowerCase() === 'the shining'
       );
       expect(shiningQueries.length).toBeLessThanOrEqual(1);
+    });
+
+    it('generates multiple hypotheses for title-only (no author) input', () => {
+      // Regression test: title-strong + author-missing must NOT collapse to 1 hypothesis
+      const lines = [
+        'THE GREAT GATSBY',
+      ];
+
+      const result = generateHypotheses(lines);
+
+      // Should generate at least 2 hypotheses (title-only + stripped variant)
+      expect(result.hypotheses.length).toBeGreaterThanOrEqual(2);
+
+      // Should have title-only hypothesis
+      const titleOnly = result.hypotheses.find((h) => h.type === 'title_only');
+      expect(titleOnly).toBeDefined();
+
+      // Should have stripped variant (without "THE")
+      const stripped = result.hypotheses.find(
+        (h) => h.type === 'stripped' && h.query.includes('GATSBY')
+      );
+      expect(stripped).toBeDefined();
+    });
+
+    it('generates multiple hypotheses even without author signal', () => {
+      // Another regression test: ensure multi-hypothesis works for all title-only cases
+      const lines = [
+        'A BRIEF HISTORY OF TIME',
+      ];
+
+      const result = generateHypotheses(lines);
+
+      // Should generate multiple hypotheses
+      expect(result.hypotheses.length).toBeGreaterThanOrEqual(2);
+
+      // Verify shapes include title_only and stripped
+      const shapes = result.hypotheses.map((h) => h.type);
+      expect(shapes).toContain('title_only');
+      expect(shapes).toContain('stripped');
     });
   });
 

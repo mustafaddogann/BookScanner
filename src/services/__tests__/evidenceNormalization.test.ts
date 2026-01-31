@@ -12,6 +12,9 @@ import {
   looksLikeTitle,
   extractIsbn,
   stripLeadingArticle,
+  stripEmbeddedNoise,
+  isIncompleteLine,
+  mergeSplitLines,
 } from '../evidenceNormalization';
 
 describe('evidenceNormalization', () => {
@@ -95,6 +98,17 @@ describe('evidenceNormalization', () => {
       expect(looksLikePersonName('STEPHEN KING')).toBe(true);
     });
 
+    it('detects author names with OCR case errors like "nGAIO MARSH"', () => {
+      // This was failing before the case-insensitive fix
+      expect(looksLikePersonName('nGAIO MARSH')).toBe(true);
+      expect(looksLikePersonName('PATRICIA WENTWORTH')).toBe(true);
+    });
+
+    it('detects initials in author names', () => {
+      expect(looksLikePersonName('J K ROWLING')).toBe(true);
+      expect(looksLikePersonName('C S LEWIS')).toBe(true);
+    });
+
     it('rejects single words', () => {
       expect(looksLikePersonName('King')).toBe(false);
     });
@@ -106,6 +120,84 @@ describe('evidenceNormalization', () => {
     it('rejects long phrases', () => {
       // More than 4 words is too long for a typical author name
       expect(looksLikePersonName('Stephen Edwin King Junior The Third')).toBe(false);
+    });
+  });
+
+  describe('stripEmbeddedNoise - Publisher/Price Removal', () => {
+    it('removes prices from lines', () => {
+      expect(stripEmbeddedNoise('POISON IN THE PEN $9.99')).toBe('POISON IN THE PEN');
+      expect(stripEmbeddedNoise('$193 POISON IN THE PEN')).toBe('POISON IN THE PEN');
+    });
+
+    it('removes publisher names from lines with other content', () => {
+      const result = stripEmbeddedNoise('BANTAM STER $193 POISON IN THE PEN Patricia Wentworth');
+      expect(result).not.toContain('BANTAM');
+      expect(result).not.toContain('$193');
+      expect(result).toContain('POISON');
+      expect(result).toContain('Patricia');
+    });
+
+    it('preserves content when no noise present', () => {
+      expect(stripEmbeddedNoise('The Shining')).toBe('The Shining');
+      expect(stripEmbeddedNoise('STEPHEN KING')).toBe('STEPHEN KING');
+    });
+
+    it('handles regional prices', () => {
+      const result = stripEmbeddedNoise('USA $14.99 THE BOOK');
+      expect(result).not.toContain('$14.99');
+    });
+  });
+
+  describe('isIncompleteLine - Split Line Detection', () => {
+    it('detects lines ending with prepositions', () => {
+      expect(isIncompleteLine('STRAIGHT INTO')).toBe(true);
+      expect(isIncompleteLine('THE GIRL WITH')).toBe(true);
+      expect(isIncompleteLine('GONE WITH THE')).toBe(true);
+    });
+
+    it('detects lines ending with hyphen', () => {
+      expect(isIncompleteLine('INCOMP-')).toBe(true);
+    });
+
+    it('returns false for complete lines', () => {
+      expect(isIncompleteLine('THE SHINING')).toBe(false);
+      expect(isIncompleteLine('STEPHEN KING')).toBe(false);
+      expect(isIncompleteLine('DARKNESS')).toBe(false);
+    });
+
+    it('returns false for empty or very short lines', () => {
+      expect(isIncompleteLine('')).toBe(false);
+      expect(isIncompleteLine('AB')).toBe(false);
+    });
+  });
+
+  describe('mergeSplitLines - Line Merging', () => {
+    it('merges split title lines', () => {
+      const lines = ['STRAIGHT INTO', 'DARKNESS'];
+      const result = mergeSplitLines(lines);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toBe('STRAIGHT INTO DARKNESS');
+    });
+
+    it('handles hyphenated word breaks', () => {
+      const lines = ['INCOMP-', 'LETE'];
+      const result = mergeSplitLines(lines);
+      expect(result).toHaveLength(1);
+      expect(result[0]).toBe('INCOMPLETE');
+    });
+
+    it('preserves complete lines as-is', () => {
+      const lines = ['THE SHINING', 'STEPHEN KING'];
+      const result = mergeSplitLines(lines);
+      expect(result).toEqual(['THE SHINING', 'STEPHEN KING']);
+    });
+
+    it('handles single line input', () => {
+      expect(mergeSplitLines(['HELLO'])).toEqual(['HELLO']);
+    });
+
+    it('handles empty input', () => {
+      expect(mergeSplitLines([])).toEqual([]);
     });
   });
 
@@ -171,14 +263,84 @@ describe('evidenceNormalization', () => {
       expect(result.titleLikeLines).toContain('THE SHINING');
     });
 
-    it('extracts ISBNs', () => {
+    it('skips ISBN extraction for spine_crop (default)', () => {
       const lines = [
         'THE SHINING',
         'ISBN 9780307743256',
       ];
 
+      // Default sourceKind is spine_crop, which skips ISBN extraction
       const result = buildEvidenceTokens(lines);
+      expect(result.isbns).toHaveLength(0);
+    });
+
+    it('extracts ISBNs for back_cover source', () => {
+      const lines = [
+        'THE SHINING',
+        'ISBN 9780307743256',
+      ];
+
+      // Explicitly use back_cover to enable ISBN extraction
+      const result = buildEvidenceTokens(lines, { sourceKind: 'back_cover' });
       expect(result.isbns).toContain('9780307743256');
+    });
+
+    // =========================================================================
+    // REGRESSION TEST: ISBN-like digits from spine must NOT populate isbn
+    // Spine OCR produces unreliable ISBN-like sequences that harm scoring
+    // =========================================================================
+    it('REGRESSION: ISBN-like digits from spine_crop do NOT populate isbns array', () => {
+      const lines = [
+        'POISON IN THE PEN',
+        '0-515-06011-9',  // ISBN-like but from spine - should NOT be extracted
+        'Patricia Wentworth',
+      ];
+
+      // spine_crop is the default source
+      const result = buildEvidenceTokens(lines);
+
+      // ISBN array must be empty for spine sources
+      expect(result.isbns).toHaveLength(0);
+      // The title/author tokens should still be extracted
+      expect(result.tokensSet.has('poison')).toBe(true);
+      expect(result.tokensSet.has('patricia')).toBe(true);
+    });
+
+    it('REGRESSION: ISBN-like tokens from spine do NOT appear in tokensSet', () => {
+      const lines = [
+        'THE SHINING',
+        '978-0-307-74325-6',  // ISBN-like pattern
+        'STEPHEN KING',
+      ];
+
+      const result = buildEvidenceTokens(lines);
+
+      // ISBN-like tokens should be filtered from tokensSet
+      // (they inflate precision denominator and cause false rejects)
+      expect(result.tokensSet.has('978')).toBe(false);
+      expect(result.tokensSet.has('0307743256')).toBe(false);
+      // But actual title/author tokens should be present
+      expect(result.tokensSet.has('shining')).toBe(true);
+      expect(result.tokensSet.has('stephen')).toBe(true);
+      expect(result.tokensSet.has('king')).toBe(true);
+    });
+
+    it('REGRESSION: numeric-only tokens are filtered from tokensSet', () => {
+      const lines = [
+        'THE SHINING',
+        '1234567890',  // Pure numeric - should be filtered
+        '2024',        // Year - should be filtered
+        'STEPHEN KING',
+      ];
+
+      const result = buildEvidenceTokens(lines);
+
+      // Pure numeric tokens should be filtered
+      expect(result.tokensSet.has('1234567890')).toBe(false);
+      expect(result.tokensSet.has('2024')).toBe(false);
+      // Title/author tokens should be present
+      expect(result.tokensSet.has('shining')).toBe(true);
+      expect(result.tokensSet.has('king')).toBe(true);
     });
 
     it('filters marketing content', () => {
@@ -190,6 +352,49 @@ describe('evidenceNormalization', () => {
       const result = buildEvidenceTokens(lines);
       expect(result.cleanedLines).toHaveLength(1);
       expect(result.cleanedLines[0]).toBe('THE SHINING');
+    });
+
+    // === Task C: Integration tests for failing patterns ===
+
+    it('handles "BANTAM STER $193" noise pattern', () => {
+      const lines = [
+        'BANTAM STER $193',
+        'POISON IN THE PEN',
+        'Patricia Wentworth',
+      ];
+      const result = buildEvidenceTokens(lines);
+
+      // Should not have bantam/ster as major tokens
+      expect(result.tokensSet.has('bantam')).toBe(false);
+      // Should have the actual book content
+      expect(result.tokensSet.has('poison')).toBe(true);
+      expect(result.tokensSet.has('pen')).toBe(true);
+    });
+
+    it('handles split title lines like "STRAIGHT INTO" + "DARKNESS"', () => {
+      const lines = [
+        'STRAIGHT INTO',
+        'DARKNESS',
+        'PAULLINA SIMONS',
+      ];
+      const result = buildEvidenceTokens(lines);
+
+      // After merging, should have combined tokens
+      expect(result.tokensSet.has('straight')).toBe(true);
+      expect(result.tokensSet.has('darkness')).toBe(true);
+      // Title should be detected
+      expect(result.titleLikeLines.some(l => l.includes('DARKNESS'))).toBe(true);
+    });
+
+    it('handles OCR case errors in author names like "nGAIO MARSH"', () => {
+      const lines = [
+        'THE SHINING',
+        'nGAIO MARSH', // OCR error in first character
+      ];
+      const result = buildEvidenceTokens(lines);
+
+      // Should still detect as person name despite case error
+      expect(result.personNameLines.some(n => n.includes('MARSH'))).toBe(true);
     });
   });
 

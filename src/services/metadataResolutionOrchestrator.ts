@@ -35,7 +35,11 @@ import {
   getMetadataLookupProvider,
 } from './metadataLookupProviderFactory';
 import { isDisabledProvider } from './metadataLookupProvider';
-import { isMetadataVerboseDebug, isOfflineQueueEnabled } from '../config/debug';
+import {
+  isMetadataVerboseDebug,
+  isOfflineQueueEnabled,
+  isSupabaseResolverEnabled,
+} from '../config/debug';
 import { queueForOfflineResolution } from './offlineResolutionQueue';
 import { isSupabaseConfigured } from '../config/supabase';
 import {
@@ -53,6 +57,7 @@ import { getQuerySet } from './queryHypotheses';
 import type { ScoredCandidate, ScoringDecision } from './candidateScoring';
 import { shouldAutoPersist } from './candidateScoring';
 import { AUTO_BOOST_ENABLED } from '../config/metadataResolutionConfig';
+import { persistResolverAttempts } from './resolverAttemptsService';
 
 /**
  * Input for metadata resolution
@@ -84,6 +89,71 @@ export interface MetadataResolutionOutput {
   resolutionState: MetadataResolutionState;
   /** Whether resolution was queued for offline retry */
   queuedForOffline: boolean;
+}
+
+function logResolverSummary(
+  sessionId: string,
+  candidates: BookCandidate[],
+  missingCount: number = 0
+): void {
+  const counts = {
+    processed: candidates.length,
+    accepted: 0,
+    suggested: 0,
+    rejected: 0,
+    manualReview: 0,
+    pending: 0,
+  };
+
+  for (const candidate of candidates) {
+    const manualReview =
+      candidate.evidenceSearchDebug?.manualReview === true ||
+      candidate.resolverDecisionReason === 'manual_review';
+
+    switch (candidate.resolverDecision) {
+      case 'accept':
+        counts.accepted += 1;
+        break;
+      case 'suggested':
+        if (manualReview) {
+          counts.manualReview += 1;
+        } else {
+          counts.suggested += 1;
+        }
+        break;
+      case 'reject':
+        counts.rejected += 1;
+        break;
+      case 'pending':
+      case 'offline':
+      case 'disabled':
+        counts.pending += 1;
+        break;
+      case 'error':
+        if (candidate.resolverDecisionReason !== 'missing_from_resolver_response') {
+          counts.pending += 1;
+        }
+        break;
+      default:
+        counts.pending += 1;
+        break;
+    }
+  }
+
+  console.log(
+    `[MetadataResolution] summary sessionId=${sessionId} ` +
+      `processed=${counts.processed} ` +
+      `accepted=${counts.accepted} ` +
+      `suggested=${counts.suggested} ` +
+      `rejected=${counts.rejected} ` +
+      `manual_review=${counts.manualReview}`
+  );
+
+  if (missingCount > 0) {
+    console.warn(
+      `[MetadataResolution] missing_responses sessionId=${sessionId} missing=${missingCount}`
+    );
+  }
 }
 
 /**
@@ -223,9 +293,17 @@ export async function runMetadataResolution(
   // STAGE 3: RESOLVE - Search and score matches
   // =========================================================================
 
-  // SUPABASE RESOLVER PATH: If Supabase is configured and we have book candidates,
+  // SUPABASE RESOLVER PATH: If Supabase is configured and enabled,
   // use the Edge Function resolver instead of local provider
-  if (isSupabaseConfigured() && bookCandidates && bookCandidates.length > 0) {
+  if (isSupabaseConfigured() && !isSupabaseResolverEnabled() && verbose) {
+    console.log('[MetadataOrchestrator] Supabase resolver disabled; using local evidence-driven resolver');
+  }
+  if (
+    isSupabaseConfigured() &&
+    isSupabaseResolverEnabled() &&
+    bookCandidates &&
+    bookCandidates.length > 0
+  ) {
     if (verbose) {
       console.log('[MetadataOrchestrator] Using Supabase Edge Function resolver');
     }
@@ -234,13 +312,35 @@ export async function runMetadataResolution(
       // Resolve all candidates via Supabase
       const resolverResults = await resolveCandidates(sessionId, bookCandidates);
 
-      // Apply results to candidates
+      // Apply results to candidates, detect missing responses
+      const expectedIds = new Set(bookCandidates.map((c) => c.id));
+      const returnedIds = new Set(resolverResults.keys());
+      const missingCount = Math.max(0, expectedIds.size - returnedIds.size);
+
       const resolvedCandidates = bookCandidates.map((candidate) => {
         const result = resolverResults.get(candidate.id);
         if (result) {
           return applyResolverResult(candidate, result);
         }
-        return candidate;
+
+        if (isOfflineQueueEnabled()) {
+          enqueueCandidate(sessionId, candidate);
+        }
+
+        return {
+          ...candidate,
+          resolverDecision: 'error' as const,
+          resolverDecisionReason: 'missing_from_resolver_response',
+          resolverFlags: [
+            ...(candidate.resolverFlags ?? []),
+            {
+              flag: 'missing_from_resolver_response',
+              severity: 'error' as const,
+              message: 'Resolver returned no response for candidate',
+              penalty: 0,
+            },
+          ],
+        };
       });
 
       // Determine overall decision based on resolved candidates
@@ -321,6 +421,24 @@ export async function runMetadataResolution(
         }
       }
 
+      if (missingCount > 0) {
+        queuedForOffline = queuedForOffline || isOfflineQueueEnabled();
+        console.warn(
+          `[MetadataOrchestrator] Missing resolver responses: ${missingCount} ` +
+            `(returned=${returnedIds.size} expected=${expectedIds.size})`
+        );
+      }
+
+      // Persist per-candidate attempts (non-blocking)
+      void persistResolverAttempts(sessionId, resolvedCandidates, resolverResults);
+
+      // Summary log
+      logResolverSummary(sessionId, resolvedCandidates, missingCount);
+
+      // Extract resolvedBook and alternatives from decision for UI state
+      const resolvedBookFromDecision = 'book' in overallDecision ? overallDecision.book : undefined;
+      const alternativesFromDecision = 'alternatives' in overallDecision ? overallDecision.alternatives : undefined;
+
       return {
         evidenceSummary,
         searchCandidates: verbose ? searchCandidates : undefined,
@@ -329,6 +447,9 @@ export async function runMetadataResolution(
           evidenceTier: evidenceSummary.sessionTier,
           searchCandidates: verbose ? searchCandidates : undefined,
           decision: overallDecision,
+          // CRITICAL: Set resolvedBook for UI display (even for suggested)
+          resolvedBook: resolvedBookFromDecision,
+          alternatives: alternativesFromDecision,
           resolvedAt: new Date().toISOString(),
           resolvedCandidates: resolvedCandidates,
         },
@@ -452,6 +573,16 @@ export async function runMetadataResolution(
       const firstCandidate = resolvedCandidates[0] as BookCandidate & { evidenceSearchDebug?: any };
       const evidenceSearchDebug = firstCandidate?.evidenceSearchDebug;
 
+      // Persist per-candidate attempts (non-blocking)
+      void persistResolverAttempts(sessionId, resolvedCandidates);
+
+      // Summary log
+      logResolverSummary(sessionId, resolvedCandidates, 0);
+
+      // Extract resolvedBook and alternatives from decision for UI state
+      const resolvedBook = 'book' in overallDecision ? overallDecision.book : undefined;
+      const alternatives = 'alternatives' in overallDecision ? overallDecision.alternatives : undefined;
+
       return {
         evidenceSummary,
         searchCandidates: verbose ? searchCandidates : undefined,
@@ -460,6 +591,9 @@ export async function runMetadataResolution(
           evidenceTier: evidenceSummary.sessionTier,
           searchCandidates: verbose ? searchCandidates : undefined,
           decision: overallDecision,
+          // CRITICAL: Set resolvedBook for UI display (even for suggested)
+          resolvedBook,
+          alternatives,
           resolvedAt: new Date().toISOString(),
           resolvedCandidates,
           evidenceSearchDebug,
@@ -637,9 +771,22 @@ export async function resolveBookCandidateByEvidence(
     if (verbose) {
       console.log(`[EvidenceResolver] Candidate ${candidate.id} has no evidence`);
     }
+    // COVERAGE FIX: Return reject (not pending) when no evidence
+    // This ensures the candidate gets logged and doesn't remain in limbo
     return {
       ...candidate,
-      resolverDecision: 'pending',
+      resolverDecision: 'reject',
+      resolverDecisionReason: 'no_evidence',
+      evidenceSearchDebug: {
+        decision: 'reject',
+        reason: 'no_evidence',
+        hypothesesCount: 0,
+        queriesTriedCount: 0,
+        queriesTried: [],
+        candidatesFound: 0,
+        topScores: [],
+        searchTimeMs: 0,
+      },
     };
   }
 
@@ -650,21 +797,28 @@ export async function resolveBookCandidateByEvidence(
   const ocrTitle = candidate.hypothesis?.searchCandidates?.[0]?.titleHint || null;
   const ocrAuthor = candidate.hypothesis?.searchCandidates?.[0]?.authorHint || null;
 
-  console.log(`[EvidenceResolver] Resolving candidate ${candidate.id} with ${evidenceLines.length} evidence lines`);
+  // Get sourceKind from evidence for ISBN policy (default to spine_crop)
+  // This determines whether ISBN is used for scoring:
+  // - spine_crop: ISBN is noise, never used for scoring
+  // - back_cover/inside_page: Valid ISBN triggers lookup and scoring boost
+  const sourceKind = evidence.sourceKind ?? 'spine_crop';
+
+  console.log(`[EvidenceResolver] Resolving candidate ${candidate.id} with ${evidenceLines.length} evidence lines (sourceKind=${sourceKind})`);
 
   try {
     const provider = new OpenLibraryProvider();
     const hypothesisTier = candidate.hypothesis?.evidenceTier;
     const debugContext = { candidateId: candidate.id, evidenceTier: hypothesisTier };
 
-    // PASS 1: Initial search
+    // PASS 1: Initial search with source-aware ISBN policy
     const pass1Result = await provider.searchByEvidence(
       evidenceLines,
       ocrTitle,
       ocrAuthor,
       1,
       undefined,
-      debugContext
+      debugContext,
+      sourceKind
     );
     const pass1Decision = pass1Result.decision;
 
@@ -683,14 +837,15 @@ export async function resolveBookCandidateByEvidence(
       // Get queries already tried in pass 1
       const pass1Queries = getQuerySet(pass1Result.hypotheses.hypotheses);
 
-      // PASS 2: Boost search with expanded hypotheses
+      // PASS 2: Boost search with expanded hypotheses (same sourceKind)
       const pass2Result = await provider.searchByEvidence(
         evidenceLines,
         ocrTitle,
         ocrAuthor,
         2,
         pass1Queries,
-        debugContext
+        debugContext,
+        sourceKind
       );
 
       // Merge candidates: pass2 candidates + pass1 candidates (deduped)
@@ -727,6 +882,7 @@ export async function resolveBookCandidateByEvidence(
     let resolvedBook: BookCandidate['resolvedBook'];
     let resolverSuggestions: BookCandidate['resolverSuggestions'];
     let resolvedConfidence: BookCandidate['resolvedConfidence'];
+    let resolverDecisionReason: string | undefined;
 
     // Check if this is an auto-persist decision (accept_high or accept_medium)
     const autoPersist = shouldAutoPersist(result.decision);
@@ -738,6 +894,7 @@ export async function resolveBookCandidateByEvidence(
           resolverDecision = 'accept';
           resolvedBook = result.topCandidate.book;
           resolvedConfidence = result.topCandidate.scoring.score;
+          resolverDecisionReason = result.reason;
 
           // ONLY persist to Supabase for accept_high or accept_medium
           // This is the key non-negotiable requirement
@@ -753,6 +910,7 @@ export async function resolveBookCandidateByEvidence(
             });
         } else {
           resolverDecision = 'pending';
+          resolverDecisionReason = 'no_top_candidate';
         }
         break;
 
@@ -763,9 +921,24 @@ export async function resolveBookCandidateByEvidence(
           resolvedBook = result.topCandidate.book;
           resolvedConfidence = result.topCandidate.scoring.score;
         }
-        // Include alternatives for optional review
-        resolverSuggestions = result.reviewCandidates.map((sc) => sc.book);
+        resolverDecisionReason = result.reason;
+        // Include alternatives only when ambiguity warrants manual review
+        if (result.manualReview) {
+          resolverSuggestions = result.reviewCandidates.map((sc) => sc.book);
+        }
         console.log(`[EvidenceResolver] suggested: "${resolvedBook?.title}" (NOT persisted, optional review)`);
+        break;
+
+      case 'suggested_weak':
+        // NEVER persist for suggested_weak - UI-only best guess
+        // Maps to 'suggested' resolver decision but with lower confidence
+        resolverDecision = 'suggested';
+        if (result.topCandidate) {
+          resolvedBook = result.topCandidate.book;
+          resolvedConfidence = result.topCandidate.scoring.score;
+        }
+        resolverDecisionReason = result.reason;
+        console.log(`[EvidenceResolver] suggested_weak: "${resolvedBook?.title}" (UI-only, NEVER persisted)`);
         break;
 
       case 'reject':
@@ -775,10 +948,33 @@ export async function resolveBookCandidateByEvidence(
         if (result.topCandidate) {
           resolvedConfidence = result.topCandidate.scoring.score;
         }
+        resolverDecisionReason = result.reason;
         break;
     }
 
-    // Store debug info
+    const totalResults = result.hypothesisResults.reduce(
+      (sum, hr) => sum + hr.resultCount,
+      0
+    );
+
+    if (verbose) {
+      const hypothesisQueries = result.hypothesisResults.map(
+        (hr) => hr.hypothesis.query
+      );
+      const topScore = result.topCandidate?.scoring.score ?? 0;
+      const topOverlap = result.topCandidate?.scoring.overlapCount ?? 0;
+      console.log(
+        `[EvidenceResolver] candidateId="${candidate.id}" lines=${evidenceLines.length} ` +
+          `hypotheses=${result.hypothesisResults.length} ` +
+          `queries=${JSON.stringify(hypothesisQueries)} ` +
+          `queriesTried=${result.queriesTriedCount} ` +
+          `totalResults=${totalResults} ` +
+          `topScore=${topScore.toFixed(3)} gap=${result.scoreGap.toFixed(3)} ` +
+          `overlap=${topOverlap} decision=${result.decision}`
+      );
+    }
+
+    // Store debug info - includes both raw_score and final_score for debugging mismatch issues
     const evidenceSearchDebug = {
       decision: result.decision,
       pass1Decision: result.pass1Decision || result.decision,
@@ -788,31 +984,45 @@ export async function resolveBookCandidateByEvidence(
       scoreGap: result.scoreGap,
       hypothesesCount: result.hypothesisResults.length,
       queriesTriedCount: result.queriesTriedCount,
-      queriesTried: result.hypothesisResults.map((hr) => ({
-        query: hr.hypothesis.query,
-        type: hr.hypothesis.type,
-        pass: hr.pass,
-        resultCount: hr.resultCount,
-      })),
+      queriesTried: result.hypothesisResults.map((hr) => hr.hypothesis.query),
       candidatesFound: result.scoredCandidates.length,
       topScores: result.scoredCandidates.slice(0, 5).map((sc) => ({
         title: sc.book.title,
         score: sc.scoring.score,
+        // TASK 4: Include raw_score and final_score for debugging
+        rawScore: sc.scoring.rawScore,
+        finalScore: sc.scoring.finalScore,
         overlapCount: sc.scoring.overlapCount,
         isbnMatched: sc.scoring.isbnMatched,
+        minSignalCapped: sc.scoring.minSignalCapped,
       })),
       searchTimeMs: result.searchTimeMs,
+      manualReview: result.manualReview,
       autoPersisted: autoPersist && resolverDecision === 'accept',
     };
 
     console.log(`[EvidenceResolver] Candidate ${candidate.id}: ${result.decision} (confidence=${resolvedConfidence?.toFixed(3) || 'N/A'}, ${result.reason})`);
 
+    const resolverFlags = result.manualReview
+      ? [
+          ...(candidate.resolverFlags ?? []),
+          {
+            flag: 'manual_review',
+            severity: 'info',
+            message: 'Top two matches are close - manual review suggested',
+            penalty: 0,
+          },
+        ]
+      : candidate.resolverFlags;
+
     return {
       ...candidate,
       resolverDecision,
+      resolverDecisionReason,
       resolvedBook,
       resolvedConfidence,
       resolverSuggestions,
+      resolverFlags,
       // Store debug info for diagnostics
       evidenceSearchDebug,
     } as BookCandidate & { evidenceSearchDebug?: typeof evidenceSearchDebug };
@@ -821,30 +1031,75 @@ export async function resolveBookCandidateByEvidence(
     return {
       ...candidate,
       resolverDecision: 'error',
+      resolverDecisionReason: e?.message || 'resolver_error',
     };
   }
 }
 
 /**
  * Resolve all book candidates using evidence-driven search
+ *
+ * COVERAGE GUARANTEE: This function processes ALL input candidates.
+ * - Every candidate gets a decision (accept/suggested/reject)
+ * - No candidate is left in "pending" state
+ * - Logs assertion at start/end with counts
  */
 export async function resolveAllCandidatesByEvidence(
   candidates: BookCandidate[]
 ): Promise<BookCandidate[]> {
-  console.log(`[EvidenceResolver] Resolving ${candidates.length} candidates by evidence`);
+  const inputCount = candidates.length;
+  const inputIds = candidates.map((c) => c.id);
+  console.log(`[EvidenceResolver] START resolving ${inputCount} candidates by evidence`);
+  console.log(`[EvidenceResolver] Input candidate IDs: ${JSON.stringify(inputIds)}`);
 
   const resolvedCandidates: BookCandidate[] = [];
 
-  for (const candidate of candidates) {
+  for (let i = 0; i < candidates.length; i++) {
+    const candidate = candidates[i];
+    console.log(`[EvidenceResolver] Processing candidate ${i + 1}/${inputCount}: ${candidate.id}`);
     const resolved = await resolveBookCandidateByEvidence(candidate);
     resolvedCandidates.push(resolved);
+  }
+
+  // COVERAGE ASSERTION: Verify output count matches input
+  const outputCount = resolvedCandidates.length;
+  const outputIds = resolvedCandidates.map((c) => c.id);
+  const missingIds = inputIds.filter((id) => !outputIds.includes(id));
+
+  if (missingIds.length > 0) {
+    console.error(`[EvidenceResolver] COVERAGE_ERROR: Missing candidates after resolution: ${JSON.stringify(missingIds)}`);
+  }
+
+  if (outputCount !== inputCount) {
+    console.error(`[EvidenceResolver] COVERAGE_ERROR: Input count ${inputCount} != output count ${outputCount}`);
   }
 
   // Log summary
   const accepted = resolvedCandidates.filter((c) => c.resolverDecision === 'accept').length;
   const suggested = resolvedCandidates.filter((c) => c.resolverDecision === 'suggested').length;
   const rejected = resolvedCandidates.filter((c) => c.resolverDecision === 'reject').length;
-  console.log(`[EvidenceResolver] Summary: accepted=${accepted} suggested=${suggested} rejected=${rejected}`);
+  const pending = resolvedCandidates.filter((c) => c.resolverDecision === 'pending' || !c.resolverDecision).length;
+  const manualReview = resolvedCandidates.filter(
+    (c) => c.evidenceSearchDebug?.manualReview === true
+  ).length;
+
+  console.log(
+    `[EvidenceResolver] END Summary: input=${inputCount} output=${outputCount} ` +
+    `accepted=${accepted} suggested=${suggested} rejected=${rejected} pending=${pending} ` +
+    `manual_review=${manualReview}`
+  );
+
+  // COVERAGE ASSERTION: No pending candidates should remain
+  if (pending > 0) {
+    console.warn(`[EvidenceResolver] WARNING: ${pending} candidates still pending after resolution`);
+    // Convert any remaining pending to reject
+    for (const candidate of resolvedCandidates) {
+      if (candidate.resolverDecision === 'pending' || !candidate.resolverDecision) {
+        candidate.resolverDecision = 'reject';
+        candidate.resolverDecisionReason = candidate.resolverDecisionReason || 'resolution_incomplete';
+      }
+    }
+  }
 
   return resolvedCandidates;
 }

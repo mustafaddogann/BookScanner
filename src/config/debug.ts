@@ -112,6 +112,18 @@ export const METADATA_OFFLINE_QUEUE_ENABLED = false;
 export const METADATA_VERBOSE_DEBUG = false;
 
 /**
+ * Use Supabase Edge Function resolver instead of local evidence-driven resolver.
+ *
+ * When false (default):
+ * - Always run local evidence-driven resolver for per-candidate suggestions
+ * - Supabase is used only for persisting accepted matches
+ *
+ * When true:
+ * - Use Supabase resolver as the primary resolution path
+ */
+export const METADATA_USE_SUPABASE_RESOLVER = false;
+
+/**
  * Check if metadata resolution is enabled
  */
 export function isMetadataResolutionEnabled(): boolean {
@@ -137,6 +149,13 @@ export function isOfflineQueueEnabled(): boolean {
  */
 export function isMetadataVerboseDebug(): boolean {
   return METADATA_VERBOSE_DEBUG;
+}
+
+/**
+ * Check if Supabase Edge Function resolver should be used
+ */
+export function isSupabaseResolverEnabled(): boolean {
+  return METADATA_USE_SUPABASE_RESOLVER;
 }
 
 // ============================================================================

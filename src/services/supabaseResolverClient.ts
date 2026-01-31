@@ -597,9 +597,11 @@ export function applyResolverResult(
   result: ResolverResult
 ): BookCandidate {
   if (!result.response) {
+    const fallbackReason = result.error || (result.offline ? 'offline' : undefined);
     return {
       ...candidate,
       resolverDecision: result.offline ? 'offline' : 'pending',
+      resolverDecisionReason: fallbackReason,
     };
   }
 
@@ -641,6 +643,7 @@ export function applyResolverResult(
     resolvedBook,
     resolverSuggestions,
     resolvedConfidence,
+    resolverDecisionReason: response.acceptanceDecision.reason,
     // Store verification flags for UI display
     resolverFlags: response.verificationFlags,
   };

@@ -628,6 +628,47 @@ export interface BookEvidenceLine {
 }
 
 /**
+ * Source kind for evidence - determines ISBN handling policy
+ * - spine_crop: ISBN is non-fatal noise, never used for lookup
+ * - back_cover: Valid ISBN triggers lookup first
+ * - inside_page: Valid ISBN triggers lookup first
+ * - unknown: Conservative approach, treat as spine_crop
+ */
+export type EvidenceSourceKind = 'spine_crop' | 'back_cover' | 'inside_page' | 'unknown';
+
+/**
+ * ISBN candidate extracted from evidence with validation info
+ */
+export interface EvidenceIsbnCandidate {
+  /** Raw string as extracted from OCR */
+  raw: string;
+  /** Normalized to digits only (uppercase X for ISBN-10 check digit) */
+  normalized: string;
+  /** ISBN type: 'isbn10' or 'isbn13' */
+  type: 'isbn10' | 'isbn13';
+  /** Whether checksum is valid */
+  checksumValid: boolean;
+}
+
+/**
+ * ISBN policy debug info
+ */
+export interface IsbnPolicyDebug {
+  /** Source kind that determined the policy */
+  sourceKind: EvidenceSourceKind;
+  /** Policy that was applied */
+  policyApplied: 'ignore' | 'boost_only' | 'lookup_first';
+  /** Raw ISBN-like strings found (before validation) */
+  candidatesRaw: string[];
+  /** Valid ISBN candidates (checksum passed) */
+  candidatesValid: EvidenceIsbnCandidate[];
+  /** Whether ISBN lookup was attempted */
+  lookupAttempted: boolean;
+  /** Result of ISBN lookup if attempted */
+  lookupResult?: 'success' | 'not_found' | 'error' | 'skipped';
+}
+
+/**
  * Merged evidence from multiple crops for a book candidate
  */
 export interface BookEvidence {
@@ -642,6 +683,10 @@ export interface BookEvidence {
     titleHints: string[];
     authorHints: string[];
   };
+  /** Source kind for ISBN policy (default: spine_crop for spine OCR) */
+  sourceKind?: EvidenceSourceKind;
+  /** ISBN policy debug info */
+  isbnPolicy?: IsbnPolicyDebug;
 }
 
 /**
@@ -731,16 +776,42 @@ export interface BookCandidate {
    */
   resolverDecision?: 'accept' | 'reject' | 'suggested' | 'pending' | 'disabled' | 'offline' | 'error';
 
+  /** Resolver decision reason (Gate 9) */
+  resolverDecisionReason?: string;
+
   /** Verification flags from resolver (Gate 9) */
   resolverFlags?: ResolverFlag[];
 
   /** Evidence-driven search debug info (Gate 9) */
   evidenceSearchDebug?: {
+    /** Decision from evidence scoring */
+    decision?: 'accept_high' | 'accept_medium' | 'suggested' | 'reject';
+    /** Pass 1 decision (before boost) */
+    pass1Decision?: 'accept_high' | 'accept_medium' | 'suggested' | 'reject';
+    /** Pass used (1 or 2) */
+    passUsed?: number;
+    /** Whether boost pass was triggered */
+    boostTriggered?: boolean;
+    /** Decision reason */
+    reason?: string;
+    /** Gap between top and second candidate */
+    scoreGap?: number;
+    /** Number of hypotheses generated */
     hypothesesCount: number;
+    /** Total queries tried */
+    queriesTriedCount?: number;
+    /** Query strings tried */
     queriesTried: string[];
+    /** Total candidates found */
     candidatesFound: number;
-    topScores: Array<{ title: string; score: number }>;
+    /** Top candidate scores */
+    topScores: Array<{ title: string; score: number; overlapCount?: number; isbnMatched?: boolean }>;
+    /** Search time in ms */
     searchTimeMs: number;
+    /** Whether this was flagged for manual review (ambiguity) */
+    manualReview?: boolean;
+    /** Whether auto-persisted */
+    autoPersisted?: boolean;
   };
 
   // ============================================================================
@@ -1048,16 +1119,34 @@ export interface MetadataResolutionState {
   resolvedCandidates?: BookCandidate[];
   /** Evidence-driven search debug info */
   evidenceSearchDebug?: {
+    /** Decision from evidence scoring */
+    decision?: 'accept_high' | 'accept_medium' | 'suggested' | 'reject';
+    /** Pass 1 decision (before boost) */
+    pass1Decision?: 'accept_high' | 'accept_medium' | 'suggested' | 'reject';
+    /** Pass used (1 or 2) */
+    passUsed?: number;
+    /** Whether boost pass was triggered */
+    boostTriggered?: boolean;
+    /** Decision reason */
+    reason?: string;
+    /** Gap between top and second candidate */
+    scoreGap?: number;
     /** Number of hypotheses generated */
     hypothesesCount: number;
+    /** Total queries tried */
+    queriesTriedCount?: number;
     /** Query strings tried */
     queriesTried: string[];
     /** Total candidates found */
     candidatesFound: number;
     /** Top candidate scores */
-    topScores: Array<{ title: string; score: number }>;
+    topScores: Array<{ title: string; score: number; overlapCount?: number; isbnMatched?: boolean }>;
     /** Search time in ms */
     searchTimeMs: number;
+    /** Whether this was flagged for manual review (ambiguity) */
+    manualReview?: boolean;
+    /** Whether auto-persisted */
+    autoPersisted?: boolean;
   };
 }
 

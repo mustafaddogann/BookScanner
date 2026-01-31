@@ -19,38 +19,123 @@ export const PASS2_MAX_HYPOTHESES = 12;
 /** Minimum query length for hypotheses */
 export const MIN_QUERY_LENGTH = 3;
 
+/** Maximum tokens in a query (longer queries tend to fail on Open Library) */
+export const MAX_QUERY_TOKENS = 7;
+
+/** Minimum tokens in a query for meaningful search */
+export const MIN_QUERY_TOKENS = 2;
+
 // ============================================================================
 // Scoring Thresholds
 // ============================================================================
 
 /**
  * Acceptance Gates:
- * - accept_high: ISBN matched AND score >= 0.70 (persisted)
- * - accept_medium: score >= 0.82 AND gap >= 0.18 AND overlapCount >= 3 (persisted)
- * - suggested: score >= 0.55 (shown to user, NOT persisted - optional review)
+ * - accepted (persist): score >= 0.88 AND overlapCount >= 3 AND (gap >= 0.12 OR ISBN match)
+ * - suggested (local-only): score >= 0.60 AND overlapCount >= 3
+ *   OR score >= 0.70 AND overlapCount >= 2 AND author signal present
+ * - manual_review (ambiguity only): score >= 0.75 AND overlapCount >= 3 AND gap <= 0.08
  * - reject: else
  */
 
 /** Minimum score for accept_high (with ISBN match) */
-export const ACCEPT_HIGH_THRESHOLD = 0.70;
+export const ACCEPT_HIGH_THRESHOLD = 0.88;
 
 /** Minimum score for accept_medium */
-export const ACCEPT_MEDIUM_THRESHOLD = 0.82;
+export const ACCEPT_MEDIUM_THRESHOLD = 0.88;
 
 /** Minimum gap between top and second candidate for accept_medium */
-export const ACCEPT_MEDIUM_GAP = 0.18;
+export const ACCEPT_MEDIUM_GAP = 0.12;
 
 /** Minimum overlapping tokens for accept_medium */
 export const ACCEPT_MEDIUM_MIN_OVERLAP = 3;
 
 /** Minimum score for suggested (replaces manual_review) */
-export const SUGGESTED_THRESHOLD = 0.55;
+export const SUGGESTED_THRESHOLD = 0.60;
+
+/** Alternate suggested threshold when author signal exists */
+export const SUGGESTED_AUTHOR_THRESHOLD = 0.70;
+
+/** Minimum overlap for alternate suggested path */
+export const SUGGESTED_AUTHOR_MIN_OVERLAP = 2;
+
+/**
+ * SUGGESTED_WEAK tier: Lower bar for UI-only display
+ * - Never persists to database
+ * - Shows user a best guess when nothing else qualifies
+ * - Fills UI gaps so users see something for most crops
+ */
+export const SUGGESTED_WEAK_THRESHOLD = 0.45;
+export const SUGGESTED_WEAK_MIN_OVERLAP = 2;
+
+/** Manual review threshold (ambiguity only) */
+export const MANUAL_REVIEW_THRESHOLD = 0.65;
+
+/** Manual review max gap (top two are close) */
+export const MANUAL_REVIEW_MAX_GAP = 0.08;
+
+/** Manual review minimum overlap */
+export const MANUAL_REVIEW_MIN_OVERLAP = 3;
 
 /** Minimum overlapping tokens for meaningful score */
 export const MIN_OVERLAP_COUNT = 2;
 
 /** Maximum score when overlap is below minimum */
 export const MIN_SIGNAL_SCORE_CAP = 0.10;
+
+// ============================================================================
+// TITLE_ONLY Resolution Mode Thresholds
+// ============================================================================
+
+/**
+ * TITLE_ONLY mode activates when:
+ * - Author tokens are missing OR authorScore < TITLE_ONLY_AUTHOR_THRESHOLD
+ *
+ * TITLE_ONLY accept requires ALL of:
+ * - titleScore >= TITLE_ONLY_ACCEPT_MIN
+ * - titleTokenCount >= 2
+ * - AND at least ONE of:
+ *   - margin >= TITLE_ONLY_MARGIN_MIN (clear winner)
+ *   - candidateCount <= TITLE_ONLY_MAX_CANDIDATES (few results)
+ *   - publisherScore >= TITLE_ONLY_PUBLISHER_MIN (publisher confirms)
+ */
+
+/** Title score threshold to trigger TITLE_ONLY mode (author too weak) */
+export const TITLE_ONLY_AUTHOR_THRESHOLD = 0.30;
+
+/** Minimum title score for TITLE_ONLY accept */
+export const TITLE_ONLY_ACCEPT_MIN = 0.92;
+
+/** Minimum title score for TITLE_ONLY suggested (below accept) */
+export const TITLE_ONLY_SUGGESTED_MIN = 0.78;
+
+/** Minimum margin (gap) for TITLE_ONLY accept without other signals */
+export const TITLE_ONLY_MARGIN_MIN = 0.12;
+
+/** Maximum candidates for TITLE_ONLY accept (unique titles indicator) */
+export const TITLE_ONLY_MAX_CANDIDATES = 3;
+
+/** Publisher score threshold for TITLE_ONLY accept */
+export const TITLE_ONLY_PUBLISHER_MIN = 0.60;
+
+/** Minimum title tokens required for TITLE_ONLY (avoid 1-word false positives) */
+export const TITLE_ONLY_MIN_TOKENS = 2;
+
+/** Title score below which we reject in TITLE_ONLY mode */
+export const TITLE_ONLY_REJECT_BELOW = 0.70;
+
+// ============================================================================
+// FULL_MATCH Resolution Mode Thresholds
+// ============================================================================
+
+/** Minimum title score for FULL_MATCH accept */
+export const FULL_MATCH_TITLE_MIN = 0.78;
+
+/** Minimum author score for FULL_MATCH accept */
+export const FULL_MATCH_AUTHOR_MIN = 0.55;
+
+/** Minimum combined score for FULL_MATCH accept */
+export const FULL_MATCH_OVERALL_MIN = 0.72;
 
 // ============================================================================
 // Penalties and Bonuses
@@ -110,3 +195,24 @@ export const BOOST_MAX_NGRAM_SIZE = 3;
 
 /** Number of top tokens to use for token-set query */
 export const BOOST_TOP_TOKENS_COUNT = 7;
+
+// ============================================================================
+// ISBN Extraction Configuration
+// ============================================================================
+
+/**
+ * Enable ISBN extraction from spine OCR text.
+ *
+ * HARD OFF by default: Spine OCR produces unreliable ISBN-like digit sequences
+ * (e.g., "0-515-06011-9") that harm scoring and cause false rejects.
+ *
+ * When false:
+ * - ISBN-like strings are NOT extracted from spine OCR
+ * - Raw digit lines remain in evidence text (for debugging)
+ * - ISBN is never used for scoring or query generation from spine sources
+ *
+ * When true (not recommended):
+ * - ISBN extraction is attempted from spine OCR
+ * - May cause false positives/negatives due to noisy OCR
+ */
+export const ENABLE_ISBN_FROM_SPINE = false;

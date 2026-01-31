@@ -118,7 +118,10 @@ export async function upsertResolvedBook(
   const upsertMode = useResolverKey ? 'resolver_key' : 'legacy';
 
   // ALWAYS-ON: Log upsert attempt with mode
-  console.log(`[BooksCatalog] upsert START mode=${upsertMode} resolver_key="${resolverKey}" title="${resolved.title}"`);
+  console.log(`[BooksCatalog] UPSERT_ATTEMPT mode=${upsertMode} resolver_key="${resolverKey}" title="${resolved.title}"`);
+
+  // Track write attempt for observability (Task 3)
+  useDebugStore.getState().recordWriteAttempt();
 
   // Verbose: Full payload when diagnostics enabled
   if (shouldLogVerbose()) {
@@ -148,7 +151,11 @@ export async function upsertResolvedBook(
 
     if (error) {
       // ALWAYS-ON: Log upsert failure with full error details
-      console.error(`[BooksCatalog] upsert FAIL mode=${upsertMode} resolver_key="${resolverKey}" error="${error.message}" code=${error.code} details=${JSON.stringify(error.details)} hint=${error.hint}`);
+      console.error(`[BooksCatalog] UPSERT_FAIL mode=${upsertMode} resolver_key="${resolverKey}" error="${error.message}" code=${error.code} details=${JSON.stringify(error.details)} hint=${error.hint}`);
+
+      // Track write failure for observability (Task 3)
+      useDebugStore.getState().recordWriteFailure(error.message);
+
       return {
         success: false,
         error: error.message,
@@ -158,7 +165,10 @@ export async function upsertResolvedBook(
 
     const bookId = data?.id as string;
     // ALWAYS-ON: Log upsert success
-    console.log(`[BooksCatalog] upsert SUCCESS mode=${upsertMode} resolver_key="${resolverKey}" id=${bookId}`);
+    console.log(`[BooksCatalog] UPSERT_OK mode=${upsertMode} resolver_key="${resolverKey}" id=${bookId}`);
+
+    // Track write success for observability (Task 3)
+    useDebugStore.getState().recordWriteSuccess();
 
     return {
       success: true,
@@ -166,7 +176,11 @@ export async function upsertResolvedBook(
     };
   } catch (e) {
     const errorMsg = e instanceof Error ? e.message : 'Unknown error';
-    console.error('[BooksCatalog] Upsert EXCEPTION:', e);
+    console.error(`[BooksCatalog] UPSERT_FAIL (exception) resolver_key="${resolverKey}" error="${errorMsg}"`);
+
+    // Track write failure for observability (Task 3)
+    useDebugStore.getState().recordWriteFailure(errorMsg);
+
     return {
       success: false,
       error: errorMsg,

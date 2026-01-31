@@ -1126,7 +1126,7 @@ export async function runPipeline(
 
     // =========================================================================
     // STAGE 11: Metadata Resolution (Gate 9) - Feature-flagged, NON-BLOCKING
-    // Resolver runs in Supabase Edge Function, provides CANONICAL truth
+    // Resolver runs locally by default; Supabase Edge Function is optional
     // IMPORTANT: This is async (non-blocking) to avoid UI latency regression
     // =========================================================================
     if (isMetadataResolutionEnabled() && !isDebugAlignmentMode) {

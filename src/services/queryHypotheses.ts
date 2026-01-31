@@ -21,6 +21,7 @@ import {
   PASS1_MAX_HYPOTHESES,
   PASS2_MAX_HYPOTHESES,
   MIN_QUERY_LENGTH,
+  MAX_QUERY_TOKENS,
   BOOST_MAX_NGRAM_SIZE,
   BOOST_TOP_TOKENS_COUNT,
 } from '../config/metadataResolutionConfig';
@@ -113,93 +114,99 @@ export function generateHypotheses(
   const evidence = buildEvidenceTokens(evidenceLines);
 
   // Helper to add hypothesis if not duplicate
+  // Also enforces token count bounds (2-7 tokens for effective Open Library search)
   const addHypothesis = (
     query: string,
     type: HypothesisType,
     priority: number,
     explanation: string
   ) => {
-    const normalized = query.toLowerCase().trim();
-    if (normalized.length >= MIN_QUERY_LENGTH && !usedQueries.has(normalized)) {
-      usedQueries.add(normalized);
-      hypotheses.push({ query: query.trim(), type, priority, explanation });
+    let trimmed = query.trim();
+    const normalized = trimmed.toLowerCase();
+
+    // Skip if too short
+    if (normalized.length < MIN_QUERY_LENGTH) return;
+
+    // Skip duplicates
+    if (usedQueries.has(normalized)) return;
+
+    // Trim to max tokens if needed (except ISBN)
+    if (type !== 'isbn') {
+      const tokens = trimmed.split(/\s+/).filter(Boolean);
+      if (tokens.length > MAX_QUERY_TOKENS) {
+        trimmed = tokens.slice(0, MAX_QUERY_TOKENS).join(' ');
+      }
     }
+
+    usedQueries.add(normalized);
+    hypotheses.push({ query: trimmed, type, priority, explanation });
   };
 
   // =========================================================================
   // Priority Strategy (max 5 hypotheses):
-  // 1. ISBN (if found) - instant high-confidence match
-  // 2. title + author combination - best for disambiguation
-  // 3. author + title combination - alternate order
-  // 4. Longest line alone - likely the title
-  // 5. Article-stripped variant - handles "The X" vs "X"
+  // 1. ISBN (if found)
+  // 2. title + author (best disambiguation)
+  // 3. title-only (longest substantive line)
+  // 4. author-only (if detected)
+  // 5. stripped variant (remove leading article / noise)
   //
-  // Only fall back to OCR fields if evidence doesn't yield enough
+  // Only fall back to OCR fields if evidence doesn't yield enough.
   // =========================================================================
 
-  // =========================================================================
-  // 1. ISBN hypotheses (highest priority - slot 1)
-  // =========================================================================
-  // Only take first ISBN (usually only one anyway)
+  const sortedByLength = [...evidence.candidatePhrases].sort(
+    (a, b) => b.length - a.length
+  );
+
+  let bestTitle: string | null = null;
+  let bestAuthor: string | null = null;
+
+  if (evidence.titleLikeLines.length > 0) {
+    bestTitle = evidence.titleLikeLines[0];
+  } else if (sortedByLength.length > 0) {
+    bestTitle = sortedByLength[0];
+  }
+
+  if (evidence.personNameLines.length > 0) {
+    bestAuthor = evidence.personNameLines[0];
+  }
+
+  // 1) ISBN
   if (evidence.isbns.length > 0) {
     const isbn = evidence.isbns[0];
     addHypothesis(isbn, 'isbn', 0, `ISBN extracted from evidence: ${isbn}`);
   }
 
-  // =========================================================================
-  // 2. Title + Author combinations (slots 2-3)
-  // =========================================================================
-  let bestTitle: string | null = null;
-  let bestAuthor: string | null = null;
-
-  if (evidence.personNameLines.length > 0 && evidence.titleLikeLines.length > 0) {
-    bestTitle = evidence.titleLikeLines[0];
-    bestAuthor = evidence.personNameLines[0];
-  } else if (evidence.candidatePhrases.length >= 2) {
-    // If we can't clearly identify title vs author, use line ordering/length heuristics
-    // Longer line is more likely title, shorter is more likely author (name)
-    const sorted = [...evidence.candidatePhrases].sort((a, b) => b.length - a.length);
-    bestTitle = sorted[0];
-    bestAuthor = sorted[1];
-  }
-
+  // 2) Title + Author
   if (bestTitle && bestAuthor) {
     addHypothesis(
       `${bestTitle} ${bestAuthor}`,
       'title_author',
       10,
-      `Title-like "${bestTitle}" + author "${bestAuthor}"`
-    );
-
-    addHypothesis(
-      `${bestAuthor} ${bestTitle}`,
-      'author_title',
-      11,
-      `Author "${bestAuthor}" + title-like "${bestTitle}"`
+      `Title "${bestTitle}" + author "${bestAuthor}"`
     );
   }
 
-  // =========================================================================
-  // 3. Longest line hypothesis (slot 4)
-  // =========================================================================
-  const sortedByLength = [...evidence.candidatePhrases].sort(
-    (a, b) => b.length - a.length
-  );
-
-  if (sortedByLength.length > 0) {
-    const longest = sortedByLength[0];
+  // 3) Title-only (longest substantive line)
+  if (bestTitle) {
     addHypothesis(
-      longest,
-      'longest_line',
+      bestTitle,
+      'title_only',
       20,
-      `Longest line: "${longest}"`
+      `Title-only: "${bestTitle}"`
     );
   }
 
-  // =========================================================================
-  // 4. Article-stripped variant (slot 5)
-  // =========================================================================
-  // Strip article from the best title candidate
+  // 4) Author-only (if detected)
+  if (bestAuthor) {
+    addHypothesis(
+      bestAuthor,
+      'author_only',
+      25,
+      `Author-only: "${bestAuthor}"`
+    );
+  }
+
+  // 5) Stripped variant
   const titleToStrip = bestTitle || (sortedByLength.length > 0 ? sortedByLength[0] : null);
   if (titleToStrip) {
     const stripped = stripLeadingArticle(titleToStrip);
@@ -208,24 +215,44 @@ export function generateHypotheses(
         addHypothesis(
           `${stripped} ${bestAuthor}`,
           'stripped',
-          15,
+          30,
           `Stripped "${stripped}" + author "${bestAuthor}"`
         );
       } else {
         addHypothesis(
           stripped,
           'stripped',
-          25,
+          31,
           `Stripped title: "${stripped}"`
         );
       }
     }
   }
 
-  // =========================================================================
-  // 5. OCR field fallback (only if we have room and evidence was sparse)
-  // =========================================================================
-  // Only use OCR fields as fallback if we have < 3 hypotheses from evidence
+  // If we still have fewer than 3 hypotheses, try combining lines
+  if (hypotheses.length < 3 && sortedByLength.length >= 2) {
+    addHypothesis(
+      `${sortedByLength[0]} ${sortedByLength[1]}`,
+      'combined_lines',
+      40,
+      `Combined lines: "${sortedByLength[0]}" + "${sortedByLength[1]}"`
+    );
+  }
+
+  // If still sparse, try a normalized-token variant of the best title
+  if (hypotheses.length < 3 && bestTitle) {
+    const normalizedTokens = normalizeForScoring(bestTitle);
+    if (normalizedTokens.length >= 2) {
+      addHypothesis(
+        normalizedTokens.join(' '),
+        'stripped',
+        45,
+        `Normalized tokens: "${normalizedTokens.join(' ')}"`
+      );
+    }
+  }
+
+  // OCR field fallback (only if we have room and evidence was sparse)
   if (hypotheses.length < 3) {
     if (ocrTitle && ocrAuthor) {
       addHypothesis(
@@ -254,6 +281,13 @@ export function generateHypotheses(
   // Sort by priority and limit
   hypotheses.sort((a, b) => a.priority - b.priority);
   const finalHypotheses = hypotheses.slice(0, MAX_HYPOTHESES);
+
+  // Debug log: always log hypothesis count and shapes for observability
+  const shapes = finalHypotheses.map((h) => h.type);
+  const candidateId = debugContext?.candidateId ?? 'unknown';
+  console.log(
+    `[MetadataResolution] hypotheses_count=${finalHypotheses.length} shapes=[${shapes.join(',')}] candidateId=${candidateId}`
+  );
 
   if (debugContext?.candidateId) {
     const preview = finalHypotheses.slice(0, 2).map((h) => h.query);
@@ -364,17 +398,30 @@ export function generateBoostHypotheses(
   const evidence = buildEvidenceTokens(evidenceLines);
 
   // Helper to add hypothesis if not duplicate
+  // Also enforces token count bounds (2-7 tokens for effective Open Library search)
   const addHypothesis = (
     query: string,
     type: HypothesisType,
     priority: number,
     explanation: string
   ) => {
-    const normalized = query.toLowerCase().trim();
-    if (normalized.length >= MIN_QUERY_LENGTH && !usedQueries.has(normalized)) {
-      usedQueries.add(normalized);
-      hypotheses.push({ query: query.trim(), type, priority, explanation });
+    let trimmed = query.trim();
+    const normalized = trimmed.toLowerCase();
+
+    // Skip if too short
+    if (normalized.length < MIN_QUERY_LENGTH) return;
+
+    // Skip duplicates
+    if (usedQueries.has(normalized)) return;
+
+    // Trim to max tokens if needed
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    if (tokens.length > MAX_QUERY_TOKENS) {
+      trimmed = tokens.slice(0, MAX_QUERY_TOKENS).join(' ');
     }
+
+    usedQueries.add(normalized);
+    hypotheses.push({ query: trimmed, type, priority, explanation });
   };
 
   // Sort candidate phrases by length (descending)

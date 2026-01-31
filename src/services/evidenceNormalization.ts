@@ -6,6 +6,28 @@
  * search hypotheses and scoring candidate matches.
  */
 
+import {
+  extractAndValidateIsbns,
+  isIsbnLikeToken,
+  filterIsbnTokens,
+  validateIsbnChecksum,
+  type IsbnExtractionResult,
+  type ValidatedIsbn,
+  type EvidenceSourceKind,
+} from './isbnUtils';
+import { ENABLE_ISBN_FROM_SPINE } from '../config/metadataResolutionConfig';
+
+// Re-export ISBN utilities for convenience
+export {
+  extractAndValidateIsbns,
+  isIsbnLikeToken,
+  filterIsbnTokens,
+  validateIsbnChecksum,
+  type IsbnExtractionResult,
+  type ValidatedIsbn,
+  type EvidenceSourceKind,
+};
+
 // ============================================================================
 // Stop Words and Junk Filters
 // ============================================================================
@@ -191,8 +213,70 @@ const NOISE_PATTERNS = [
   /^[\s\-_=.]+$/,          // Only punctuation/whitespace
   /^\d+(\.\d+)?$/,         // Only numbers (but keep ISBN-like)
   /^[A-Z]{1,2}\d{1,4}$/,   // Library call numbers
-  /^\$\d+/,                // Prices
+  /^\$\d+/,                // Prices at start
   /^(?:isbn|issn)[\s:]?\s*$/i, // Just "ISBN" or "ISSN" label
+];
+
+/**
+ * Common publisher names to strip from evidence lines
+ * These add noise and should be removed for better matching
+ */
+const PUBLISHER_NOISE = new Set([
+  'penguin',
+  'random',
+  'house',
+  'randomhouse',
+  'harpercollins',
+  'harper',
+  'collins',
+  'simon',
+  'schuster',
+  'macmillan',
+  'hachette',
+  'scholastic',
+  'vintage',
+  'anchor',
+  'knopf',
+  'doubleday',
+  'bantam',
+  'dell',
+  'berkley',
+  'putnam',
+  'ace',
+  'tor',
+  'forge',
+  'orbit',
+  'daw',
+  'baen',
+  'ballantine',
+  'fawcett',
+  'avon',
+  'morrow',
+  'little',
+  'brown',
+  'grand',
+  'central',
+  'atria',
+  'pocket',
+  'gallery',
+  'st',
+  'martins',
+  'press',
+  'books',
+  'publishers',
+  'publishing',
+  'ster', // Common OCR noise for "bestseller" or publisher suffix
+]);
+
+/**
+ * Patterns to remove embedded noise (prices, publisher fragments) from lines
+ * NOTE: ISBN pattern only removes the "ISBN" label, not the number itself
+ */
+const EMBEDDED_NOISE_PATTERNS = [
+  /\$\d+(?:\.\d{2})?/g,            // Prices like $9.99 or $193
+  /\b(?:usa|us|uk|can|cdn)\s*\$?\d+/gi, // Regional prices
+  /\bISBN[-:\s]*(?=\d)/gi,         // ISBN label only (preserves the number)
+  /\bNYT\s*#?\d*/gi,               // NYT bestseller notation
 ];
 
 // ============================================================================
@@ -265,6 +349,109 @@ export function normalizeLine(line: string): { original: string; normalized: str
     original: cleaned,
     normalized: cleaned.toLowerCase(),
   };
+}
+
+/**
+ * Strip embedded noise (prices, publisher fragments) from a line
+ * Example: "BANTAM STER $193 POISON IN THE PEN" → "POISON IN THE PEN"
+ */
+export function stripEmbeddedNoise(line: string): string {
+  let result = line;
+
+  // Remove embedded noise patterns (prices, ISBN labels, etc.)
+  for (const pattern of EMBEDDED_NOISE_PATTERNS) {
+    result = result.replace(pattern, ' ');
+  }
+
+  // Remove publisher noise words
+  const words = result.split(/\s+/).filter(Boolean);
+  if (words.length >= 1) {
+    const filteredWords = words.filter((word) => {
+      const lower = word.toLowerCase().replace(/[^a-z]/g, '');
+      // Preserve numeric-only tokens (could be ISBNs)
+      if (!lower && /\d/.test(word)) {
+        return true;
+      }
+      // Skip empty tokens after cleaning (non-alphanumeric noise)
+      if (!lower) return false;
+      return !PUBLISHER_NOISE.has(lower);
+    });
+    // Use filtered words if we kept any substantive content
+    // If all words were publisher noise, result will be empty (which is fine - line gets filtered later)
+    result = filteredWords.join(' ');
+  }
+
+  // Collapse multiple spaces and trim
+  return result.replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Words that typically end incomplete phrases (line continues on next line)
+ */
+const CONTINUATION_WORDS = new Set([
+  'the', 'a', 'an', 'of', 'in', 'to', 'for', 'with', 'on', 'at', 'by',
+  'from', 'and', 'or', 'into', 'onto', 'through', 'over', 'under',
+  'between', 'among', 'without', 'within', 'beyond', 'before', 'after',
+]);
+
+/**
+ * Detect if a line appears to be an incomplete phrase that continues on next line
+ * Example: "STRAIGHT INTO" ends with "INTO" - likely continues
+ */
+export function isIncompleteLine(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed || trimmed.length < 3) return false;
+
+  const words = trimmed.split(/\s+/);
+  if (words.length === 0) return false;
+
+  const lastWord = words[words.length - 1].toLowerCase().replace(/[^a-z]/g, '');
+
+  // Ends with a continuation word
+  if (CONTINUATION_WORDS.has(lastWord)) {
+    return true;
+  }
+
+  // Ends with a hyphen (word break)
+  if (trimmed.endsWith('-')) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Merge consecutive lines where the first appears to be incomplete
+ * Example: ["STRAIGHT INTO", "DARKNESS"] → ["STRAIGHT INTO DARKNESS"]
+ */
+export function mergeSplitLines(lines: string[]): string[] {
+  if (lines.length <= 1) return lines;
+
+  const result: string[] = [];
+  let i = 0;
+
+  while (i < lines.length) {
+    let current = lines[i].trim();
+
+    // Check if this line is incomplete and should be merged with next
+    while (i < lines.length - 1 && isIncompleteLine(current)) {
+      const next = lines[i + 1].trim();
+      // Merge: handle hyphenated word breaks
+      if (current.endsWith('-')) {
+        current = current.slice(0, -1) + next;
+      } else {
+        current = current + ' ' + next;
+      }
+      i++;
+    }
+
+    if (current) {
+      result.push(current);
+    }
+    i++;
+  }
+
+  return result;
 }
 
 /**
@@ -379,12 +566,17 @@ export interface EvidenceTokens {
   personNameLines: string[];
   /** Lines that look like titles */
   titleLikeLines: string[];
+  /** Recovered author candidates from evidence (for TITLE_ONLY mode) */
+  recoveredAuthorCandidates: RecoveredAuthorCandidate[];
 }
 
 /**
  * Detect if a line looks like a person name
- * - 2-4 words, all capitalized or title case
+ * - 2-4 words (case-insensitive detection)
  * - Common name patterns
+ *
+ * Note: Now handles OCR case errors like "nGAIO MARSH" by being case-insensitive
+ * for initial detection, then relying on token matching for actual scoring.
  */
 export function looksLikePersonName(line: string): boolean {
   const words = line.trim().split(/\s+/);
@@ -394,16 +586,7 @@ export function looksLikePersonName(line: string): boolean {
     return false;
   }
 
-  // Check if all words start with capital letter
-  const allCapitalized = words.every((w) =>
-    /^[A-Z][a-z]*$/.test(w) || /^[A-Z]+$/.test(w)
-  );
-
-  if (!allCapitalized) {
-    return false;
-  }
-
-  // Check against known non-name patterns
+  // Check against known non-name patterns (case-insensitive)
   const lowerLine = line.toLowerCase();
   if (GENRE_WORDS.has(lowerLine) || SHELF_LABELS.has(lowerLine)) {
     return false;
@@ -414,7 +597,32 @@ export function looksLikePersonName(line: string): boolean {
     return false;
   }
 
-  return true;
+  // Check if words look like name parts:
+  // - Each word should be mostly alphabetic (allow OCR case errors)
+  // - Each word should be 2+ characters (allow initials like "J" only with period)
+  const validNameParts = words.every((w) => {
+    const cleaned = w.replace(/[^a-zA-Z]/g, '');
+    // Allow single letter initials (J., K., etc.)
+    if (w.match(/^[A-Za-z]\.?$/) && words.length >= 2) {
+      return true;
+    }
+    // Word must be mostly letters (at least 70% alphabetic)
+    const alphaRatio = cleaned.length / w.length;
+    return cleaned.length >= 2 && alphaRatio >= 0.7;
+  });
+
+  if (!validNameParts) {
+    return false;
+  }
+
+  // Heuristic: at least one word should start with uppercase
+  // (catches "nGAIO MARSH" where MARSH is properly capitalized)
+  const hasUpperStart = words.some((w) => /^[A-Z]/.test(w));
+
+  // Alternative: ALL CAPS lines are common for author names in OCR
+  const isAllCaps = words.every((w) => w === w.toUpperCase() || w.length <= 2);
+
+  return hasUpperStart || isAllCaps;
 }
 
 /**
@@ -448,12 +656,37 @@ export function looksLikeTitle(line: string): boolean {
 }
 
 /**
+ * Options for building evidence tokens
+ */
+export interface BuildEvidenceTokensOptions {
+  /**
+   * Source kind for evidence (default: 'spine_crop')
+   * - spine_crop: Skip ISBN extraction (ISBN from spine OCR is unreliable noise)
+   * - back_cover/inside_page: Extract ISBNs for potential use
+   * - unknown: Conservative, skip ISBN extraction
+   */
+  sourceKind?: EvidenceSourceKind;
+}
+
+/**
  * Build evidence tokens from merged OCR lines
  *
  * @param lines - Raw text lines from merged evidence
+ * @param options - Optional configuration including sourceKind for ISBN policy
  * @returns Processed evidence tokens
  */
-export function buildEvidenceTokens(lines: string[]): EvidenceTokens {
+export function buildEvidenceTokens(
+  lines: string[],
+  options?: BuildEvidenceTokensOptions
+): EvidenceTokens {
+  const sourceKind = options?.sourceKind ?? 'spine_crop';
+
+  // Determine if ISBN extraction is allowed:
+  // 1. ENABLE_ISBN_FROM_SPINE config must be true for spine sources
+  // 2. For non-spine sources (back_cover, inside_page), extraction is always allowed
+  const isSpineSource = sourceKind === 'spine_crop' || sourceKind === 'unknown';
+  const shouldExtractIsbns = isSpineSource ? ENABLE_ISBN_FROM_SPINE : true;
+
   const cleanedLines: string[] = [];
   const tokensSet = new Set<string>();
   const tokenCounts = new Map<string, number>();
@@ -462,19 +695,28 @@ export function buildEvidenceTokens(lines: string[]): EvidenceTokens {
   const personNameLines: string[] = [];
   const titleLikeLines: string[] = [];
 
-  for (const line of lines) {
+  // Step 1: Merge split lines (e.g., "STRAIGHT INTO" + "DARKNESS")
+  const mergedLines = mergeSplitLines(lines);
+
+  for (const line of mergedLines) {
+    // Step 2: Strip embedded noise (prices, publisher names)
+    const strippedLine = stripEmbeddedNoise(line);
+
     // Normalize
-    const { original, normalized } = normalizeLine(line);
+    const { original, normalized } = normalizeLine(strippedLine);
 
     // Skip empty
     if (!normalized) {
       continue;
     }
 
-    // Extract ISBN first (before filtering)
-    const isbn = extractIsbn(original);
-    if (isbn) {
-      isbns.push(isbn);
+    // Extract ISBN only for non-spine sources (back_cover, inside_page)
+    // Spine OCR produces unreliable ISBNs that cause false negatives
+    if (shouldExtractIsbns) {
+      const isbn = extractIsbn(line);
+      if (isbn) {
+        isbns.push(isbn);
+      }
     }
 
     // Skip noise
@@ -489,13 +731,24 @@ export function buildEvidenceTokens(lines: string[]): EvidenceTokens {
 
     cleanedLines.push(original);
 
-    // Tokenize
+    // Tokenize - filter out stop tokens, numeric tokens, and ISBN-like tokens
+    // This ensures ISBN-like strings from spine OCR don't affect scoring
     const tokens = tokenize(normalized);
     for (const token of tokens) {
-      if (!isStopToken(token)) {
-        tokensSet.add(token);
-        tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
+      // Skip stop tokens (genre words, common words)
+      if (isStopToken(token)) {
+        continue;
       }
+      // Skip pure numeric tokens (years, prices, etc.)
+      if (/^\d+$/.test(token)) {
+        continue;
+      }
+      // Skip ISBN-like tokens (hyphenated numbers, ISBN patterns)
+      if (isIsbnLikeToken(token)) {
+        continue;
+      }
+      tokensSet.add(token);
+      tokenCounts.set(token, (tokenCounts.get(token) || 0) + 1);
     }
 
     // Check if this is a candidate phrase (has enough content)
@@ -513,6 +766,9 @@ export function buildEvidenceTokens(lines: string[]): EvidenceTokens {
     }
   }
 
+  // Recover author candidates from evidence
+  const recoveredAuthorCandidates = recoverAuthorCandidates(lines, personNameLines);
+
   return {
     cleanedLines,
     tokensSet,
@@ -521,12 +777,100 @@ export function buildEvidenceTokens(lines: string[]): EvidenceTokens {
     isbns,
     personNameLines,
     titleLikeLines,
+    recoveredAuthorCandidates,
   };
 }
 
 // ============================================================================
 // Utility Functions
 // ============================================================================
+
+/**
+ * Author candidate recovered from evidence lines
+ */
+export interface RecoveredAuthorCandidate {
+  /** Original line from evidence */
+  line: string;
+  /** Confidence score [0-1] */
+  confidence: number;
+  /** Reason for classification */
+  reason: string;
+}
+
+/**
+ * Attempt to recover author candidates from evidence lines.
+ *
+ * This is used before declaring "author missing" to check if there are
+ * potential author names in the evidence that could be used for matching.
+ *
+ * Criteria:
+ * - 2-4 words with high alphabetic ratio
+ * - Not all-caps single-word series labels
+ * - Prefer lines near bottom of evidence (author often at bottom of spine)
+ * - Prefer lines that look like names (capitalization patterns)
+ *
+ * @param evidenceLines - Raw evidence lines
+ * @param personNameLines - Pre-detected person name lines from buildEvidenceTokens
+ * @returns Recovered author candidates sorted by confidence
+ */
+export function recoverAuthorCandidates(
+  evidenceLines: string[],
+  personNameLines: string[]
+): RecoveredAuthorCandidate[] {
+  const candidates: RecoveredAuthorCandidate[] = [];
+
+  // First, use already-detected person name lines
+  for (const line of personNameLines) {
+    candidates.push({
+      line,
+      confidence: 0.7,
+      reason: 'detected_person_name',
+    });
+  }
+
+  // Also scan evidence lines for potential authors not caught by looksLikePersonName
+  const bottomHalf = evidenceLines.slice(Math.floor(evidenceLines.length / 2));
+  for (const line of bottomHalf) {
+    const trimmed = line.trim();
+    if (!trimmed || personNameLines.includes(trimmed)) continue;
+
+    const words = trimmed.split(/\s+/);
+
+    // Skip if not 2-4 words
+    if (words.length < 2 || words.length > 4) continue;
+
+    // Skip all-caps single-word lines (series labels)
+    if (words.length === 1 && trimmed === trimmed.toUpperCase()) continue;
+
+    // Check alphabetic ratio (should be mostly letters)
+    const letterCount = (trimmed.match(/[a-zA-Z]/g) || []).length;
+    const totalChars = trimmed.replace(/\s/g, '').length;
+    const alphabeticRatio = totalChars > 0 ? letterCount / totalChars : 0;
+
+    if (alphabeticRatio < 0.85) continue;
+
+    // Check for digit contamination (ISBN fragments, prices, etc.)
+    if (/\d{3,}/.test(trimmed)) continue;
+
+    // Check for title-case pattern (common for names)
+    const hasTitleCase = words.some(
+      (w) => w.length > 1 && w[0] === w[0].toUpperCase() && w.slice(1) === w.slice(1).toLowerCase()
+    );
+
+    if (hasTitleCase) {
+      candidates.push({
+        line: trimmed,
+        confidence: 0.5,
+        reason: 'title_case_pattern_bottom_half',
+      });
+    }
+  }
+
+  // Sort by confidence descending
+  candidates.sort((a, b) => b.confidence - a.confidence);
+
+  return candidates;
+}
 
 /**
  * Strip common articles from beginning of line
@@ -561,10 +905,16 @@ export function extractEvidenceLines(input: string | string[]): string[] {
     ? input.split(/\r?\n/)
     : input;
 
+  // Step 1: Merge split lines (e.g., "STRAIGHT INTO" + "DARKNESS")
+  const mergedLines = mergeSplitLines(rawLines);
+
   const result: string[] = [];
 
-  for (const line of rawLines) {
-    const { original, normalized } = normalizeLine(line);
+  for (const line of mergedLines) {
+    // Step 2: Strip embedded noise (prices, publisher names)
+    const strippedLine = stripEmbeddedNoise(line);
+
+    const { original, normalized } = normalizeLine(strippedLine);
 
     // Skip empty
     if (!normalized || normalized.length === 0) {
@@ -590,17 +940,20 @@ export function extractEvidenceLines(input: string | string[]): string[] {
 
 /**
  * Normalize text for scoring purposes
- * Returns tokens with aggressive noise removal and numeric filtering
+ * Returns tokens with aggressive noise removal and numeric filtering.
+ *
+ * IMPORTANT: ISBN-like tokens are ALWAYS filtered out for scoring.
+ * Title/author scoring must use only non-numeric text tokens.
  *
  * @param text - Text to normalize (title, author name, or evidence line)
- * @returns Array of cleaned tokens (lowercased, non-generic)
+ * @returns Array of cleaned tokens (lowercased, non-generic, no ISBN-like tokens)
  */
 export function normalizeForScoring(text: string): string[] {
   const { normalized } = normalizeLine(text);
   const tokens = tokenize(normalized);
 
-  // Filter out generic tokens for scoring
-  return tokens.filter((token) => {
+  // Filter out generic tokens and ISBN-like tokens for scoring
+  const filtered = tokens.filter((token) => {
     // Skip stop tokens (genre words)
     if (isStopToken(token)) {
       return false;
@@ -616,8 +969,15 @@ export function normalizeForScoring(text: string): string[] {
       return false;
     }
 
+    // Skip ISBN-like tokens (numeric fragments, hyphenated numbers, etc.)
+    if (isIsbnLikeToken(token)) {
+      return false;
+    }
+
     return true;
   });
+
+  return filtered;
 }
 
 /**
