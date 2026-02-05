@@ -31,16 +31,63 @@ target 'BookScanner' do
       # :ccache_enabled => true
     )
 
-    # iOS build hardening: fix module issues and warnings
+    # =========================================================================
+    # AFTER react_native_post_install: Apply Xcode 26 undefined_arch fixes
+    # =========================================================================
+
     installer.pods_project.targets.each do |target|
-      target.build_configurations.each do |config|
-        # Allow non-modular includes in framework modules (fixes RCT* import issues)
-        config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
-        # Enable modules for C and Objective-C
-        config.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
-        # Suppress deprecation warnings for older iOS APIs
-        config.build_settings['GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS'] = 'NO'
+      # Global build hardening for all pods
+      target.build_configurations.each do |bc|
+        bc.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+        bc.build_settings['CLANG_ENABLE_MODULES'] = 'YES'
+        bc.build_settings['GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS'] = 'NO'
+
+        # Force valid ARCHS globally to avoid undefined_arch
+        bc.build_settings['ARCHS'] = '$(ARCHS_STANDARD)'
+        bc.build_settings['ONLY_ACTIVE_ARCH'] = 'YES'
+      end
+
+      # Fix RCTSwiftUI/RCTSwiftUIWrapper Swift toolchain stalls
+      if ['RCTSwiftUI', 'RCTSwiftUIWrapper'].include?(target.name)
+        target.build_configurations.each do |bc|
+          bc.build_settings['SWIFT_USE_INTEGRATED_DRIVER'] = 'NO'
+          bc.build_settings['SWIFT_ENABLE_EXPLICIT_MODULES'] = 'NO'
+          bc.build_settings['COMPILATION_CACHE_CAS_PATH'] = ''
+          bc.build_settings['COMPILATION_CACHE_KEEP_CAS_DIRECTORY'] = 'NO'
+        end
+      end
+
+      # Xcode 26 global fix: Patch ALL shell script phases to handle undefined_arch
+      target.build_phases.each do |phase|
+        if phase.is_a?(Xcodeproj::Project::Object::PBXShellScriptBuildPhase)
+          original_script = phase.shell_script || ""
+
+          # Skip if already patched
+          next if original_script.include?('[Podfile patch]')
+
+          # Wrap script with undefined_arch guard
+          arch_guard = <<~GUARD
+            # [Podfile patch] Xcode 26 undefined_arch fix
+            if [ "${arch:-}" = "undefined_arch" ] || [ "${CURRENT_ARCH:-}" = "undefined_arch" ]; then
+              if [ "${PLATFORM_NAME:-}" = "iphoneos" ]; then
+                export arch="arm64"
+                export CURRENT_ARCH="arm64"
+                export ARCHS="arm64"
+              elif [ "${PLATFORM_NAME:-}" = "iphonesimulator" ]; then
+                export arch="arm64"
+                export CURRENT_ARCH="arm64"
+                export ARCHS="arm64 x86_64"
+              fi
+            fi
+
+          GUARD
+
+          phase.shell_script = arch_guard + original_script
+        end
       end
     end
+
+    # Save the modified project
+    installer.pods_project.save
   end
 end

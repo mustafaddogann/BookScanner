@@ -762,7 +762,20 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
 
     // Make decision (isAfterBoostPass=true only for pass 2)
     const isAfterBoostPass = pass === 2;
-    const decisionResult = makeDecisionFromScores(scoredCandidates, isAfterBoostPass);
+    const gateDebug = {
+      ...debugContext,
+      rawLines: evidenceLines,
+      normalizedLines: evidenceTokens.cleanedLines,
+      bestAuthorCandidate: evidenceTokens.recoveredAuthorCandidates[0]?.line,
+      bestAuthorConfidence: evidenceTokens.bestAuthorConfidence,
+      advancedExtraction: evidenceTokens.advancedExtraction ? {
+        title: evidenceTokens.advancedExtraction.title,
+        author: evidenceTokens.advancedExtraction.author,
+        titleConfidence: evidenceTokens.advancedExtraction.titleConfidence,
+        authorConfidence: evidenceTokens.advancedExtraction.authorConfidence,
+      } : undefined,
+    };
+    const decisionResult = makeDecisionFromScores(scoredCandidates, isAfterBoostPass, gateDebug);
 
     // Get top scoring for logging and ISBN policy debug
     const topScoring = decisionResult.topCandidate?.scoring;

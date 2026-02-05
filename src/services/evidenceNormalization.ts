@@ -328,16 +328,27 @@ export function extractIsbn(line: string): string | null {
  * Normalize a single line of text
  * - Trim whitespace
  * - Collapse multiple spaces
- * - Strip surrounding brackets and punctuation noise
+ * - Strip surrounding brackets and punctuation noise (including full wrappers like [TEXT])
  * - Convert to lowercase for tokens (but return original case version too)
  * - Keep internal apostrophes
+ *
+ * Returns wasWrapped: true if the line was fully wrapped in brackets (high-confidence author signal)
  */
-export function normalizeLine(line: string): { original: string; normalized: string } {
+export function normalizeLine(line: string): { original: string; normalized: string; wasWrapped: boolean } {
   // Trim and collapse spaces
   let cleaned = line.trim().replace(/\s+/g, ' ');
 
-  // Strip surrounding brackets and quotes
-  cleaned = cleaned.replace(/^[\[\](){}<>""'']+/, '').replace(/[\[\](){}<>""'']+$/, '');
+  // Check if entire line is wrapped in brackets/parens (e.g., "[NICHOLAS SPARKS]")
+  // This is a strong signal for author names on spines
+  let wasWrapped = false;
+  const wrapperMatch = cleaned.match(/^[\[\({\<](.+)[\]\)}\>]$/);
+  if (wrapperMatch) {
+    cleaned = wrapperMatch[1].trim();
+    wasWrapped = true;
+  } else {
+    // Strip surrounding brackets and quotes (partial stripping)
+    cleaned = cleaned.replace(/^[\[\](){}<>""'']+/, '').replace(/[\[\](){}<>""'']+$/, '');
+  }
 
   // Strip leading/trailing punctuation (but not apostrophes in middle)
   cleaned = cleaned.replace(/^[^\w\s]+/, '').replace(/[^\w\s]+$/, '');
@@ -348,6 +359,7 @@ export function normalizeLine(line: string): { original: string; normalized: str
   return {
     original: cleaned,
     normalized: cleaned.toLowerCase(),
+    wasWrapped,
   };
 }
 
@@ -568,6 +580,12 @@ export interface EvidenceTokens {
   titleLikeLines: string[];
   /** Recovered author candidates from evidence (for TITLE_ONLY mode) */
   recoveredAuthorCandidates: RecoveredAuthorCandidate[];
+  /** Best author candidate confidence [0-1] - used for weak title gating */
+  bestAuthorConfidence: number;
+  /** Number of tokens in best author candidate */
+  bestAuthorTokenCount: number;
+  /** Advanced extraction result (title/author from multi-line reconstruction, colon patterns, etc.) */
+  advancedExtraction?: import('./titleAuthorExtraction').ExtractionResult;
 }
 
 /**
@@ -694,6 +712,7 @@ export function buildEvidenceTokens(
   const isbns: string[] = [];
   const personNameLines: string[] = [];
   const titleLikeLines: string[] = [];
+  const wrappedLines: string[] = []; // Lines that were in brackets (high-confidence author signal)
 
   // Step 1: Merge split lines (e.g., "STRAIGHT INTO" + "DARKNESS")
   const mergedLines = mergeSplitLines(lines);
@@ -702,12 +721,17 @@ export function buildEvidenceTokens(
     // Step 2: Strip embedded noise (prices, publisher names)
     const strippedLine = stripEmbeddedNoise(line);
 
-    // Normalize
-    const { original, normalized } = normalizeLine(strippedLine);
+    // Normalize (now also detects bracket-wrapped lines)
+    const { original, normalized, wasWrapped } = normalizeLine(strippedLine);
 
     // Skip empty
     if (!normalized) {
       continue;
+    }
+
+    // Track wrapped lines for high-confidence author detection
+    if (wasWrapped && original) {
+      wrappedLines.push(original);
     }
 
     // Extract ISBN only for non-spine sources (back_cover, inside_page)
@@ -766,8 +790,36 @@ export function buildEvidenceTokens(
     }
   }
 
-  // Recover author candidates from evidence
-  const recoveredAuthorCandidates = recoverAuthorCandidates(lines, personNameLines);
+  // Recover author candidates from evidence (pass wrapped lines for higher confidence)
+  const recoveredAuthorCandidates = recoverAuthorCandidates(lines, personNameLines, wrappedLines);
+
+  // Run advanced extraction (multi-line reconstruction, colon patterns, all-caps detection)
+  const { extractTitleAndAuthor: extract } = require('./titleAuthorExtraction');
+  const advancedExtraction = extract(lines);
+
+  // Merge advanced extraction author into recovered candidates if not already present
+  if (advancedExtraction.author && advancedExtraction.authorConfidence > 0) {
+    const authorLower = advancedExtraction.author.toLowerCase();
+    const alreadyRecovered = recoveredAuthorCandidates.some(
+      (c: RecoveredAuthorCandidate) => c.line.toLowerCase() === authorLower
+    );
+    if (!alreadyRecovered) {
+      recoveredAuthorCandidates.push({
+        line: advancedExtraction.author,
+        confidence: advancedExtraction.authorConfidence,
+        reason: 'advanced_extraction',
+      });
+      // Re-sort by confidence
+      recoveredAuthorCandidates.sort((a: RecoveredAuthorCandidate, b: RecoveredAuthorCandidate) => b.confidence - a.confidence);
+    }
+  }
+
+  // Compute best author confidence and token count for gating logic
+  const bestAuthor = recoveredAuthorCandidates[0];
+  const bestAuthorConfidence = bestAuthor?.confidence ?? 0;
+  const bestAuthorTokenCount = bestAuthor
+    ? bestAuthor.line.trim().split(/\s+/).length
+    : 0;
 
   return {
     cleanedLines,
@@ -778,6 +830,9 @@ export function buildEvidenceTokens(
     personNameLines,
     titleLikeLines,
     recoveredAuthorCandidates,
+    bestAuthorConfidence,
+    bestAuthorTokenCount,
+    advancedExtraction,
   };
 }
 
@@ -808,24 +863,46 @@ export interface RecoveredAuthorCandidate {
  * - Not all-caps single-word series labels
  * - Prefer lines near bottom of evidence (author often at bottom of spine)
  * - Prefer lines that look like names (capitalization patterns)
+ * - HIGHEST PRIORITY: Bracketed lines like [NICHOLAS SPARKS] (confidence 0.9)
  *
  * @param evidenceLines - Raw evidence lines
  * @param personNameLines - Pre-detected person name lines from buildEvidenceTokens
+ * @param wrappedLines - Lines that were in brackets (high-confidence author signal)
  * @returns Recovered author candidates sorted by confidence
  */
 export function recoverAuthorCandidates(
   evidenceLines: string[],
-  personNameLines: string[]
+  personNameLines: string[],
+  wrappedLines: string[] = []
 ): RecoveredAuthorCandidate[] {
   const candidates: RecoveredAuthorCandidate[] = [];
+  const seenLines = new Set<string>();
 
-  // First, use already-detected person name lines
+  // HIGHEST PRIORITY: Bracketed lines like [NICHOLAS SPARKS]
+  // These are almost always author names on book spines
+  for (const line of wrappedLines) {
+    const words = line.trim().split(/\s+/);
+    // Must be 2-4 words to be a name
+    if (words.length >= 2 && words.length <= 4 && !seenLines.has(line)) {
+      seenLines.add(line);
+      candidates.push({
+        line,
+        confidence: 0.9, // Very high confidence for bracketed names
+        reason: 'bracketed_author_name',
+      });
+    }
+  }
+
+  // Second priority: already-detected person name lines
   for (const line of personNameLines) {
-    candidates.push({
-      line,
-      confidence: 0.7,
-      reason: 'detected_person_name',
-    });
+    if (!seenLines.has(line)) {
+      seenLines.add(line);
+      candidates.push({
+        line,
+        confidence: 0.7,
+        reason: 'detected_person_name',
+      });
+    }
   }
 
   // Also scan evidence lines for potential authors not caught by looksLikePersonName
@@ -1103,3 +1180,22 @@ export function isGenericTitle(title: string): boolean {
 
   return false;
 }
+
+// ============================================================================
+// Advanced Title/Author Extraction (Re-exports)
+// ============================================================================
+
+export {
+  extractTitleAndAuthor,
+  buildTitleCandidates,
+  selectAuthorCandidates,
+  parseColonSeparated,
+  cleanupPossessiveNoise,
+  isAllCapsNameCandidate,
+  isPublisherOrMarketing,
+  normalizeAuthorName,
+  type TitleCandidate,
+  type AuthorCandidate,
+  type ExtractionResult,
+  type ColonSeparatedResult,
+} from './titleAuthorExtraction';

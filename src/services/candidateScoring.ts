@@ -62,9 +62,10 @@ import {
  *
  * - FULL_MATCH: Both title and author evidence available and reliable
  * - TITLE_ONLY: Author missing or unreliable, stricter title matching required
+ * - WEAK_TITLE_STRONG_AUTHOR: Title tokens < 2 but strong author evidence exists
  * - NO_MATCH: Insufficient evidence to attempt matching
  */
-export type ResolutionMode = 'FULL_MATCH' | 'TITLE_ONLY' | 'NO_MATCH';
+export type ResolutionMode = 'FULL_MATCH' | 'TITLE_ONLY' | 'WEAK_TITLE_STRONG_AUTHOR' | 'NO_MATCH';
 
 /**
  * Ambiguity metrics for anti-false-positive safeguards
@@ -425,12 +426,27 @@ export function scoreCandidate(
   }
 
   // Determine resolution mode:
-  // - TITLE_ONLY if author tokens missing OR authorScore < TITLE_ONLY_AUTHOR_THRESHOLD
-  // - FULL_MATCH otherwise
-  // - NO_MATCH if title tokens < TITLE_ONLY_MIN_TOKENS
+  // - FULL_MATCH: both title and author evidence available
+  // - TITLE_ONLY: author missing/weak, but title >= 2 tokens
+  // - WEAK_TITLE_STRONG_AUTHOR: title < 2 tokens but strong author evidence
+  // - NO_MATCH: insufficient evidence (title < 2 AND no strong author)
+  //
+  // Gate for weak title + strong author:
+  // If titleTokens == 1 AND bestAuthorConfidence >= 0.75 AND bestAuthorTokenCount >= 2
+  // => proceed with WEAK_TITLE_STRONG_AUTHOR (do NOT reject)
+  const bestAuthorConfidence = evidenceTokens.bestAuthorConfidence ?? 0;
+  const bestAuthorTokenCount = evidenceTokens.bestAuthorTokenCount ?? 0;
+  const hasStrongAuthorEvidence = bestAuthorConfidence >= 0.75 && bestAuthorTokenCount >= 2;
+
   let resolutionMode: ResolutionMode = 'FULL_MATCH';
   if (titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
-    resolutionMode = 'NO_MATCH';
+    // Weak title - check if author evidence can save us
+    if (titleTokenCount >= 1 && hasStrongAuthorEvidence) {
+      // Proceed with weak title but strong author
+      resolutionMode = 'WEAK_TITLE_STRONG_AUTHOR';
+    } else {
+      resolutionMode = 'NO_MATCH';
+    }
   } else if (authorScore === null || authorScore < TITLE_ONLY_AUTHOR_THRESHOLD) {
     resolutionMode = 'TITLE_ONLY';
   }
@@ -682,11 +698,72 @@ function findDistinctSecond(
   return null; // No distinct second = top is dominant
 }
 
+/**
+ * Debug context for logging gate decisions
+ */
+export interface GateDebugContext {
+  /** Raw evidence lines */
+  rawLines?: string[];
+  /** Normalized/cleaned lines */
+  normalizedLines?: string[];
+  /** Best author candidate from evidence */
+  bestAuthorCandidate?: string;
+  /** Best author confidence */
+  bestAuthorConfidence?: number;
+  /** Candidate ID for correlation */
+  candidateId?: string;
+  /** Advanced extraction result (multi-line title, colon patterns, all-caps author) */
+  advancedExtraction?: {
+    title: string | null;
+    author: string | null;
+    titleConfidence: number;
+    authorConfidence: number;
+  };
+}
+
+/**
+ * Log a gate decision when verbose debug is enabled
+ */
+function logGateDecision(
+  decision: ScoringDecision,
+  reason: string,
+  resolutionMode: ResolutionMode,
+  top: ScoredCandidate | null,
+  debugContext?: GateDebugContext
+): void {
+  if (!isMetadataVerboseDebug()) return;
+
+  const candidateInfo = top ? {
+    title: top.book.title,
+    authors: top.book.authors,
+    score: Number(top.scoring.score.toFixed(3)),
+    titleScore: Number(top.scoring.titleScore.toFixed(3)),
+    authorScore: top.scoring.authorScore !== null ? Number(top.scoring.authorScore.toFixed(3)) : null,
+    titleTokenCount: top.scoring.titleTokenCount,
+    matchedTitleTokens: top.scoring.matchedTitleTokens,
+    matchedAuthorTokens: top.scoring.matchedAuthorTokens,
+    overlapCount: top.scoring.overlapCount,
+  } : null;
+
+  console.log(`[GateDecision] ${decision.toUpperCase()}: ${reason}`, {
+    candidateId: debugContext?.candidateId,
+    resolutionMode,
+    rawLines: debugContext?.rawLines,
+    normalizedLines: debugContext?.normalizedLines,
+    bestAuthorCandidate: debugContext?.bestAuthorCandidate,
+    bestAuthorConfidence: debugContext?.bestAuthorConfidence,
+    advancedExtraction: debugContext?.advancedExtraction,
+    topCandidate: candidateInfo,
+  });
+}
+
 export function makeDecisionFromScores(
   scoredCandidates: ScoredCandidate[],
-  isAfterBoostPass: boolean = false
+  isAfterBoostPass: boolean = false,
+  debugContext?: GateDebugContext
 ): DecisionResult {
   if (scoredCandidates.length === 0) {
+    logGateDecision('reject', 'No candidates found', 'NO_MATCH', null, debugContext);
     return {
       decision: 'reject',
       topCandidate: null,
@@ -758,12 +835,79 @@ export function makeDecisionFromScores(
 
   if (resolutionMode === 'NO_MATCH') {
     // Insufficient evidence to match
+    logGateDecision('reject', 'insufficient_title_evidence', resolutionMode, top, debugContext);
     return {
       decision: 'reject',
       topCandidate: top,
       reviewCandidates: [],
       scoreGap,
       reason: 'insufficient_title_evidence',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // ==========================================================================
+  // WEAK_TITLE_STRONG_AUTHOR PATH: Title < 2 tokens but strong author evidence
+  // Conservative: never auto-accept, always suggest or manual_review
+  // ==========================================================================
+  if (resolutionMode === 'WEAK_TITLE_STRONG_AUTHOR') {
+    // Up-weight author match: if author tokens matched, score is more reliable
+    const authorMatchCount = top.scoring.matchedAuthorTokens.length;
+
+    // If we have both title and author overlap, suggest
+    if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1) {
+      logGateDecision('suggested', 'weak_title_strong_author_proceeded', resolutionMode, top, debugContext);
+      return {
+        decision: 'suggested',
+        topCandidate: top,
+        reviewCandidates: alternatives,
+        scoreGap,
+        reason: 'weak_title_strong_author_proceeded',
+        manualReview: true,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
+    // If only author matched but title didn't, still suggest with manual review
+    if (authorMatchCount >= 2) {
+      logGateDecision('suggested', 'weak_title_author_only_match', resolutionMode, top, debugContext);
+      return {
+        decision: 'suggested',
+        topCandidate: top,
+        reviewCandidates: alternatives,
+        scoreGap,
+        reason: 'weak_title_author_only_match',
+        manualReview: true,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
+    // Fallback: some signal but weak - suggest_weak with manual review
+    if (top.scoring.overlapCount >= 1) {
+      logGateDecision('suggested_weak', 'weak_title_and_author_manual_review', resolutionMode, top, debugContext);
+      return {
+        decision: 'suggested_weak',
+        topCandidate: top,
+        reviewCandidates: alternatives,
+        scoreGap,
+        reason: 'weak_title_and_author_manual_review',
+        manualReview: true,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
+    // No overlap at all - reject
+    logGateDecision('reject', 'no_evidence_overlap', resolutionMode, top, debugContext);
+    return {
+      decision: 'reject',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'no_evidence_overlap',
       resolutionMode,
       ambiguityMetrics,
     };
@@ -780,8 +924,10 @@ export function makeDecisionFromScores(
       (scoreGap >= ACCEPT_MEDIUM_GAP || top.scoring.isbnMatched);
 
     if (isAccepted) {
+      const decision = top.scoring.isbnMatched ? 'accept_high' : 'accept_medium';
+      logGateDecision(decision, 'full_match', resolutionMode, top, debugContext);
       return {
-        decision: top.scoring.isbnMatched ? 'accept_high' : 'accept_medium',
+        decision,
         topCandidate: top,
         reviewCandidates: [],
         scoreGap,
@@ -807,12 +953,14 @@ export function makeDecisionFromScores(
         hasAuthorSignal);
 
     if (isSuggested) {
+      const reason = isManualReview ? 'ambiguous_candidates' : 'full_match_suggested';
+      logGateDecision('suggested', reason, resolutionMode, top, debugContext);
       return {
         decision: 'suggested',
         topCandidate: top,
         reviewCandidates: isManualReview ? alternatives : [],
         scoreGap,
-        reason: isManualReview ? 'ambiguous_candidates' : 'full_match_suggested',
+        reason,
         manualReview: isManualReview,
         resolutionMode,
         ambiguityMetrics,
@@ -825,6 +973,7 @@ export function makeDecisionFromScores(
       top.scoring.overlapCount >= SUGGESTED_WEAK_MIN_OVERLAP;
 
     if (isSuggestedWeak) {
+      logGateDecision('suggested_weak', 'full_match_weak', resolutionMode, top, debugContext);
       return {
         decision: 'suggested_weak',
         topCandidate: top,
@@ -838,6 +987,7 @@ export function makeDecisionFromScores(
     }
 
     // Reject in FULL_MATCH mode - due to low title/author confidence
+    logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
     return {
       decision: 'reject',
       topCandidate: top,
@@ -858,6 +1008,7 @@ export function makeDecisionFromScores(
   // This ensures "strong title + missing author" always produces at least suggested_weak
   // Changed from TITLE_ONLY_REJECT_BELOW (0.70) to allow scores in [0.45, 0.70) to fall through
   if (titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
+    logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
     return {
       decision: 'reject',
       topCandidate: top,
@@ -886,6 +1037,7 @@ export function makeDecisionFromScores(
     titleTokenCount >= TITLE_ONLY_MIN_TOKENS &&
     hasAntiAmbiguitySignal
   ) {
+    logGateDecision('accept_medium', 'title_only_high_confidence', resolutionMode, top, debugContext);
     return {
       decision: 'accept_medium', // TITLE_ONLY accept is medium confidence
       topCandidate: top,
@@ -899,6 +1051,7 @@ export function makeDecisionFromScores(
 
   // TITLE_ONLY SUGGESTED: titleScore >= T_ONLY_MIN but ambiguity is high
   if (titleScore >= TITLE_ONLY_ACCEPT_MIN && !hasAntiAmbiguitySignal) {
+    logGateDecision('suggested', 'title_only_ambiguous', resolutionMode, top, debugContext);
     return {
       decision: 'suggested',
       topCandidate: top,
@@ -913,6 +1066,7 @@ export function makeDecisionFromScores(
 
   // TITLE_ONLY SUGGESTED: titleScore strong but below T_ONLY_MIN
   if (titleScore >= TITLE_ONLY_SUGGESTED_MIN) {
+    logGateDecision('suggested', 'title_strong_author_missing', resolutionMode, top, debugContext);
     return {
       decision: 'suggested',
       topCandidate: top,
@@ -927,6 +1081,7 @@ export function makeDecisionFromScores(
 
   // TITLE_ONLY SUGGESTED_WEAK: title has some signal but not enough for suggested
   if (titleScore >= SUGGESTED_WEAK_THRESHOLD) {
+    logGateDecision('suggested_weak', 'title_weak_author_missing', resolutionMode, top, debugContext);
     return {
       decision: 'suggested_weak',
       topCandidate: top,
@@ -940,6 +1095,7 @@ export function makeDecisionFromScores(
   }
 
   // Final reject - title confidence too low
+  logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
   return {
     decision: 'reject',
     topCandidate: top,
