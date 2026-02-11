@@ -104,11 +104,13 @@ export interface NormalizedSignals {
 }
 
 // Scoring weights (must sum to 1.0)
+// Tuned for spine OCR where title is the primary (often only) signal.
+// Author/ISBN are bonuses when available, not requirements.
 export const SCORING_WEIGHTS = {
-  titleSimilarity: 0.30,
-  authorPresence: 0.25,
-  isbnMatch: 0.20,
-  wordCoverage: 0.15,
+  titleSimilarity: 0.45,
+  authorPresence: 0.10,
+  isbnMatch: 0.10,
+  wordCoverage: 0.25,
   resultRank: 0.05,
   genericPenalty: 0.05, // Subtracted
 } as const;
@@ -134,13 +136,13 @@ export type VerificationFlagType =
   | 'edition-conflict';
 
 export const VERIFICATION_PENALTIES: Record<VerificationFlagType, number> = {
-  'isbn-mismatch': 0.40,
-  'author-mismatch': 0.25,
-  'publisher-mismatch': 0.20,
-  'token-coverage-low': 0.20,
-  'suspicious-edition': 0.15,
-  'edition-conflict': 0.15,
-  'year-implausible': 0.10,
+  'isbn-mismatch': 0.30,
+  'author-mismatch': 0.10,
+  'publisher-mismatch': 0.10,
+  'token-coverage-low': 0.15,
+  'suspicious-edition': 0.10,
+  'edition-conflict': 0.10,
+  'year-implausible': 0.05,
 };
 
 // ============================================================================
@@ -185,9 +187,9 @@ export const ACCEPTANCE_THRESHOLDS: Record<
   EvidenceTier,
   { autoAccept: number; suggest: number; ambiguous: number }
 > = {
-  strong: { autoAccept: 0.85, suggest: 0.70, ambiguous: 0.50 },
-  usable: { autoAccept: 0.88, suggest: 0.75, ambiguous: 0.55 },
-  weak: { autoAccept: 0.95, suggest: 0.85, ambiguous: 0.70 },
+  strong: { autoAccept: 0.70, suggest: 0.55, ambiguous: 0.40 },
+  usable: { autoAccept: 0.75, suggest: 0.60, ambiguous: 0.45 },
+  weak: { autoAccept: 0.85, suggest: 0.70, ambiguous: 0.55 },
   unusable: { autoAccept: 1.0, suggest: 1.0, ambiguous: 1.0 },
 };
 
