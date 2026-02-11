@@ -121,7 +121,7 @@ export const METADATA_VERBOSE_DEBUG = false;
  * When true:
  * - Use Supabase resolver as the primary resolution path
  */
-export const METADATA_USE_SUPABASE_RESOLVER = true;
+export const METADATA_USE_SUPABASE_RESOLVER = false;
 
 /**
  * Check if metadata resolution is enabled

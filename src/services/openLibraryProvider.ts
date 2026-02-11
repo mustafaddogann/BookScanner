@@ -12,6 +12,11 @@ import type { ResolvedBook, EvidenceSourceKind } from '../types';
 import type { MetadataLookupProvider } from './metadataLookupProvider';
 import { useDebugStore } from '../store/useDebugStore';
 import {
+  getSupabaseBaseUrl,
+  getSupabaseAnonKey,
+  isSupabaseConfigured,
+} from '../config/supabase';
+import {
   generateHypotheses,
   generateBoostHypotheses,
   getQuerySet,
@@ -244,6 +249,124 @@ function buildCoverUrl(coverId: number | undefined): string | undefined {
   return `https://covers.openlibrary.org/b/id/${coverId}-M.jpg`;
 }
 
+// ============================================================================
+// Supabase Catalog Lookup (local DB, sub-ms latency)
+// ============================================================================
+
+interface CatalogRow {
+  id: string;
+  provider: string;
+  provider_id: string;
+  isbn13: string | null;
+  isbn10: string | null;
+  title: string;
+  authors: string[];
+  publisher: string | null;
+  publish_year: string | null;
+  cover_url: string | null;
+  resolver_key: string | null;
+  similarity_score?: number;
+}
+
+function catalogRowToBook(row: CatalogRow): ResolvedBook {
+  return {
+    title: row.title,
+    authors: row.authors ?? [],
+    isbn13: row.isbn13 ?? undefined,
+    isbn10: row.isbn10 ?? undefined,
+    publisher: row.publisher ?? undefined,
+    publishYear: row.publish_year ?? undefined,
+    coverUrl: row.cover_url ?? undefined,
+    source: 'openLibrary',
+    sourceId: row.resolver_key ?? row.provider_id,
+  };
+}
+
+/**
+ * Search the local Supabase books_catalog via pg_trgm fuzzy search.
+ * Returns results quickly from the pre-populated catalog.
+ */
+async function searchCatalog(query: string, limit: number = 5): Promise<ResolvedBook[]> {
+  if (!isSupabaseConfigured()) return [];
+
+  try {
+    const baseUrl = getSupabaseBaseUrl();
+    const anonKey = getSupabaseAnonKey();
+    const url = `${baseUrl}/rest/v1/rpc/search_books_fuzzy`;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const rpcResponse = await fetch(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': anonKey,
+        'Authorization': `Bearer ${anonKey}`,
+      },
+      body: JSON.stringify({ p_query: query, p_limit: limit, p_threshold: 0.3 }),
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!rpcResponse.ok) {
+      console.warn(`[Catalog] Fuzzy search failed: ${rpcResponse.status}`);
+      return [];
+    }
+
+    const rows: CatalogRow[] = await rpcResponse.json();
+    if (!rows || rows.length === 0) return [];
+
+    console.log(`[Catalog] Fuzzy search "${query}" → ${rows.length} results (top: ${rows[0].similarity_score?.toFixed(2)})`);
+    return rows.map(catalogRowToBook);
+  } catch (error: any) {
+    console.warn(`[Catalog] Search error: ${error.message}`);
+    return [];
+  }
+}
+
+/**
+ * Look up a book by ISBN in the local catalog.
+ */
+async function searchCatalogByIsbn(isbn: string): Promise<ResolvedBook[]> {
+  if (!isSupabaseConfigured()) return [];
+
+  try {
+    const baseUrl = getSupabaseBaseUrl();
+    const anonKey = getSupabaseAnonKey();
+    const column = isbn.length === 13 ? 'isbn13' : 'isbn10';
+    const url = `${baseUrl}/rest/v1/books_catalog?${column}=eq.${isbn}&limit=1`;
+
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(url, {
+      headers: {
+        'apikey': anonKey,
+        'Authorization': `Bearer ${anonKey}`,
+      },
+      signal: controller.signal,
+    });
+
+    clearTimeout(timeoutId);
+
+    if (!response.ok) return [];
+
+    const rows: CatalogRow[] = await response.json();
+    if (!rows || rows.length === 0) return [];
+
+    console.log(`[Catalog] ISBN hit: ${isbn} → "${rows[0].title}"`);
+    return rows.map(catalogRowToBook);
+  } catch (error: any) {
+    console.warn(`[Catalog] ISBN lookup error: ${error.message}`);
+    return [];
+  }
+}
+
+// ============================================================================
+// Provider Implementation
+// ============================================================================
+
 /**
  * Open Library Provider Implementation
  */
@@ -264,6 +387,12 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
     const verbose = shouldLogVerbose();
     if (verbose) {
       console.log(`[OpenLibrary] searchByIsbn: ${normalized}`);
+    }
+
+    // Check local catalog first
+    const catalogResults = await searchCatalogByIsbn(normalized);
+    if (catalogResults.length > 0) {
+      return catalogResults;
     }
 
     try {
@@ -338,9 +467,22 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
 
     const verbose = shouldLogVerbose();
 
+    // Check local catalog first (fast, no network to OL)
+    const catalogResults = await searchCatalog(query, 5);
+    if (catalogResults.length >= 3) {
+      console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${catalogResults.length} ms=${Date.now() - startTime} source=catalog`);
+      return catalogResults;
+    }
+
     try {
-      // Call Search API
+      // Fall back to Open Library API
       const candidates = await this.searchByQuery(query, 5);
+
+      if (candidates.length === 0 && catalogResults.length > 0) {
+        // OL returned nothing but catalog had some results — use them
+        console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${catalogResults.length} ms=${Date.now() - startTime} source=catalog_fallback`);
+        return catalogResults;
+      }
 
       if (candidates.length === 0) {
         // ALWAYS-ON: Log search end
@@ -355,11 +497,25 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
       // Enrich top candidates to get ISBNs
       const enriched = await this.enrichToISBN(candidates);
 
+      // Merge catalog results with OL results (catalog first, deduplicate by title)
+      if (catalogResults.length > 0) {
+        const seen = new Set(catalogResults.map((b) => b.title.toLowerCase()));
+        const unique = enriched.filter((b) => !seen.has(b.title.toLowerCase()));
+        const merged = [...catalogResults, ...unique].slice(0, 10);
+        console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${merged.length} ms=${Date.now() - startTime} source=merged`);
+        return merged;
+      }
+
       // ALWAYS-ON: Log search end
-      console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${enriched.length} ms=${Date.now() - startTime}`);
+      console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${enriched.length} ms=${Date.now() - startTime} source=openLibrary`);
 
       return enriched;
     } catch (error: any) {
+      // If OL fails but catalog had results, use them
+      if (catalogResults.length > 0) {
+        console.log(`[OpenLibraryProvider] searchByText END query="${query}" count=${catalogResults.length} ms=${Date.now() - startTime} source=catalog_error_fallback`);
+        return catalogResults;
+      }
       // ALWAYS-ON: Log search error
       console.warn(`[OpenLibraryProvider] searchByText ERROR query="${query}" error="${error.message}" ms=${Date.now() - startTime}`);
       return [];
