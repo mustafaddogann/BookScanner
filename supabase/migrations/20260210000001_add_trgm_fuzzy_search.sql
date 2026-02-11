@@ -21,9 +21,15 @@ CREATE EXTENSION IF NOT EXISTS pg_trgm;
 CREATE INDEX IF NOT EXISTS idx_books_catalog_title_trgm
   ON public.books_catalog USING gin (title gin_trgm_ops);
 
+-- Helper: immutable wrapper for array_to_string (required for index expressions)
+CREATE OR REPLACE FUNCTION immutable_array_to_string(arr TEXT[], sep TEXT)
+RETURNS TEXT AS $$
+  SELECT array_to_string(arr, sep);
+$$ LANGUAGE sql IMMUTABLE STRICT;
+
 -- Trigram index on flattened authors (for author fuzzy matching)
 CREATE INDEX IF NOT EXISTS idx_books_catalog_authors_trgm
-  ON public.books_catalog USING gin (array_to_string(authors, ' ') gin_trgm_ops);
+  ON public.books_catalog USING gin (immutable_array_to_string(authors, ' ') gin_trgm_ops);
 
 -- ============================================================================
 -- Step 3: Fuzzy search function
