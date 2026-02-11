@@ -173,6 +173,83 @@ async function logEvent(
 }
 
 // ============================================================================
+// Local Catalog Lookup (books_catalog via pg_trgm)
+// ============================================================================
+
+function mapCatalogRowToBook(row: {
+  provider: string;
+  provider_id: string;
+  isbn13: string | null;
+  isbn10: string | null;
+  title: string;
+  authors: string[];
+  publisher: string | null;
+  publish_year: string | null;
+  cover_url: string | null;
+  resolver_key: string | null;
+}): ResolvedBook {
+  return {
+    title: row.title,
+    authors: row.authors ?? [],
+    isbn13: row.isbn13,
+    isbn10: row.isbn10,
+    publisher: row.publisher,
+    publishYear: row.publish_year ? parseInt(row.publish_year, 10) || null : null,
+    edition: null,
+    coverUrl: row.cover_url,
+    source: 'openLibrary',
+    sourceId: row.resolver_key ?? `${row.provider}:${row.provider_id}`,
+  };
+}
+
+async function lookupCatalogByIsbn(
+  supabase: ReturnType<typeof createClient>,
+  isbn: string
+): Promise<ResolvedBook | null> {
+  const column = isbn.length === 13 ? 'isbn13' : 'isbn10';
+  const { data, error } = await supabase
+    .from('books_catalog')
+    .select('provider, provider_id, isbn13, isbn10, title, authors, publisher, publish_year, cover_url, resolver_key')
+    .eq(column, isbn)
+    .limit(1)
+    .single();
+
+  if (error || !data) return null;
+  return mapCatalogRowToBook(data);
+}
+
+async function searchCatalogFuzzy(
+  supabase: ReturnType<typeof createClient>,
+  query: string,
+  limit: number = SEARCH_LIMIT
+): Promise<ResolvedBook[]> {
+  const { data, error } = await supabase.rpc('search_books_fuzzy', {
+    p_query: query,
+    p_limit: limit,
+    p_threshold: 0.3,
+  });
+
+  if (error || !data || data.length === 0) return [];
+
+  return data.map((row: any) => mapCatalogRowToBook(row));
+}
+
+function deduplicateBooks(books: ResolvedBook[]): ResolvedBook[] {
+  const seen = new Set<string>();
+  return books.filter((book) => {
+    // Deduplicate by sourceId, isbn13, or isbn10
+    const keys = [book.sourceId, book.isbn13, book.isbn10].filter(Boolean);
+    for (const key of keys) {
+      if (seen.has(key!)) return false;
+    }
+    for (const key of keys) {
+      seen.add(key!);
+    }
+    return true;
+  });
+}
+
+// ============================================================================
 // Open Library API
 // ============================================================================
 
@@ -195,9 +272,16 @@ async function lookupIsbn(
   supabase: ReturnType<typeof createClient>,
   isbn: string
 ): Promise<{ book: ResolvedBook | null; cacheHit: boolean }> {
+  // 1. Check local catalog first (fastest path)
+  const catalogBook = await lookupCatalogByIsbn(supabase, isbn);
+  if (catalogBook) {
+    console.log(`[Catalog] ISBN hit: ${isbn} → "${catalogBook.title}"`);
+    return { book: catalogBook, cacheHit: true };
+  }
+
   const queryHash = await computeHash(isbn);
 
-  // Check cache
+  // 2. Check resolver cache
   const cached = await lookupCache(supabase, 'openLibrary', 'isbn', queryHash);
   if (cached.hit && cached.data) {
     const book = mapIsbnResponseToBook(
@@ -207,7 +291,7 @@ async function lookupIsbn(
     return { book, cacheHit: true };
   }
 
-  // Fetch from Open Library
+  // 3. Fetch from Open Library (fallback)
   try {
     const url = `${OPEN_LIBRARY_BASE}/isbn/${isbn}.json`;
     const response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
@@ -241,17 +325,27 @@ async function searchBooks(
   query: string
 ): Promise<{ books: ResolvedBook[]; cacheHit: boolean }> {
   const normalizedQuery = normalizeQuery(query);
+
+  // 1. Check local catalog first (fuzzy trigram search)
+  const catalogBooks = await searchCatalogFuzzy(supabase, normalizedQuery);
+  if (catalogBooks.length >= SEARCH_LIMIT) {
+    console.log(`[Catalog] Search hit: "${normalizedQuery}" → ${catalogBooks.length} results`);
+    return { books: catalogBooks, cacheHit: true };
+  }
+
   const queryHash = await computeHash(normalizedQuery);
 
-  // Check cache
+  // 2. Check resolver cache
   const cached = await lookupCache(supabase, 'openLibrary', 'search', queryHash);
   if (cached.hit && cached.data) {
     const response = cached.data as OpenLibrarySearchResponse;
     const books = response.docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
-    return { books, cacheHit: true };
+    // Merge catalog results with cached results (catalog first, deduplicated)
+    const merged = deduplicateBooks([...catalogBooks, ...books]).slice(0, SEARCH_LIMIT);
+    return { books: merged, cacheHit: true };
   }
 
-  // Fetch from Open Library
+  // 3. Fetch from Open Library (fallback)
   try {
     const encodedQuery = encodeURIComponent(normalizedQuery);
     const url = `${OPEN_LIBRARY_BASE}/search.json?q=${encodedQuery}&limit=${SEARCH_LIMIT}`;
@@ -274,10 +368,17 @@ async function searchBooks(
       data
     );
 
-    const books = data.docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
+    const olBooks = data.docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
+    // Merge any partial catalog results with OL results
+    const books = deduplicateBooks([...catalogBooks, ...olBooks]).slice(0, SEARCH_LIMIT);
     return { books, cacheHit: false };
   } catch (error) {
     console.error('[OpenLibrary] Search error:', error);
+    // Return catalog results even if OL fails
+    if (catalogBooks.length > 0) {
+      console.log(`[Catalog] Returning ${catalogBooks.length} catalog results (OL failed)`);
+      return { books: catalogBooks, cacheHit: false };
+    }
     return { books: [], cacheHit: false };
   }
 }
