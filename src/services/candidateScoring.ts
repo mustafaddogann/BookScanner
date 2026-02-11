@@ -37,6 +37,7 @@ import {
   MIN_SIGNAL_SCORE_CAP as CONFIG_MIN_SIGNAL_CAP,
   ISBN_BONUS as CONFIG_ISBN_BONUS,
   GENERIC_TITLE_PENALTY as CONFIG_GENERIC_PENALTY,
+  MISSING_AUTHOR_PENALTY as CONFIG_MISSING_AUTHOR_PENALTY,
   MAX_REVIEW_CANDIDATES as CONFIG_MAX_REVIEW,
   // TITLE_ONLY mode thresholds
   TITLE_ONLY_AUTHOR_THRESHOLD,
@@ -184,6 +185,9 @@ const ISBN_BONUS = CONFIG_ISBN_BONUS;
 /** Penalty for generic single-word titles */
 const GENERIC_TITLE_PENALTY = CONFIG_GENERIC_PENALTY;
 
+/** Penalty for candidates missing author information */
+const MISSING_AUTHOR_PENALTY = CONFIG_MISSING_AUTHOR_PENALTY;
+
 /** Minimum overlapping tokens required for meaningful score */
 const MIN_OVERLAP_COUNT = CONFIG_MIN_OVERLAP_COUNT;
 
@@ -323,6 +327,13 @@ export function scoreCandidate(
   // Get title tokens (using aggressive normalization)
   const titleTokens = candidate.title ? normalizeForScoring(candidate.title) : [];
 
+  // Count raw title words for MIN_TOKENS check (before normalization)
+  // This prevents "The Fingerprint" from being counted as 1 token just because "the" is filtered
+  const titleRawWords = candidate.title
+    ? candidate.title.trim().split(/\s+/).filter(w => w.length >= 2)
+    : [];
+  const titleRawWordCount = titleRawWords.length;
+
   // Get author tokens (combine all authors)
   const authorTokens: string[] = [];
   if (candidate.authors && candidate.authors.length > 0) {
@@ -402,15 +413,24 @@ export function scoreCandidate(
   const authorOnlyResult = calculateTokenOverlap(Array.from(authorTokenSet), evidenceTokens.tokensSet);
 
   // Calculate title-specific F1 score
+  // IMPORTANT: For title precision, exclude evidence tokens that matched the author
+  // This prevents author tokens in evidence (e.g., "KELLERMAN") from diluting title precision
+  // Example: "ISIO CAVE KELLERMAN STRAIGHI INTO DARKNESS" matching "Straight into Darkness"
+  // Without adjustment: titlePrecision = 3/6 = 0.50 (penalized by CAVE, KELLERMAN, ISIO)
+  // With adjustment: titlePrecision = 3/5 = 0.60 (KELLERMAN excluded as author match)
+  const authorMatchedEvidenceCount = authorOnlyResult.matchedPairs.length;
+  const adjustedEvidenceCountForTitle = Math.max(1, evidenceTokenCount - authorMatchedEvidenceCount);
   const titleTokenCount = titleTokenSet.size;
   const titlePrecision =
-    evidenceTokenCount > 0 ? titleOnlyResult.overlapCount / evidenceTokenCount : 0;
+    adjustedEvidenceCountForTitle > 0 ? titleOnlyResult.overlapCount / adjustedEvidenceCountForTitle : 0;
   const titleRecall =
     titleTokenCount > 0 ? titleOnlyResult.overlapCount / titleTokenCount : 0;
   const titleScore =
     titlePrecision + titleRecall > 0
       ? (2 * titlePrecision * titleRecall) / (titlePrecision + titleRecall)
       : 0;
+
+  // Note: Verbose scoring debug removed - enable if needed for troubleshooting
 
   // Calculate author-specific F1 score (null if no author tokens in candidate)
   const authorTokenCount = authorTokenSet.size;
@@ -436,13 +456,23 @@ export function scoreCandidate(
   // => proceed with WEAK_TITLE_STRONG_AUTHOR (do NOT reject)
   const bestAuthorConfidence = evidenceTokens.bestAuthorConfidence ?? 0;
   const bestAuthorTokenCount = evidenceTokens.bestAuthorTokenCount ?? 0;
-  const hasStrongAuthorEvidence = bestAuthorConfidence >= 0.75 && bestAuthorTokenCount >= 2;
+  // Strong author evidence: 2+ words with high confidence (full name like "JOHN SANDFORD")
+  const hasStrongAuthorEvidence = bestAuthorConfidence >= 0.70 && bestAuthorTokenCount >= 2;
+  // Weak author evidence: single surname with moderate confidence (like "CRANKIN", "SANDFORD")
+  // This helps rescue single-word titles when we have a potential author surname
+  const hasWeakAuthorEvidence = bestAuthorConfidence >= 0.40 && bestAuthorTokenCount >= 1;
 
   let resolutionMode: ResolutionMode = 'FULL_MATCH';
-  if (titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
+  // Use titleRawWordCount for MIN_TOKENS check to prevent "The Fingerprint" (2 words) from
+  // being rejected just because "the" is filtered during normalization
+  if (titleRawWordCount < TITLE_ONLY_MIN_TOKENS) {
     // Weak title - check if author evidence can save us
     if (titleTokenCount >= 1 && hasStrongAuthorEvidence) {
       // Proceed with weak title but strong author
+      resolutionMode = 'WEAK_TITLE_STRONG_AUTHOR';
+    } else if (titleTokenCount >= 1 && hasWeakAuthorEvidence) {
+      // Single-word title + single-word author surname: still attempt matching
+      // Example: "FALLS" + "CRANKIN" should try to match "Falls" by Ian Rankin
       resolutionMode = 'WEAK_TITLE_STRONG_AUTHOR';
     } else {
       resolutionMode = 'NO_MATCH';
@@ -460,6 +490,17 @@ export function scoreCandidate(
       type: 'generic_title',
       amount: GENERIC_TITLE_PENALTY,
       reason: `Title "${candidate.title}" is a generic single word without author signal`,
+    });
+  }
+
+  // Missing author penalty: penalize candidates without author information
+  // This ensures editions with known authors are preferred over those without
+  // (e.g., "The Pelican Brief" by John Grisham should beat "THE PELICAN BRIEF" by unknown)
+  if (!candidate.authors || candidate.authors.length === 0) {
+    penalties.push({
+      type: 'missing_author',
+      amount: MISSING_AUTHOR_PENALTY,
+      reason: `Candidate "${candidate.title}" has no author information`,
     });
   }
 
@@ -762,6 +803,8 @@ export function makeDecisionFromScores(
   isAfterBoostPass: boolean = false,
   debugContext?: GateDebugContext
 ): DecisionResult {
+  // Note: Detailed instrumentation available via isMetadataVerboseDebug() in gate decision logs
+
   if (scoredCandidates.length === 0) {
     logGateDecision('reject', 'No candidates found', 'NO_MATCH', null, debugContext);
     return {
@@ -821,17 +864,51 @@ export function makeDecisionFromScores(
   }
   const alternatives = distinctAlternatives;
 
-  // Get resolution mode from top candidate
+  // DEBUG: Early log to confirm function is reached
+  console.log(`[Decision] ENTER makeDecisionFromScores with ${scoredCandidates.length} candidates`);
+
+  // Get resolution mode from top candidate (with safe access)
   const resolutionMode = top.scoring.resolutionMode;
-  const titleScore = top.scoring.titleScore;
+  const titleScore = top.scoring.titleScore ?? 0;
   const authorScore = top.scoring.authorScore;
-  const titleTokenCount = top.scoring.titleTokenCount;
+  const titleTokenCount = top.scoring.titleTokenCount ?? 0;
   const publisherScore = top.scoring.publisherScore;
-  const hasAuthorSignal = top.scoring.matchedAuthorTokens.length >= 1;
+  // Safe access for matchedAuthorTokens
+  const hasAuthorSignal = (top.scoring.matchedAuthorTokens?.length ?? 0) >= 1;
+
+  // DEBUG: Log decision inputs
+  console.log(`[Decision] Top: "${top.book.title}" score=${top.scoring.score} titleScore=${titleScore} overlap=${top.scoring.overlapCount}`);
 
   // ==========================================================================
   // DECISION PATH: Route based on resolution mode
   // ==========================================================================
+
+  // FAST PATH: Safety net for cases that should clearly be suggested but might be
+  // incorrectly rejected by complex routing logic. Only applies when:
+  // - Score is clearly good (>= 0.65) but below accept threshold
+  // - Title score is clearly good (>= 0.70)
+  // - Overlap is substantial (>= 3)
+  // - Score gap is clear (>= 0.10) - don't interfere with ambiguous cases
+  // This is conservative to avoid interfering with normal decision flow
+  const shouldUseFastPath =
+    top.scoring.score >= 0.65 &&
+    top.scoring.score < ACCEPT_MEDIUM_THRESHOLD &&
+    top.scoring.overlapCount >= 3 &&
+    titleScore >= 0.70 &&
+    scoreGap >= 0.10;  // Don't use fast path for ambiguous close-score cases
+
+  if (shouldUseFastPath) {
+    console.log(`[Decision] FAST PATH: score=${top.scoring.score}, overlap=${top.scoring.overlapCount}, titleScore=${titleScore} -> suggested`);
+    return {
+      decision: 'suggested',
+      topCandidate: top,
+      reviewCandidates: alternatives,
+      scoreGap,
+      reason: 'fast_path_good_match',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
 
   if (resolutionMode === 'NO_MATCH') {
     // Insufficient evidence to match
@@ -1004,10 +1081,21 @@ export function makeDecisionFromScores(
   // Stricter anti-false-positive safeguards required
   // ==========================================================================
 
-  // TITLE_ONLY REJECT: Only reject if titleScore < SUGGESTED_WEAK_THRESHOLD
-  // This ensures "strong title + missing author" always produces at least suggested_weak
-  // Changed from TITLE_ONLY_REJECT_BELOW (0.70) to allow scores in [0.45, 0.70) to fall through
-  if (titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS) {
+  // DEBUG: Log TITLE_ONLY decision inputs (simplified)
+  const overallScore = top.scoring.score;
+  console.log(`[Decision] TITLE_ONLY: titleScore=${titleScore}, overallScore=${overallScore}, willReject=${titleScore < SUGGESTED_WEAK_THRESHOLD && overallScore < SUGGESTED_THRESHOLD}`);
+
+  // TITLE_ONLY REJECT: Reject only if BOTH:
+  // 1. titleScore < SUGGESTED_WEAK_THRESHOLD (title extraction failed)
+  // 2. overall score < SUGGESTED_THRESHOLD (overall match is also weak)
+  //
+  // This fallback allows cases where evidence extraction picked wrong lines
+  // but the overall match is still good (e.g., "The Nanny" with score 0.50
+  // but titleHint was "MORROT Thriler")
+  const titleTooWeak = titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS;
+  const overallScoreGood = overallScore >= SUGGESTED_THRESHOLD;
+
+  if (titleTooWeak && !overallScoreGood) {
     logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
     return {
       decision: 'reject',
@@ -1015,6 +1103,21 @@ export function makeDecisionFromScores(
       reviewCandidates: [],
       scoreGap,
       reason: 'low_title_confidence',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  // If title is weak but overall score is good, fall through to suggested_weak
+  if (titleTooWeak && overallScoreGood) {
+    logGateDecision('suggested_weak', 'overall_score_fallback', resolutionMode, top, debugContext);
+    return {
+      decision: 'suggested_weak',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'overall_score_fallback',
+      manualReview: false,
       resolutionMode,
       ambiguityMetrics,
     };

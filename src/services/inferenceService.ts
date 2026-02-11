@@ -82,7 +82,7 @@ export const SPINE_PRESET: PostprocessConfig = {
   minAreaRatio: 0.002, // Filter tiny noise (0.2% of image)
   maxAreaRatio: 0.40,  // Max 40% of image area
   minScore: 0.60,      // Match threshold for consistency
-  topK: 50,            // Max 50 detections
+  topK: 100,           // Max 100 detections
 };
 
 /**
@@ -111,7 +111,7 @@ export const LIVE_PREVIEW_PRESET: PostprocessConfig = {
   minAreaRatio: 0.002,
   maxAreaRatio: 0.40,  // Max 40% of image area
   minScore: 0.60,      // High confidence
-  topK: 30,            // Fewer for live preview
+  topK: 50,            // Fewer for live preview
 };
 
 /**
@@ -126,7 +126,7 @@ export const CAPTURE_PRESET: PostprocessConfig = {
   minAreaRatio: 0.002,
   maxAreaRatio: 0.40,  // Max 40% of image area
   minScore: 0.60,      // High confidence
-  topK: 50,
+  topK: 100,
 };
 
 /**

@@ -45,6 +45,9 @@ target 'BookScanner' do
         # Force valid ARCHS globally to avoid undefined_arch
         bc.build_settings['ARCHS'] = '$(ARCHS_STANDARD)'
         bc.build_settings['ONLY_ACTIVE_ARCH'] = 'YES'
+
+        # Fix pods with old deployment targets (react-native-image-picker etc.)
+        bc.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
       end
 
       # Fix RCTSwiftUI/RCTSwiftUIWrapper Swift toolchain stalls

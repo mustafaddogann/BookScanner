@@ -41,6 +41,13 @@ import { EditCandidateFieldsModal } from '../components/EditCandidateFieldsModal
 import { saveCorrection, deleteCorrection, hasAppliedCorrection, hasStoredCorrection } from '../services/correctionsMemory';
 import { confirmUserSelection } from '../services/booksCatalogService';
 import RNFS from 'react-native-fs';
+import {
+  checkRescanStatus,
+  getLastScannedImageUri,
+  isAutoRescanEnabled,
+  autoExportRejects,
+  getServerUrl,
+} from '../services/autoExportService';
 
 // Tab options for switching between overlay, crops, and books views
 type ResultsTab = 'overlay' | 'crops' | 'books';
@@ -67,6 +74,9 @@ export function ResultsScreen(): React.JSX.Element {
 
   // Diagnostics enabled from user settings
   const diagnosticsEnabled = useDebugStore((state) => state.diagnosticsEnabled);
+  const autoRetryEnabled = useDebugStore((state) => state.autoRetryEnabled);
+  const autoRetryInterval = useDebugStore((state) => state.autoRetryInterval);
+  const setAutoRetryEnabled = useDebugStore((state) => state.setAutoRetryEnabled);
   const showDiagnosticsUI = __DEV__ && diagnosticsEnabled;
 
   const [imageUri, setImageUri] = useState<string | null>(null);
@@ -80,6 +90,10 @@ export function ResultsScreen(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<ResultsTab>('books');
   const [selectedCropIndex, setSelectedCropIndex] = useState<number | null>(null);
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
+
+  // Debug filter for book candidates (reject, suggested, accept, all)
+  type StatusFilter = 'all' | 'reject' | 'suggested' | 'accept';
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   // Get rectification results from sessionMeta
   const rectificationResults = sessionMeta?.rectificationResults || [];
@@ -101,6 +115,23 @@ export function ResultsScreen(): React.JSX.Element {
     }));
   }, [sessionMeta?.bookCandidates]);
   const bookCandidatesSummary = sessionMeta?.bookCandidatesSummary;
+
+  // Filter book candidates by status for debugging
+  const filteredBookCandidates = useMemo(() => {
+    if (statusFilter === 'all') return bookCandidates;
+    return bookCandidates.filter((candidate) => {
+      const decision = candidate.resolverDecision;
+      // Accept = only 'accept'
+      if (statusFilter === 'accept') return decision === 'accept';
+      // Suggested = only 'suggested'
+      if (statusFilter === 'suggested') return decision === 'suggested';
+      // Reject = everything else (reject, pending, error, disabled, offline, undefined)
+      if (statusFilter === 'reject') {
+        return decision !== 'accept' && decision !== 'suggested';
+      }
+      return true;
+    });
+  }, [bookCandidates, statusFilter]);
 
   // Get metadata resolution state (Gate 8+) - feature flagged
   const metadataResolution = sessionMeta?.metadataResolution;
@@ -147,6 +178,95 @@ export function ResultsScreen(): React.JSX.Element {
       setOcrAvailable(result.available);
     });
   }, []);
+
+  // Auto-retry timer for automated testing
+  useEffect(() => {
+    if (!autoRetryEnabled || metadataRetrying) return;
+
+    const timer = setInterval(() => {
+      console.log('[AutoRetry] Triggering automatic retry...');
+      // Find and call the retry handler
+      const currentMeta = useAppStore.getState().sessionMeta;
+      // Count books that need fixing (everything except accept and suggested)
+      const rejectCount = currentMeta?.bookCandidates?.filter((c) => {
+        const decision = c.resolverDecision;
+        return decision !== 'accept' && decision !== 'suggested';
+      }).length || 0;
+
+      if (rejectCount > 0) {
+        console.log(`[AutoRetry] ${rejectCount} rejects found, retrying...`);
+        // Trigger retry via the handler (will be called below)
+        setMetadataRetrying(true);
+        retryMetadataResolution({
+          sessionId,
+          rectificationResults: currentMeta?.rectificationResults || [],
+          ocrResultsByCropIndex: currentMeta?.ocrResultsByCropIndex || {},
+          bookCandidates: currentMeta?.bookCandidates || [],
+        }).then((result) => {
+          console.log('[AutoRetry] Retry complete');
+          useAppStore.getState().setSessionMeta({
+            metadataResolution: result.resolutionState,
+            bookCandidates: result.resolutionState?.resolvedCandidates,
+          });
+          // Export rejects to Telegram for ClawdBot analysis
+          const candidates = result.resolutionState?.resolvedCandidates || [];
+          autoExportRejects(sessionId, candidates);
+        }).catch((err) => {
+          console.error('[AutoRetry] Retry failed:', err);
+        }).finally(() => {
+          setMetadataRetrying(false);
+        });
+      } else {
+        console.log('[AutoRetry] No rejects, disabling auto-retry');
+        setAutoRetryEnabled(false);
+      }
+    }, autoRetryInterval * 1000);
+
+    return () => clearInterval(timer);
+  }, [autoRetryEnabled, autoRetryInterval, metadataRetrying, sessionId, setAutoRetryEnabled]);
+
+  // Auto-rescan polling: Check server for rebuild signals
+  // When code changes are deployed, server signals the app to rescan
+  useEffect(() => {
+    if (!autoRetryEnabled) return;
+
+    const pollForRescan = async () => {
+      try {
+        const status = await checkRescanStatus();
+        if (status.rescan && status.auto_retry) {
+          console.log('[AutoRescan] Server signaled rescan:', status.reason);
+          const imageUri = getLastScannedImageUri();
+          if (imageUri) {
+            // Clear the rescan flag on server first
+            const serverUrl = getServerUrl();
+            if (serverUrl) {
+              try {
+                const baseUrl = serverUrl.replace(/\/upload$/, '');
+                await fetch(`${baseUrl}/clear-rescan`, { method: 'POST' });
+              } catch (e) {
+                console.warn('[AutoRescan] Failed to clear rescan flag:', e);
+              }
+            }
+            // Navigate directly to scanner - no alert blocking
+            console.log('[AutoRescan] Auto-navigating to rescan with:', imageUri);
+            navigation.navigate('Scanner', { importUri: imageUri });
+          }
+        }
+      } catch (error) {
+        console.warn('[AutoRescan] Poll error:', error);
+      }
+    };
+
+    // Poll every 30 seconds
+    const timer = setInterval(pollForRescan, 30000);
+    // Initial check after 5 seconds
+    const initialCheck = setTimeout(pollForRescan, 5000);
+
+    return () => {
+      clearInterval(timer);
+      clearTimeout(initialCheck);
+    };
+  }, [autoRetryEnabled, navigation]);
 
   // TASK E: Defensive verification and fallback loader
   // If store has no rectificationResults but crops exist on disk, load them ONCE
@@ -779,6 +899,10 @@ export function ResultsScreen(): React.JSX.Element {
         metadataQueuedForOffline: result.queuedForOffline,
       });
 
+      // Export rejects to Telegram for ClawdBot analysis
+      const candidates = result.resolutionState?.resolvedCandidates || [];
+      autoExportRejects(sessionId, candidates);
+
       console.log(`[Results] Metadata retry complete: ${result.decision.action}`);
     } catch (error: any) {
       console.error('[Results] Metadata retry failed:', error);
@@ -787,6 +911,52 @@ export function ResultsScreen(): React.JSX.Element {
       setMetadataRetrying(false);
     }
   }, [sessionId, metadataRetrying]);
+
+  // Handle export rejects for debugging
+  const handleExportRejects = useCallback(async () => {
+    const rejects = bookCandidates.filter(c => c.resolverDecision === 'reject');
+    if (rejects.length === 0) {
+      Alert.alert('No Rejects', 'No rejected books to export.');
+      return;
+    }
+
+    const exportData = {
+      sessionId,
+      exportedAt: new Date().toISOString(),
+      totalBooks: bookCandidates.length,
+      rejectCount: rejects.length,
+      rejects: rejects.map((candidate, idx) => ({
+        bookNumber: idx + 1,
+        id: candidate.id,
+        mergedText: candidate.evidence?.mergedTextBlock || '',
+        resolverDecision: candidate.resolverDecision,
+        resolverDecisionReason: candidate.resolverDecisionReason,
+        evidenceSearchDebug: candidate.evidenceSearchDebug,
+        hypothesis: candidate.hypothesis,
+        resolvedBook: candidate.resolvedBook,
+        resolverSuggestions: candidate.resolverSuggestions,
+      })),
+    };
+
+    const filename = `rejects_${sessionId}_${Date.now()}.json`;
+    const filepath = `${RNFS.DocumentDirectoryPath}/${filename}`;
+
+    try {
+      await RNFS.writeFile(filepath, JSON.stringify(exportData, null, 2), 'utf8');
+
+      // Share the file
+      await Share.share({
+        title: 'Export Rejected Books',
+        message: `Exported ${rejects.length} rejected books for debugging`,
+        url: `file://${filepath}`,
+      });
+
+      console.log(`[Results] Exported rejects to: ${filepath}`);
+    } catch (error: any) {
+      console.error('[Results] Export failed:', error);
+      Alert.alert('Export Failed', error.message || 'Failed to export rejects.');
+    }
+  }, [bookCandidates, sessionId]);
 
   // Handle user selecting a book from suggestions (Gate 8+)
   const handleSelectBook = useCallback((book: ResolvedBook) => {
@@ -847,21 +1017,47 @@ export function ResultsScreen(): React.JSX.Element {
       total: bookCandidates.length,
       accept: 0,
       suggested: 0,
-      reject: 0,
+      reject: 0, // Everything that's not accept or suggested
       hypothesesZero: 0,
+      pending: 0,
+      other: 0,
     };
+    const decisionTypes = new Set<string>();
     for (const candidate of bookCandidates) {
-      if (candidate.resolverDecision === 'accept') counts.accept += 1;
-      if (candidate.resolverDecision === 'suggested') counts.suggested += 1;
-      if (candidate.resolverDecision === 'reject') counts.reject += 1;
+      const decision = candidate.resolverDecision;
+      decisionTypes.add(decision || 'undefined');
+
+      // Accept = only 'accept'
+      if (decision === 'accept') {
+        counts.accept += 1;
+      }
+      // Suggested = only 'suggested'
+      else if (decision === 'suggested') {
+        counts.suggested += 1;
+      }
+      // Reject = everything else (reject, pending, error, disabled, offline, undefined)
+      else {
+        counts.reject += 1;
+      }
       const hypothesisCount = candidate.hypothesis?.searchCandidates?.length ?? 0;
       if (hypothesisCount === 0) counts.hypothesesZero += 1;
     }
+    // Log all unique decision types for debugging
+    console.log('[ResultsScreen] Decision types found:', Array.from(decisionTypes).join(', '));
+    console.log('[ResultsScreen] Counts:', JSON.stringify(counts));
     return counts;
   }, [bookCandidates]);
 
   const bookListHeader = useMemo(() => {
     if (!hasBookCandidates && !showDiagnosticsUI) return null;
+
+    const filterButtons: { key: StatusFilter; label: string; count: number }[] = [
+      { key: 'all', label: 'All', count: resolverDebugCounts.total },
+      { key: 'reject', label: 'Reject', count: resolverDebugCounts.reject },
+      { key: 'suggested', label: 'Suggested', count: resolverDebugCounts.suggested },
+      { key: 'accept', label: 'Accept', count: resolverDebugCounts.accept },
+    ];
+
     return (
       <View style={styles.booksSummaryHeader}>
         {hasBookCandidates && bookCandidatesSummary && (
@@ -873,6 +1069,40 @@ export function ResultsScreen(): React.JSX.Element {
               Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
             </Text>
           </>
+        )}
+        {/* Status filter buttons */}
+        {hasBookCandidates && (
+          <View style={styles.statusFilterContainer}>
+            {filterButtons.map((btn) => (
+              <TouchableOpacity
+                key={btn.key}
+                style={[
+                  styles.statusFilterButton,
+                  statusFilter === btn.key && styles.statusFilterButtonActive,
+                  btn.key === 'reject' && statusFilter === btn.key && styles.statusFilterButtonReject,
+                ]}
+                onPress={() => setStatusFilter(btn.key)}
+              >
+                <Text
+                  style={[
+                    styles.statusFilterButtonText,
+                    statusFilter === btn.key && styles.statusFilterButtonTextActive,
+                  ]}
+                >
+                  {btn.label} ({btn.count})
+                </Text>
+              </TouchableOpacity>
+            ))}
+            {/* Export Rejects button */}
+            {resolverDebugCounts.reject > 0 && (
+              <TouchableOpacity
+                style={[styles.statusFilterButton, styles.exportButton]}
+                onPress={handleExportRejects}
+              >
+                <Text style={styles.statusFilterButtonText}>Export</Text>
+              </TouchableOpacity>
+            )}
+          </View>
         )}
         {showDiagnosticsUI && (
           <View style={styles.debugSummary}>
@@ -895,7 +1125,7 @@ export function ResultsScreen(): React.JSX.Element {
         )}
       </View>
     );
-  }, [bookCandidatesSummary, hasBookCandidates, showDiagnosticsUI, resolverDebugCounts]);
+  }, [bookCandidatesSummary, hasBookCandidates, showDiagnosticsUI, resolverDebugCounts, statusFilter]);
 
   const bookListFooter = useMemo(() => {
     if (!hasBookCandidates || !isMetadataResolutionEnabled()) return null;
@@ -1155,6 +1385,45 @@ export function ResultsScreen(): React.JSX.Element {
         <Text style={styles.headerTitle}>Results</Text>
         <Text style={styles.detectionCount}>{detections.length} detected</Text>
       </View>
+
+      {/* Spine Preview - Always visible compact view of detected spines */}
+      {imageUri && detections.length > 0 && (
+        <View style={styles.spinePreviewContainer} onLayout={handleContainerLayout}>
+          <Image
+            source={{ uri: imageUri }}
+            style={styles.spinePreviewImage}
+            resizeMode="contain"
+          />
+          {/* SVG Overlay showing detected spines */}
+          {canRenderOverlay && (
+            <Svg style={StyleSheet.absoluteFill}>
+              {detections.map((detection, index) => {
+                const center = getScreenCenter(detection);
+                return (
+                  <React.Fragment key={index}>
+                    <Polygon
+                      points={getPolygonPoints(detection, index)}
+                      fill="rgba(0, 200, 83, 0.25)"
+                      stroke="#00C853"
+                      strokeWidth={2}
+                    />
+                    <SvgText
+                      x={center.x}
+                      y={center.y}
+                      fill="#00C853"
+                      fontSize={10}
+                      fontWeight="bold"
+                      textAnchor="middle"
+                    >
+                      {index + 1}
+                    </SvgText>
+                  </React.Fragment>
+                );
+              })}
+            </Svg>
+          )}
+        </View>
+      )}
 
       {/* Primary view selector */}
       <View style={styles.primaryBar}>
@@ -1482,7 +1751,7 @@ export function ResultsScreen(): React.JSX.Element {
       {activeTab === 'books' && (
         <View style={styles.booksContainer}>
           <FlatList
-            data={bookCandidates ?? []}
+            data={filteredBookCandidates ?? []}
             keyExtractor={bookCandidateKeyExtractor}
             renderItem={renderBookCandidate}
             contentContainerStyle={styles.booksScrollContent}
@@ -2030,6 +2299,19 @@ const styles = StyleSheet.create({
   detectionCount: {
     color: '#8e8e93',
     fontSize: 14,
+  },
+  spinePreviewContainer: {
+    height: 180,
+    backgroundColor: '#000',
+    marginHorizontal: 12,
+    marginVertical: 8,
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  spinePreviewImage: {
+    flex: 1,
+    width: '100%',
+    height: '100%',
   },
   imageContainer: {
     flex: 1,
@@ -2590,6 +2872,39 @@ const styles = StyleSheet.create({
     color: '#8e8e93',
     fontSize: 12,
     marginTop: 2,
+  },
+  statusFilterContainer: {
+    flexDirection: 'row',
+    marginTop: 12,
+    gap: 8,
+  },
+  statusFilterButton: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: '#2c2c2e',
+    borderWidth: 1,
+    borderColor: '#3c3c3e',
+  },
+  statusFilterButtonActive: {
+    backgroundColor: '#0a84ff',
+    borderColor: '#0a84ff',
+  },
+  statusFilterButtonReject: {
+    backgroundColor: '#ff453a',
+    borderColor: '#ff453a',
+  },
+  statusFilterButtonText: {
+    color: '#8e8e93',
+    fontSize: 13,
+    fontWeight: '500',
+  },
+  statusFilterButtonTextActive: {
+    color: '#ffffff',
+  },
+  exportButton: {
+    backgroundColor: '#5856d6',
+    borderColor: '#5856d6',
   },
   bookCard: {
     backgroundColor: '#1c1c1e',

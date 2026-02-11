@@ -13,6 +13,7 @@ import { MMKV } from 'react-native-mmkv';
 // ============================================================================
 
 const DEBUG_DIAGNOSTICS_KEY = 'debug_diagnostics_enabled';
+const AUTO_RETRY_KEY = 'debug_auto_retry_enabled';
 
 // Dedicated MMKV instance for debug settings
 const debugStorage = new MMKV({
@@ -43,11 +44,23 @@ interface DebugState {
   /** Whether diagnostics are enabled by user preference */
   diagnosticsEnabled: boolean;
 
+  /** Whether auto-retry is enabled (for automated testing) */
+  autoRetryEnabled: boolean;
+
+  /** Auto-retry interval in seconds */
+  autoRetryInterval: number;
+
   /** Whether the store has been initialized from storage */
   initialized: boolean;
 
   /** Set diagnostics enabled state (persists to storage) */
   setDiagnosticsEnabled: (enabled: boolean) => void;
+
+  /** Set auto-retry enabled state */
+  setAutoRetryEnabled: (enabled: boolean) => void;
+
+  /** Set auto-retry interval */
+  setAutoRetryInterval: (seconds: number) => void;
 
   /** Write stats for books_catalog persistence */
   writeStats: WriteStats;
@@ -82,6 +95,20 @@ function loadInitialValue(): boolean {
   }
 }
 
+// Load auto-retry initial value - DEFAULT IS TRUE
+function loadAutoRetryValue(): boolean {
+  try {
+    const stored = debugStorage.getBoolean(AUTO_RETRY_KEY);
+    // Default to TRUE if not set
+    const value = stored ?? true;
+    console.log(`[AutoRetry] Loaded from storage: ${value}`);
+    return value;
+  } catch (error) {
+    console.error('[AutoRetry] Failed to load from storage:', error);
+    return true; // Default to true on error
+  }
+}
+
 const initialWriteStats: WriteStats = {
   writesAttempted: 0,
   writesSucceeded: 0,
@@ -92,8 +119,25 @@ const initialWriteStats: WriteStats = {
 
 export const useDebugStore = create<DebugState>((set, get) => ({
   diagnosticsEnabled: loadInitialValue(),
+  autoRetryEnabled: loadAutoRetryValue(), // Default TRUE, persisted
+  autoRetryInterval: 10, // seconds
   initialized: true,
   writeStats: { ...initialWriteStats },
+
+  setAutoRetryEnabled: (enabled: boolean) => {
+    set({ autoRetryEnabled: enabled });
+    // Persist to storage
+    try {
+      debugStorage.set(AUTO_RETRY_KEY, enabled);
+      console.log('[AutoRetry] Enabled:', enabled, '(persisted)');
+    } catch (error) {
+      console.error('[AutoRetry] Failed to persist:', error);
+    }
+  },
+
+  setAutoRetryInterval: (seconds: number) => {
+    set({ autoRetryInterval: Math.max(5, Math.min(60, seconds)) });
+  },
 
   setDiagnosticsEnabled: (enabled: boolean) => {
     const previous = get().diagnosticsEnabled;

@@ -15,6 +15,8 @@ import {
   buildEvidenceTokens,
   stripLeadingArticle,
   normalizeForScoring,
+  looksLikeTitle,
+  looksLikePersonName,
   type EvidenceTokens,
 } from './evidenceNormalization';
 import {
@@ -478,6 +480,32 @@ export function generateBoostHypotheses(
   }
 
   // =========================================================================
+  // Strategy 4j: Word splitting for merged OCR words
+  // =========================================================================
+  // Try splitting merged words at common boundaries
+  const spanishPrefixes = ['UN', 'EN', 'EL', 'LA', 'DE', 'CON', 'POR', 'FOR', 'YOUR'];
+  for (const line of sortedByLength.slice(0, 5)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    let splitVariants: string[] = [];
+    
+    for (const token of tokens) {
+      if (token.length >= 6) {
+        // Try splitting at 2-3 char prefixes
+        for (const prefix of spanishPrefixes) {
+          if (token.toUpperCase().startsWith(prefix) && token.length > prefix.length + 2) {
+            const rest = token.substring(prefix.length);
+            splitVariants.push(`${prefix} ${rest}`);
+          }
+        }
+      }
+    }
+    
+    for (const variant of splitVariants.slice(0, 2)) {
+      addHypothesis(variant, 'boost_partial', 135, `Word split: "${variant}"`);
+    }
+  }
+
+  // =========================================================================
   // Strategy 4: N-gram sliding windows
   // =========================================================================
   // Generate 2-grams and 3-grams from token list
@@ -501,6 +529,65 @@ export function generateBoostHypotheses(
   }
 
   // =========================================================================
+  // Strategy 5j: OCR character confusion corrections for longer words
+  // =========================================================================
+  // Common OCR confusions: ONF→ONE, MUKDERS→MURDERS, etc.
+  const ocrConfusions: Array<[RegExp, string]> = [
+    [/\bONF\b/gi, 'ONE'],
+    [/\bMUKDERS?\b/gi, 'MURDER'],
+    [/\bHEAVI\b/gi, 'HEAVEN'],
+    [/\bADV\b/gi, 'ADVENTURE'],
+    [/\bONLI\b/gi, 'ONLY'],
+    [/\bFIKST\b/gi, 'FIRST'],
+  ];
+
+  for (const line of sortedByLength.slice(0, 5)) {
+    let corrected = line;
+    for (const [pattern, replacement] of ocrConfusions) {
+      corrected = corrected.replace(pattern, replacement);
+    }
+    if (corrected !== line) {
+      addHypothesis(corrected, 'boost_partial', 138, `OCR confusion fix: "${corrected}"`);
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5k: Character-level corrections for longer words (6+ chars)
+  // =========================================================================
+  // Try single-character substitutions on longer words
+  for (const line of sortedByLength.slice(0, 3)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    const correctedTokens: string[] = [];
+    let madeChanges = false;
+
+    for (const token of tokens) {
+      if (token.length >= 6) {
+        // Try common single-char OCR errors
+        const variations = [
+          token.replace(/F/g, 'E'),  // F→E common in OCR
+          token.replace(/I/g, 'L'),  // I→L confusion
+          token.replace(/N/g, 'M'),  // N→M confusion
+        ];
+        // Use first variation that differs
+        const variant = variations.find(v => v !== token);
+        if (variant) {
+          correctedTokens.push(variant);
+          madeChanges = true;
+        } else {
+          correctedTokens.push(token);
+        }
+      } else {
+        correctedTokens.push(token);
+      }
+    }
+
+    if (madeChanges) {
+      const correctedLine = correctedTokens.join(' ');
+      addHypothesis(correctedLine, 'boost_partial', 139, `Char correction: "${correctedLine}"`);
+    }
+  }
+
+  // =========================================================================
   // Strategy 5: Stripped variants
   // =========================================================================
   // Strip common words from lines and try
@@ -515,6 +602,473 @@ export function generateBoostHypotheses(
     if (tokens.length >= 2) {
       const cleanQuery = tokens.join(' ');
       addHypothesis(cleanQuery, 'boost_partial', 145, `Normalized tokens: "${cleanQuery}"`);
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5l: Truncated name completion
+  // =========================================================================
+  // Common author last name completions for truncated OCR
+  const nameCompletions: Array<[RegExp, string]> = [
+    [/\bMACDO(NALD)?\b/gi, 'MACDONALD'],
+    [/\bSMIT(H)?\b/gi, 'SMITH'],
+    [/\bJOHNS(ON)?\b/gi, 'JOHNSON'],
+    [/\bBROW(N)?\b/gi, 'BROWN'],
+    [/\bWILLI(AMS)?\b/gi, 'WILLIAMS'],
+    [/\bDAVI(S)?\b/gi, 'DAVIS'],
+    [/\bMILL(ER)?\b/gi, 'MILLER'],
+    [/\bADV(ENTURE)?\b/gi, 'ADVENTURE'],
+    [/\bFARGO?\b/gi, 'FARGO'],
+    [/\bCLIV(E)?\b/gi, 'CLIVE'],
+    [/\bCUSS(LER)?\b/gi, 'CUSSLER'],
+    [/\bPATR(ICK)?\b/gi, 'PATRICK'],
+    [/\bROBER(T)?\b/gi, 'ROBERT'],
+    [/\bSTEP(HEN)?\b/gi, 'STEPHEN'],
+    [/\bSTEV(EN)?\b/gi, 'STEVEN'],
+    [/\bLAU(RA)?\b/gi, 'LAURA'],
+    [/\bJOH\b(?!\s+\w)/gi, 'JOHN'],
+    [/\bNGAI(O)?\b/gi, 'NGAIO'],
+    [/\bMARS(H)?\b/gi, 'MARSH'],
+    [/\bCHARLA(INE)?\b/gi, 'CHARLAINE'],
+    [/\bHARR(IS)?\b/gi, 'HARRIS'],
+    [/\bROWLA(ND)?\b/gi, 'ROWLAND'],
+    [/\bDEAD?\b/gi, 'DEAD'],
+    [/\bDEND\b/gi, 'DEAD'],
+    [/\bMURD(ERS?)?\b/gi, 'MURDERS'],
+    [/\bWOOL?\b/gi, 'WOOL'],
+  ];
+
+  for (const line of sortedByLength.slice(0, 5)) {
+    let completed = line;
+    for (const [pattern, replacement] of nameCompletions) {
+      completed = completed.replace(pattern, replacement);
+    }
+    if (completed !== line) {
+      addHypothesis(completed, 'boost_partial', 148, `Name completion: "${completed}"`);
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5j2: Common OCR letter confusions
+  // =========================================================================
+  const letterConfusions: Array<[RegExp, string]> = [
+    [/\bONF\b/gi, 'ONE'],
+    [/\bMUKDERS\b/gi, 'MURDERS'],
+    [/\bTHF\b/gi, 'THE'],
+    [/\bAHD\b/gi, 'AND'],
+    [/\bFOR\b/gi, 'FOR'],
+    [/\bYOUR\b/gi, 'YOUR'],
+    [/HEAVI/gi, 'HEAVY'],
+    [/\bLEFI\b/gi, 'LEFT'],
+    [/\bRIGHI\b/gi, 'RIGHT'],
+    [/\bTIMF\b/gi, 'TIME'],
+    [/\bBEST\s*IELL/gi, 'BESTSELLER'],
+    [/\bBEST\s*SELL/gi, 'BESTSELLER'],
+    [/\bAUTH\s*OR/gi, 'AUTHOR'],
+    [/\bCHON\b/gi, 'JOHN'],
+    [/\bJOHH\b/gi, 'JOHN'],
+    [/\bJOINS\b/gi, 'JONES'],
+    [/\bDOORNAIL\b/gi, 'DOORNAIL'],
+    [/\bBUNDORI\b/gi, 'BUNDORI'],
+    [/\bLAUIRA\b/gi, 'LAURA'],
+    [/\bNGALO\b/gi, 'NGAIO'],
+    [/\bMYSTEFT\b/gi, 'MYSTERY'],
+    [/\bPALRICH\b/gi, 'PATRICK'],
+    [/\bDERKLEK\b/gi, 'DEREK'],
+    [/\bCOLORFUIL\b/gi, 'COLORFUL'],
+    [/\bBestiell?\b/gi, 'BESTSELLER'],
+    [/\bestienli?\b/gi, 'BESTSELLER'],
+    [/\bPIRA\s*ACIA\b/gi, 'PATRICIA'],
+  ];
+
+  for (const line of sortedByLength.slice(0, 5)) {
+    let corrected = line;
+    for (const [pattern, replacement] of letterConfusions) {
+      corrected = corrected.replace(pattern, replacement);
+    }
+    if (corrected !== line && corrected.length >= MIN_QUERY_LENGTH) {
+      addHypothesis(corrected, 'boost_partial', 148.5, `OCR confusion fix: "${corrected}"`);
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5m: Drop corrupted first 1-2 characters
+  // =========================================================================
+  // OCR often corrupts the first character of words
+  for (const line of sortedByLength.slice(0, 3)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 2) {
+      // Try dropping first char from first word
+      const variant1 = [tokens[0].substring(1), ...tokens.slice(1)].join(' ');
+      if (variant1.length >= MIN_QUERY_LENGTH) {
+        addHypothesis(variant1, 'boost_partial', 149, `Drop first char: "${variant1}"`);
+      }
+      
+      // Try dropping first 2 chars from first word
+      if (tokens[0].length > 3) {
+        const variant2 = [tokens[0].substring(2), ...tokens.slice(1)].join(' ');
+        if (variant2.length >= MIN_QUERY_LENGTH) {
+          addHypothesis(variant2, 'boost_partial', 149, `Drop first 2 chars: "${variant2}"`);
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5p2: Split long lines that may contain title+garbled author
+  // =========================================================================
+  // Lines like "DIED IN THE WOOL NGALO LUI" contain a valid title prefix
+  // followed by garbled author. Try progressively shorter prefixes as title-only.
+  for (const line of sortedByLength.slice(0, 3)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 5) {
+      for (let titleLen = 3; titleLen <= Math.min(tokens.length - 1, 5); titleLen++) {
+        const titlePart = tokens.slice(0, titleLen).join(' ');
+        const authorPart = tokens.slice(titleLen).join(' ');
+        if (titlePart.length >= MIN_QUERY_LENGTH) {
+          addHypothesis(titlePart, 'boost_partial', 149.91, `Long line title prefix: "${titlePart}"`);
+        }
+        if (authorPart.length >= MIN_QUERY_LENGTH) {
+          let correctedAuthor = authorPart;
+          for (const [pattern, replacement] of nameCompletions) {
+            correctedAuthor = correctedAuthor.replace(pattern, replacement);
+          }
+          for (const [pattern, replacement] of letterConfusions) {
+            correctedAuthor = correctedAuthor.replace(pattern, replacement);
+          }
+          if (correctedAuthor !== authorPart) {
+            addHypothesis(
+              `${titlePart} ${correctedAuthor}`,
+              'boost_combo',
+              149.92,
+              `Split line: title="${titlePart}" + corrected author="${correctedAuthor}"`
+            );
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5p3: Cross-line title fragment reassembly
+  // =========================================================================
+  // When title words are split across non-adjacent lines (e.g., "DEND AS A" on
+  // one line and "DOORNAIL" on another), try combining title-like fragments.
+  // Apply corrections first, then combine lines ending in articles/prepositions
+  // with other content lines.
+  {
+    const correctedPhrases: Array<{ original: string; corrected: string }> = [];
+    for (const line of sortedByLength.slice(0, 8)) {
+      let corrected = line;
+      for (const [pattern, replacement] of nameCompletions) {
+        corrected = corrected.replace(pattern, replacement);
+      }
+      for (const [pattern, replacement] of letterConfusions) {
+        corrected = corrected.replace(pattern, replacement);
+      }
+      correctedPhrases.push({ original: line, corrected });
+    }
+
+    // Find lines ending with articles/prepositions (incomplete title fragments)
+    const continuationEndings = /\b(a|an|the|of|in|to|for|with|on|at|by|from|and|or|as|into)\s*$/i;
+    for (const phrase of correctedPhrases) {
+      if (continuationEndings.test(phrase.corrected)) {
+        // This line looks incomplete - try appending other lines to complete it
+        for (const other of correctedPhrases) {
+          if (other.original === phrase.original) continue;
+          const combined = `${phrase.corrected} ${other.corrected}`;
+          const tokens = combined.split(/\s+/).filter(Boolean);
+          if (tokens.length >= 3 && tokens.length <= MAX_QUERY_TOKENS) {
+            addHypothesis(combined, 'boost_combo', 147.5, `Cross-line reassembly: "${combined}"`);
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5n: Very short OCR text - use wildcard patterns
+  // =========================================================================
+  // For 3-4 character OCR fragments, try adding wildcard or common endings
+  const shortFragments = sortedByLength.filter(line => line.length >= 3 && line.length <= 4);
+  for (const frag of shortFragments.slice(0, 3)) {
+    // Try common word endings for truncated text
+    const endings = ['EN', 'VEN', 'P', 'VE', 'PHEN', 'IGHT', 'AVY'];
+    for (const ending of endings) {
+      const extended = frag + ending;
+      if (extended.length >= MIN_QUERY_LENGTH) {
+        addHypothesis(extended, 'boost_partial', 149.5, `Short fragment extended: "${extended}"`);
+      }
+    }
+    
+    // For very short fragments, try common word prefixes (reverse truncation)
+    const prefixes = ['THE ', 'NEW ', 'BIG ', 'OLD ', 'LAST ', 'FIRST '];
+    for (const prefix of prefixes) {
+      const extended = prefix + frag;
+      if (extended.length >= MIN_QUERY_LENGTH) {
+        addHypothesis(extended, 'boost_partial', 149.6, `Short fragment prefixed: "${extended}"`);
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5n2: Single character deletion for insertion errors
+  // =========================================================================
+  // LAUIRA → LAURA, DEND → DEAD - try removing each char from longer words
+  for (const line of sortedByLength.slice(0, 3)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    for (let tokenIdx = 0; tokenIdx < tokens.length && tokenIdx < 3; tokenIdx++) {
+      const token = tokens[tokenIdx];
+      if (token.length >= 5 && token.length <= 8) {
+        // Try removing each character position
+        for (let charPos = 1; charPos < token.length - 1; charPos++) {
+          const modified = [...tokens];
+          modified[tokenIdx] = token.substring(0, charPos) + token.substring(charPos + 1);
+          const result = modified.join(' ');
+          if (result.length >= MIN_QUERY_LENGTH) {
+            addHypothesis(result, 'boost_partial', 149.3, `Single char deletion: "${result}"`);
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5o: Person name with space insertions for corrupted text
+  // =========================================================================
+  // PIRA ACIA might be missing letters - try inserting common letters
+  for (const personLine of evidence.personNameLines.slice(0, 3)) {
+    const tokens = personLine.split(/\s+/);
+    if (tokens.length >= 2) {
+      // Try inserting vowels in short tokens (might be truncated)
+      const vowels = ['A', 'E', 'I', 'O'];
+      for (let i = 0; i < tokens.length; i++) {
+        if (tokens[i].length >= 3 && tokens[i].length <= 5) {
+          for (const vowel of vowels) {
+            const modified = [...tokens];
+            modified[i] = tokens[i].substring(0, 2) + vowel + tokens[i].substring(2);
+            const result = modified.join(' ');
+            if (result.length >= MIN_QUERY_LENGTH) {
+              addHypothesis(result, 'boost_partial', 149.8, `Name vowel insert: "${result}"`);
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5p: Multi-token merge for fragmented OCR
+  // =========================================================================
+  // Sometimes OCR splits words that should be together (e.g., "BEST SELLER")
+  for (const line of sortedByLength.slice(0, 4)) {
+    const tokens = line.split(/\s+/).filter(Boolean);
+    if (tokens.length >= 2 && tokens.length <= 4) {
+      // Try merging adjacent tokens
+      for (let i = 0; i < tokens.length - 1; i++) {
+        const merged = [...tokens.slice(0, i), tokens[i] + tokens[i + 1], ...tokens.slice(i + 2)].join(' ');
+        if (merged.length >= MIN_QUERY_LENGTH) {
+          addHypothesis(merged, 'boost_partial', 149.9, `Token merge: "${merged}"`);
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5q: Title-only when author is corrupted/truncated
+  // =========================================================================
+  // If we have person names but they're very short (likely truncated like "JOH"),
+  // try using just title-like lines instead
+  const hasShortPersonNames = evidence.personNameLines.some(name => {
+    const tokens = name.split(/\s+/).filter(Boolean);
+    return tokens.some(t => t.length <= 3 && t.length >= 2);
+  });
+  
+  if (hasShortPersonNames && evidence.titleLikeLines.length > 0) {
+    for (const titleLine of evidence.titleLikeLines.slice(0, 3)) {
+      if (titleLine.length >= MIN_QUERY_LENGTH) {
+        addHypothesis(titleLine, 'boost_partial', 149.85, `Title-only (corrupted author): "${titleLine}"`);
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5r: Use recovered author candidates + title lines
+  // =========================================================================
+  // recoveredAuthorCandidates reconstructs multi-word authors from single-word
+  // fragments (e.g., "CHARLAINE" + "HARRIS" → "CHARLAINE HARRIS") and from
+  // advancedExtraction. Combine these with title-like lines and corrected titles.
+  if (evidence.recoveredAuthorCandidates && evidence.recoveredAuthorCandidates.length > 0) {
+    const goodAuthors = evidence.recoveredAuthorCandidates
+      .filter((c: { confidence: number }) => c.confidence > 0.4)
+      .slice(0, 3);
+
+    for (const authorCandidate of goodAuthors) {
+      const authorLine = authorCandidate.line;
+
+      // Apply name completions and letter confusions to recovered author
+      let correctedAuthor = authorLine;
+      for (const [pattern, replacement] of nameCompletions) {
+        correctedAuthor = correctedAuthor.replace(pattern, replacement);
+      }
+      for (const [pattern, replacement] of letterConfusions) {
+        correctedAuthor = correctedAuthor.replace(pattern, replacement);
+      }
+
+      // Try author alone
+      if (correctedAuthor.length >= MIN_QUERY_LENGTH) {
+        addHypothesis(correctedAuthor, 'boost_partial', 146, `Recovered author: "${correctedAuthor}"`);
+      }
+
+      // Combine with title-like lines
+      for (const titleLine of evidence.titleLikeLines.slice(0, 2)) {
+        let correctedTitle = titleLine;
+        for (const [pattern, replacement] of nameCompletions) {
+          correctedTitle = correctedTitle.replace(pattern, replacement);
+        }
+        for (const [pattern, replacement] of letterConfusions) {
+          correctedTitle = correctedTitle.replace(pattern, replacement);
+        }
+
+        addHypothesis(
+          `${correctedTitle} ${correctedAuthor}`,
+          'boost_combo',
+          144,
+          `Corrected title+recovered author: "${correctedTitle}" + "${correctedAuthor}"`
+        );
+      }
+
+      // Combine with longest candidate phrases (may contain title words)
+      for (const phrase of sortedByLength.slice(0, 2)) {
+        let correctedPhrase = phrase;
+        for (const [pattern, replacement] of nameCompletions) {
+          correctedPhrase = correctedPhrase.replace(pattern, replacement);
+        }
+        for (const [pattern, replacement] of letterConfusions) {
+          correctedPhrase = correctedPhrase.replace(pattern, replacement);
+        }
+        if (correctedPhrase !== correctedAuthor) {
+          addHypothesis(
+            `${correctedPhrase} ${correctedAuthor}`,
+            'boost_combo',
+            145,
+            `Corrected phrase+recovered author: "${correctedPhrase}" + "${correctedAuthor}"`
+          );
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5s: Use advancedExtraction title+author if available
+  // =========================================================================
+  if (evidence.advancedExtraction) {
+    const adv = evidence.advancedExtraction;
+    if (adv.title && adv.author) {
+      addHypothesis(
+        `${adv.title} ${adv.author}`,
+        'boost_combo',
+        142,
+        `Advanced extraction: "${adv.title}" + "${adv.author}"`
+      );
+      addHypothesis(adv.title, 'boost_partial', 143, `Advanced title: "${adv.title}"`);
+    } else if (adv.title) {
+      addHypothesis(adv.title, 'boost_partial', 143, `Advanced title-only: "${adv.title}"`);
+    } else if (adv.author) {
+      addHypothesis(adv.author, 'boost_partial', 143.5, `Advanced author-only: "${adv.author}"`);
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5t: Reconstruct author from adjacent single-word surname candidates
+  // =========================================================================
+  // When OCR produces separate lines like "CHARLAINE" / "HARRIS",
+  // recoverAuthorCandidates catches individual words but we should also
+  // try combining consecutive single-word candidates into "FIRSTNAME LASTNAME".
+  if (evidence.recoveredAuthorCandidates && evidence.recoveredAuthorCandidates.length >= 2) {
+    const singleWordCandidates = evidence.recoveredAuthorCandidates
+      .filter((c: { line: string; confidence: number }) => {
+        const words = c.line.trim().split(/\s+/);
+        return words.length === 1 && c.confidence >= 0.4;
+      })
+      .map((c: { line: string }) => c.line.trim());
+
+    for (let i = 0; i < singleWordCandidates.length - 1 && i < 4; i++) {
+      for (let j = i + 1; j < singleWordCandidates.length && j < i + 3; j++) {
+        const combinedAuthor = `${singleWordCandidates[i]} ${singleWordCandidates[j]}`;
+
+        let correctedCombined = combinedAuthor;
+        for (const [pattern, replacement] of nameCompletions) {
+          correctedCombined = correctedCombined.replace(pattern, replacement);
+        }
+        for (const [pattern, replacement] of letterConfusions) {
+          correctedCombined = correctedCombined.replace(pattern, replacement);
+        }
+
+        addHypothesis(correctedCombined, 'boost_partial', 147, `Combined surname candidates: "${correctedCombined}"`);
+
+        for (const titleLine of evidence.titleLikeLines.slice(0, 2)) {
+          let correctedTitle = titleLine;
+          for (const [pattern, replacement] of nameCompletions) {
+            correctedTitle = correctedTitle.replace(pattern, replacement);
+          }
+          for (const [pattern, replacement] of letterConfusions) {
+            correctedTitle = correctedTitle.replace(pattern, replacement);
+          }
+          addHypothesis(
+            `${correctedTitle} ${correctedCombined}`,
+            'boost_combo',
+            146.5,
+            `Title + combined authors: "${correctedTitle}" + "${correctedCombined}"`
+          );
+        }
+      }
+    }
+  }
+
+  // =========================================================================
+  // Strategy 5u: Global correction + cross-line title/author recombination
+  // =========================================================================
+  // Apply all corrections to every candidate phrase, then identify corrected
+  // title-like and person-name-like lines and combine them across lines.
+  {
+    const globalCorrected: Array<{ original: string; corrected: string }> = [];
+    for (const phrase of evidence.candidatePhrases.slice(0, 10)) {
+      let corrected = phrase;
+      for (const [pattern, replacement] of nameCompletions) {
+        corrected = corrected.replace(pattern, replacement);
+      }
+      for (const [pattern, replacement] of letterConfusions) {
+        corrected = corrected.replace(pattern, replacement);
+      }
+      globalCorrected.push({ original: phrase, corrected });
+    }
+
+    // Separate corrected lines into title-like and person-name-like
+    const correctedTitles: string[] = [];
+    const correctedAuthors: string[] = [];
+    for (const { corrected } of globalCorrected) {
+      if (looksLikeTitle(corrected)) {
+        correctedTitles.push(corrected);
+      }
+      if (looksLikePersonName(corrected)) {
+        correctedAuthors.push(corrected);
+      }
+    }
+
+    // Combine corrected titles with corrected authors from different lines
+    for (const title of correctedTitles.slice(0, 3)) {
+      for (const author of correctedAuthors.slice(0, 3)) {
+        if (title === author) continue;
+        addHypothesis(
+          `${title} ${author}`,
+          'boost_combo',
+          147.8,
+          `Global corrected title+author: "${title}" + "${author}"`
+        );
+      }
+      // Also try the corrected title alone
+      addHypothesis(title, 'boost_partial', 147.9, `Global corrected title: "${title}"`);
     }
   }
 

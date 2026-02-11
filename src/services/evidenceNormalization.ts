@@ -132,12 +132,33 @@ export const GENERIC_TOKENS = new Set([
 /** Marketing phrases that should be filtered out */
 const MARKETING_PHRASES = [
   'new york times bestseller',
+  'new york times',  // Also filter standalone
+  'new-york times',  // OCR variant with hyphen
+  'newyork times',   // OCR variant without space
+  'new fork times',  // OCR error: Y→F
+  'new fork',        // OCR error variant of "new york"
+  'new vork',        // OCR error: Y→V
+  'york times',      // When "NEW" gets split to separate line
+  'them-sork tames', // OCR corruption of "new york times"
+  'sork tames',      // OCR corruption partial
   'nyt bestseller',
   '#1 bestseller',
   'number one bestseller',
   'international bestseller',
   'bestselling author',
+  'bestseling author',  // OCR typo variant
   'national bestseller',
+  'bestseller',  // Also filter standalone
+  'bestseling',  // OCR typo variant
+  'bestselling',  // Standalone (when split from "bestselling author")
+  'bestse ling',  // OCR space-split variant
+  'bestse',       // OCR truncated variant
+  'bestsel',      // OCR truncated variant (missing LER)
+  // REMOVED 'ling' - too aggressive, matches "killing", "dealing", "healing", etc.
+  // Partial OCR garbage from "NEW YORK TIMES BESTSELLER" split across lines
+  'orki',         // Partial "YORK" with OCR error
+  'ork',          // Partial "YORK"
+  'yorki',        // Partial "YORK" variant
   'a novel',
   'the novel',
   'now a major motion picture',
@@ -205,6 +226,23 @@ const SHELF_LABELS = new Set([
   'new arrivals',
   'bestsellers',
   'local authors',
+  // Marketing fragments when appearing alone on a line
+  'author',  // From split "bestselling author" badges
+  'writer',  // From "bestselling writer" badges
+  'times',   // From split "new york times" badges
+  // Truncated category words from OCR
+  'ction',   // Truncated "fiction"
+  'tery',    // Truncated "mystery"
+  'oystery', // Truncated "mystery" variant
+  'ance',    // Truncated "romance"
+  'ller',    // Truncated "thriller"
+  // OCR corrupted words
+  'nuvil',   // OCR corruption of "novel"
+  'nuvel',   // OCR corruption of "novel"
+  // Series markers
+  'stacks',  // "A Cat in the Stacks Mystery" - series noise
+  // Imprint markers
+  'crime',   // "Vintage Crime" imprint marker
 ]);
 
 /** Noise patterns to remove from lines */
@@ -215,6 +253,21 @@ const NOISE_PATTERNS = [
   /^[A-Z]{1,2}\d{1,4}$/,   // Library call numbers
   /^\$\d+/,                // Prices at start
   /^(?:isbn|issn)[\s:]?\s*$/i, // Just "ISBN" or "ISSN" label
+  // Manufacturing/printing notices (OCR captures fragments like "TED IN USA" from "PRINTED IN USA")
+  /\bin\s+usa\b/i,
+  /\bin\s+china\b/i,
+  /\bin\s+uk\b/i,
+  /\bprinted\s+in\b/i,
+  /\bmade\s+in\b/i,
+  /\bmanufactured\s+in\b/i,
+  // Price fragments
+  /^\d+\s*u\.?s\.?$/i,     // "999 U.S" or "999 US"
+  /^\d+\s*can\)?$/i,       // "11250 CAN)" or "11250 CAN"
+  /^can\)?$/i,             // Just "CAN" or "CAN)"
+  /^u\.?s\.?a?$/i,         // Just "US", "U.S", "USA"
+  /^uk$/i,                 // Just "UK"
+  // Number-prefixed marketing (e.g., "#1 NEW", "81 NEW")
+  /^#?\d+\s+new$/i,        // "#1 NEW" or "81 NEW"
 ];
 
 /**
@@ -266,6 +319,26 @@ const PUBLISHER_NOISE = new Set([
   'publishers',
   'publishing',
   'ster', // Common OCR noise for "bestseller" or publisher suffix
+  'zebra', // Zebra Books imprint
+  'jove', // Jove Books imprint
+  'kensington', // Kensington Publishing
+  // Truncated publisher names from OCR
+  'berkl',  // Truncated BERKLEY
+  'berkel', // Truncated BERKLEY variant
+  'pengu',  // Truncated PENGUIN
+  'banta',  // Truncated BANTAM
+  'visica', // Publisher/category mark (VISION variant)
+  'vision', // Vision Books imprint
+  // OCR error variants
+  'berk!',  // OCR error BERKLEY with !
+  'brime',  // OCR noise
+  'prime',  // Often OCR noise on spines
+  'jovi',   // OCR error for JOVE
+  'tseller', // Truncated BESTSELLER
+  'vintase', // OCR error for VINTAGE
+  'vintage', // Vintage Books imprint
+  'zebba',   // OCR error for ZEBRA
+  'fork',    // OCR error for YORK (NEW YORK -> NEW FORK)
 ]);
 
 /**
@@ -433,6 +506,33 @@ export function isIncompleteLine(line: string): boolean {
 }
 
 /**
+ * Check if a line looks like a single-word name part (for author name reconstruction)
+ * - Single word (no spaces)
+ * - 2+ alphabetic characters
+ * - Either ALL CAPS, Title Case, or mostly uppercase
+ */
+function isSingleWordNamePart(line: string): boolean {
+  const trimmed = line.trim();
+  // Must be a single word
+  if (trimmed.includes(' ') || trimmed.length < 2) return false;
+  // Must be mostly alphabetic
+  const letters = (trimmed.match(/[a-zA-Z]/g) || []).length;
+  if (letters < trimmed.length * 0.8) return false;
+  // Must start with uppercase (common for names)
+  if (!/^[A-Z]/.test(trimmed)) return false;
+  // Accept: ALL CAPS (JAMES), Title Case (James), or mostly uppercase (JAmes)
+  const upper = (trimmed.match(/[A-Z]/g) || []).length;
+  // ALL CAPS or mostly uppercase
+  if (upper >= letters * 0.7) return true;
+  // Title Case: first letter uppercase, rest lowercase, length 3-12 (typical name length)
+  if (trimmed.length >= 3 && trimmed.length <= 12) {
+    const restLower = trimmed.slice(1);
+    if (restLower === restLower.toLowerCase()) return true;
+  }
+  return false;
+}
+
+/**
  * Merge consecutive lines where the first appears to be incomplete
  * Example: ["STRAIGHT INTO", "DARKNESS"] → ["STRAIGHT INTO DARKNESS"]
  */
@@ -463,7 +563,35 @@ export function mergeSplitLines(lines: string[]): string[] {
     i++;
   }
 
-  return result;
+  // Second pass: merge consecutive single-word name parts (e.g., "LISA" + "JACKSON")
+  // This handles author names split across lines on book spines
+  const mergedResult: string[] = [];
+  i = 0;
+  while (i < result.length) {
+    const current = result[i];
+
+    // Check for consecutive single-word name parts
+    if (isSingleWordNamePart(current) && i + 1 < result.length && isSingleWordNamePart(result[i + 1])) {
+      // Merge 2-3 consecutive single-word name parts
+      let merged = current;
+      let j = i + 1;
+      while (j < result.length && j < i + 3 && isSingleWordNamePart(result[j])) {
+        merged = merged + ' ' + result[j];
+        j++;
+      }
+      mergedResult.push(merged);
+      // Also keep the original separate lines for title detection
+      for (let k = i; k < j; k++) {
+        mergedResult.push(result[k]);
+      }
+      i = j;
+    } else {
+      mergedResult.push(current);
+      i++;
+    }
+  }
+
+  return mergedResult;
 }
 
 /**
@@ -592,6 +720,7 @@ export interface EvidenceTokens {
  * Detect if a line looks like a person name
  * - 2-4 words (case-insensitive detection)
  * - Common name patterns
+ * - NOT starting with title articles (THE, A, AN)
  *
  * Note: Now handles OCR case errors like "nGAIO MARSH" by being case-insensitive
  * for initial detection, then relying on token matching for actual scoring.
@@ -604,6 +733,12 @@ export function looksLikePersonName(line: string): boolean {
     return false;
   }
 
+  // CRITICAL: Lines starting with articles are titles, not names
+  const firstWord = words[0].toLowerCase();
+  if (firstWord === 'the' || firstWord === 'a' || firstWord === 'an') {
+    return false;
+  }
+
   // Check against known non-name patterns (case-insensitive)
   const lowerLine = line.toLowerCase();
   if (GENRE_WORDS.has(lowerLine) || SHELF_LABELS.has(lowerLine)) {
@@ -612,6 +747,37 @@ export function looksLikePersonName(line: string): boolean {
 
   // Check for marketing/noise
   if (isMarketingLine(lowerLine)) {
+    return false;
+  }
+
+  // Check for organization-like patterns (not person names)
+  // These are common marketing/publisher patterns that look like names
+  const orgPatterns = [
+    'new york times',
+    'wall street journal',
+    'washington post',
+    'los angeles times',
+    'random house',
+    'simon schuster',
+    'harper collins',
+    'penguin random',
+  ];
+  if (orgPatterns.some(pattern => lowerLine.includes(pattern))) {
+    return false;
+  }
+
+  // Check for manufacturing/printing notices (not person names)
+  // These appear on book spines/back covers: "PRINTED IN USA", "MADE IN CHINA", etc.
+  // OCR often captures partial: "TED IN USA" (from "PRINTED IN USA")
+  const printingPatterns = [
+    /\bin\s+usa\b/i,
+    /\bin\s+china\b/i,
+    /\bin\s+uk\b/i,
+    /\bprinted\s+in\b/i,
+    /\bmade\s+in\b/i,
+    /\bmanufactured\s+in\b/i,
+  ];
+  if (printingPatterns.some(pattern => pattern.test(lowerLine))) {
     return false;
   }
 
@@ -797,21 +963,32 @@ export function buildEvidenceTokens(
   const { extractTitleAndAuthor: extract } = require('./titleAuthorExtraction');
   const advancedExtraction = extract(lines);
 
-  // Merge advanced extraction author into recovered candidates if not already present
+  // Merge advanced extraction author into recovered candidates
+  // IMPORTANT: If already present with lower confidence, UPDATE to higher confidence
   if (advancedExtraction.author && advancedExtraction.authorConfidence > 0) {
     const authorLower = advancedExtraction.author.toLowerCase();
-    const alreadyRecovered = recoveredAuthorCandidates.some(
+    const existingIdx = recoveredAuthorCandidates.findIndex(
       (c: RecoveredAuthorCandidate) => c.line.toLowerCase() === authorLower
     );
-    if (!alreadyRecovered) {
+    if (existingIdx >= 0) {
+      // UPDATE if advanced extraction has higher confidence
+      if (advancedExtraction.authorConfidence > recoveredAuthorCandidates[existingIdx].confidence) {
+        recoveredAuthorCandidates[existingIdx] = {
+          line: advancedExtraction.author,
+          confidence: advancedExtraction.authorConfidence,
+          reason: 'advanced_extraction_upgrade',
+        };
+      }
+    } else {
+      // Add new candidate
       recoveredAuthorCandidates.push({
         line: advancedExtraction.author,
         confidence: advancedExtraction.authorConfidence,
         reason: 'advanced_extraction',
       });
-      // Re-sort by confidence
-      recoveredAuthorCandidates.sort((a: RecoveredAuthorCandidate, b: RecoveredAuthorCandidate) => b.confidence - a.confidence);
     }
+    // Re-sort by confidence
+    recoveredAuthorCandidates.sort((a: RecoveredAuthorCandidate, b: RecoveredAuthorCandidate) => b.confidence - a.confidence);
   }
 
   // Compute best author confidence and token count for gating logic
@@ -905,19 +1082,48 @@ export function recoverAuthorCandidates(
     }
   }
 
+  // Third priority: Single ALL-CAPS words that could be author surnames
+  // (e.g., "CRANKIN" corrupted from "RANKIN", "SANDFORD", etc.)
+  // Only consider words 5+ chars that aren't common noise
+  for (const line of evidenceLines) {
+    const trimmed = line.trim();
+    if (!trimmed || seenLines.has(trimmed)) continue;
+
+    // Must be single word, ALL CAPS, 5+ chars (typical surname length)
+    const words = trimmed.split(/\s+/);
+    if (words.length !== 1) continue;
+    if (trimmed !== trimmed.toUpperCase()) continue;
+    if (trimmed.length < 5) continue;
+
+    // Must be mostly alphabetic
+    const letterCount = (trimmed.match(/[a-zA-Z]/g) || []).length;
+    if (letterCount < trimmed.length * 0.9) continue;
+
+    // Skip known noise (publishers, genres, marketing)
+    const lower = trimmed.toLowerCase();
+    if (GENRE_WORDS.has(lower)) continue;
+    if (SHELF_LABELS.has(lower)) continue;
+    if (PUBLISHER_NOISE.has(lower)) continue;
+
+    // This could be an author surname - add with low confidence
+    seenLines.add(trimmed);
+    candidates.push({
+      line: trimmed,
+      confidence: 0.45,  // Low confidence - just a guess
+      reason: 'single_word_surname_candidate',
+    });
+  }
+
   // Also scan evidence lines for potential authors not caught by looksLikePersonName
   const bottomHalf = evidenceLines.slice(Math.floor(evidenceLines.length / 2));
   for (const line of bottomHalf) {
     const trimmed = line.trim();
-    if (!trimmed || personNameLines.includes(trimmed)) continue;
+    if (!trimmed || personNameLines.includes(trimmed) || seenLines.has(trimmed)) continue;
 
     const words = trimmed.split(/\s+/);
 
     // Skip if not 2-4 words
     if (words.length < 2 || words.length > 4) continue;
-
-    // Skip all-caps single-word lines (series labels)
-    if (words.length === 1 && trimmed === trimmed.toUpperCase()) continue;
 
     // Check alphabetic ratio (should be mostly letters)
     const letterCount = (trimmed.match(/[a-zA-Z]/g) || []).length;
@@ -940,6 +1146,51 @@ export function recoverAuthorCandidates(
         confidence: 0.5,
         reason: 'title_case_pattern_bottom_half',
       });
+    }
+  }
+
+  // Fourth priority: Extract author names from merged title+author lines
+  // Pattern: "THE LAST ONE LEFT JOHN D.MACDONALD" -> extract "JOHN D.MACDONALD"
+  // Look for "FIRST M. LAST" or "FIRST LAST" patterns at end of lines
+  for (const line of evidenceLines) {
+    const trimmed = line.trim();
+    if (!trimmed || seenLines.has(trimmed)) continue;
+
+    // Skip short lines (need room for both title and author)
+    if (trimmed.length < 15) continue;
+
+    // Look for name patterns at the end of the line
+    // Pattern 1: "FIRST M.LAST" or "FIRST D.LAST" (middle initial attached to last name)
+    const middleInitialMatch = trimmed.match(/\b([A-Z][a-z]*)\s+([A-Z])\.?([A-Z][a-z]+)$/i);
+    if (middleInitialMatch) {
+      const [, first, initial, last] = middleInitialMatch;
+      const extractedName = `${first} ${initial}. ${last}`;
+      if (!seenLines.has(extractedName.toUpperCase())) {
+        seenLines.add(extractedName.toUpperCase());
+        candidates.push({
+          line: extractedName,
+          confidence: 0.55,
+          reason: 'extracted_from_merged_line_middle_initial',
+        });
+      }
+    }
+
+    // Pattern 2: "FIRST LAST" at end (two capitalized words)
+    const twoWordMatch = trimmed.match(/\b([A-Z][A-Za-z]+)\s+([A-Z][A-Za-z]+)$/);
+    if (twoWordMatch && !middleInitialMatch) {
+      const [fullMatch, first, last] = twoWordMatch;
+      // Skip if looks like title words (common words at end of titles)
+      const skipWords = ['the', 'and', 'for', 'with', 'from', 'into', 'over', 'left', 'right', 'last', 'first', 'one', 'two', 'life', 'death', 'night', 'day'];
+      if (!skipWords.includes(first.toLowerCase()) && !skipWords.includes(last.toLowerCase())) {
+        if (!seenLines.has(fullMatch.toUpperCase())) {
+          seenLines.add(fullMatch.toUpperCase());
+          candidates.push({
+            line: fullMatch,
+            confidence: 0.4,
+            reason: 'extracted_from_merged_line_two_word',
+          });
+        }
+      }
     }
   }
 
@@ -1194,8 +1445,13 @@ export {
   isAllCapsNameCandidate,
   isPublisherOrMarketing,
   normalizeAuthorName,
+  splitInlineTitleAuthor,
+  isJunkLine,
+  sanitizeTitleForSearch,
   type TitleCandidate,
   type AuthorCandidate,
   type ExtractionResult,
   type ColonSeparatedResult,
+  type InlineSplitResult,
+  type InlineSplitDebug,
 } from './titleAuthorExtraction';

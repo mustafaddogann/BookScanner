@@ -408,6 +408,9 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
         olid = doc.key?.replace('/works/', '') || '';
       }
 
+      // ALWAYS-ON: Log author extraction from Search API
+      console.log(`[OpenLibrary] Search doc: title="${doc.title}" author_name=${JSON.stringify(doc.author_name)} olid=${olid}`);
+
       return {
         olid,
         title: doc.title,
@@ -461,9 +464,15 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
       // Merge enriched data with candidates
       const results: ResolvedBook[] = [];
 
+      // ALWAYS-ON: Log what Books API returned
+      console.log(`[OpenLibrary] Books API returned keys: ${Object.keys(data).join(', ') || 'none'}`);
+
       for (const candidate of candidates) {
         const bibkey = `OLID:${candidate.olid}`;
         const bookData = data[bibkey];
+
+        // ALWAYS-ON: Debug author flow
+        console.log(`[OpenLibrary] Enriching ${bibkey}: candidate.authors=${JSON.stringify(candidate.authors)}, bookData.authors=${JSON.stringify(bookData?.authors)}`);
 
         if (bookData) {
           // Extract ISBNs from enriched data
@@ -482,9 +491,8 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
             sourceId: candidate.olid,
           };
 
-          if (verbose) {
-            console.log(`[OpenLibrary] Enriched "${resolved.title}": isbn13=${resolved.isbn13}, isbn10=${resolved.isbn10}`);
-          }
+          // ALWAYS-ON: Log final resolved book with authors
+          console.log(`[OpenLibrary] Enriched "${resolved.title}" authors=${JSON.stringify(resolved.authors)} isbn13=${resolved.isbn13}`);
 
           results.push(resolved);
         } else {
@@ -610,11 +618,10 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
     }
     const hypotheses = hypothesisResult.hypotheses;
 
-    if (verbose) {
-      console.log(`[OpenLibrary] Pass ${pass}: Generated ${hypotheses.length} hypotheses (cache size: ${queryCache.size})`);
-      for (const h of hypotheses) {
-        console.log(`[OpenLibrary]   [${h.priority}] ${h.type}: "${h.query}"`);
-      }
+    // ALWAYS-ON: Log hypotheses for debugging resolution issues
+    console.log(`[OpenLibrary] Pass ${pass}: Generated ${hypotheses.length} hypotheses`);
+    for (const h of hypotheses) {
+      console.log(`[OpenLibrary]   [${h.priority}] ${h.type}: "${h.query}"`);
     }
 
     // Collect all candidates from all hypotheses
@@ -674,10 +681,12 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
           pass,
         });
 
-        if (debugContext?.candidateId) {
-          console.log(
-            `[OpenLibrary] candidateId="${debugContext.candidateId}" pass=${pass} hypothesis=${currentIndex + 1}/${hypotheses.length} query="${hypothesis.query}" results=${results.length}`
-          );
+        // ALWAYS-ON: Log results for each hypothesis
+        console.log(
+          `[OpenLibrary] hypothesis=${currentIndex + 1}/${hypotheses.length} type=${hypothesis.type} query="${hypothesis.query}" results=${results.length}`
+        );
+        if (results.length > 0) {
+          console.log(`[OpenLibrary]   top result: "${results[0].title}" by ${results[0].authors?.join(', ') || 'unknown'}`);
         }
 
         // Dedupe by OLID
@@ -686,10 +695,6 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
             seenOlids.add(result.sourceId);
             allCandidates.push(result);
           }
-        }
-
-        if (verbose) {
-          console.log(`[OpenLibrary] Hypothesis "${hypothesis.query}": ${results.length} results, ${allCandidates.length} total unique`);
         }
       } catch (e: any) {
         console.warn(`[OpenLibrary] Hypothesis "${hypothesis.query}" failed: ${e.message}`);

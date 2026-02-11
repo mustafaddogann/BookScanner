@@ -312,9 +312,66 @@ npx tsc --noEmit && npx jest --watchman=false && npx eslint src/
 
 ## Environment Setup
 
+### Node.js Path Configuration (Homebrew)
+
+React Native build scripts need to find Node.js. Homebrew upgrades can break builds by changing the Node path.
+
+**Symptom:**
+```
+Node found at: /opt/homebrew/Cellar/node/25.1.0/bin/node
+... No such file or directory
+Command PhaseScriptExecution failed
+```
+
+**Fix:** Configure `ios/.xcode.env.local` to use the stable Homebrew symlink:
+
+```bash
+# Create or update ios/.xcode.env.local
+cat > ios/.xcode.env.local << 'EOF'
+# Local Xcode environment overrides (not versioned)
+# Use stable Homebrew symlink path, not versioned Cellar path
+export NODE_BINARY=/opt/homebrew/bin/node
+
+# Ensure Homebrew bin is in PATH for CLI builds (yarn ios, npx react-native run-ios)
+export PATH="/opt/homebrew/bin:$PATH"
+EOF
+```
+
+**Note:** `.xcode.env.local` is gitignored and won't be committed. Each developer must create it locally.
+
+After fixing, clean and rebuild:
+```bash
+cd ios
+rm -rf Pods Podfile.lock build
+pod install
+cd ..
+rm -rf ~/Library/Developer/Xcode/DerivedData/BookScanner-*
+```
+
+### CLI Build Commands
+
+```bash
+# Debug build to physical device
+xcodebuild -workspace ios/BookScanner.xcworkspace \
+  -scheme BookScanner \
+  -configuration Debug \
+  -destination 'id=<DEVICE_UDID>' \
+  build
+
+# Find your device UDID
+xcrun xctrace list devices
+
+# Example with device
+xcodebuild -workspace ios/BookScanner.xcworkspace \
+  -scheme BookScanner \
+  -configuration Debug \
+  -destination 'id=00008110-001E450636EB801E' \
+  build
+```
+
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 18+ (via Homebrew: `brew install node`)
 - Xcode 15+ (for iOS)
 - Android Studio (for Android)
 - CocoaPods (`gem install cocoapods`)

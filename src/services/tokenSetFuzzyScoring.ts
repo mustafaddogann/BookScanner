@@ -25,8 +25,13 @@ import {
 // Configuration
 // ============================================================================
 
-/** Minimum Levenshtein similarity for a token to count as "overlap" */
-export const FUZZY_MATCH_THRESHOLD = 0.84;
+/** Minimum Levenshtein similarity for a token to count as "overlap"
+ * Lowered from 0.84 to 0.75 to tolerate common OCR errors:
+ * - "denth" → "death" (0.80)
+ * - "straighi" → "straight" (0.75)
+ * - "eaye" → "faye" (0.75)
+ */
+export const FUZZY_MATCH_THRESHOLD = 0.75;
 
 /** Minimum token length to include in scoring (shorter = noise) */
 export const MIN_TOKEN_LENGTH = 3;

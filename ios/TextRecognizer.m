@@ -484,6 +484,10 @@ RCT_EXPORT_METHOD(recognizeText:(NSDictionary *)options
     __block NSInteger completedRotations = 0;
     __block NSError *lastError = nil;
 
+    // Store all rotation results for merging (to capture both horizontal and vertical text)
+    __block NSMutableDictionary<NSNumber *, NSArray *> *allRotationLines = [NSMutableDictionary dictionary];
+    __block NSMutableDictionary<NSNumber *, NSDictionary *> *allRotationMetrics = [NSMutableDictionary dictionary];
+
     dispatch_group_t group = dispatch_group_create();
     dispatch_queue_t queue = dispatch_queue_create("com.bookscanner.ocr", DISPATCH_QUEUE_SERIAL);
 
@@ -513,8 +517,12 @@ RCT_EXPORT_METHOD(recognizeText:(NSDictionary *)options
                       [metrics[@"alnumRatio"] floatValue],
                       metrics[@"charCount"]);
 
-            // Check if this is better than current best
+            // Store results for this rotation (for later merging)
             @synchronized (self) {
+              allRotationLines[@(rotationDegrees)] = lines;
+              allRotationMetrics[@(rotationDegrees)] = metrics;
+
+              // Check if this is better than current best
               if (bestMetrics == nil ||
                   [TextRecognizer compareMetricsA:metrics withB:bestMetrics] == NSOrderedAscending) {
                 bestMetrics = metrics;
@@ -560,12 +568,79 @@ RCT_EXPORT_METHOD(recognizeText:(NSDictionary *)options
       NSTimeInterval processingTime = [[NSDate date] timeIntervalSinceDate:startTime] * 1000;
 
       if (bestResult) {
+        // MERGE RESULTS: Combine text from 0° and 90° rotations to capture both horizontal and vertical text
+        NSMutableArray *mergedLines = [NSMutableArray array];
+        NSMutableSet *seenTexts = [NSMutableSet set];
+
+        // Add lines from best rotation first
+        for (NSDictionary *line in bestResult[@"lines"]) {
+          NSString *text = [line[@"text"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+          NSString *normalizedText = [[text lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+          if (normalizedText.length >= 2 && ![seenTexts containsObject:normalizedText]) {
+            [seenTexts addObject:normalizedText];
+            [mergedLines addObject:line];
+          }
+        }
+
+        // Add unique lines from OTHER rotations (especially 90° offset from best)
+        // This captures text that's perpendicular to the main orientation
+        NSInteger complementaryRotation = (bestRotation + 90) % 360;
+        NSArray *complementaryLines = allRotationLines[@(complementaryRotation)];
+        if (complementaryLines) {
+          RCTLogInfo(@"[TextRecognizer] Merging lines from complementary rotation %ld°", (long)complementaryRotation);
+          for (NSDictionary *line in complementaryLines) {
+            NSString *text = [line[@"text"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+            NSString *normalizedText = [[text lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+
+            // Skip very short text or duplicates
+            if (normalizedText.length < 3) continue;
+            if ([seenTexts containsObject:normalizedText]) continue;
+
+            // Skip if text is a substring of existing text (or vice versa)
+            BOOL isSubstring = NO;
+            for (NSString *existing in seenTexts) {
+              if ([existing containsString:normalizedText] || [normalizedText containsString:existing]) {
+                isSubstring = YES;
+                break;
+              }
+            }
+            if (isSubstring) continue;
+
+            // Add this line
+            [seenTexts addObject:normalizedText];
+            [mergedLines addObject:line];
+            RCTLogInfo(@"[TextRecognizer] Added from %ld°: %@", (long)complementaryRotation, text);
+          }
+        }
+
+        // Rebuild fullText from merged lines
+        NSMutableString *mergedFullText = [NSMutableString string];
+        for (NSDictionary *line in mergedLines) {
+          if (mergedFullText.length > 0) [mergedFullText appendString:@"\n"];
+          [mergedFullText appendString:line[@"text"]];
+        }
+
+        // Recalculate metrics for merged result
+        NSDictionary *mergedMetrics = [TextRecognizer calculateMetricsForLines:mergedLines];
+
+        // Re-extract title/author from merged lines
+        NSDictionary *mergedTitleAuthor = [TextRecognizer extractTitleAuthorFromLines:mergedLines];
+
+        bestResult[@"fullText"] = mergedFullText;
+        bestResult[@"lines"] = mergedLines;
+        bestResult[@"avgConfidence"] = mergedMetrics[@"avgConfidence"];
+        bestResult[@"alnumRatio"] = mergedMetrics[@"alnumRatio"];
+        bestResult[@"charCount"] = mergedMetrics[@"charCount"];
+        bestResult[@"lineCount"] = mergedMetrics[@"lineCount"];
+        bestResult[@"titleCandidate"] = mergedTitleAuthor[@"titleCandidate"];
+        bestResult[@"authorCandidate"] = mergedTitleAuthor[@"authorCandidate"];
         bestResult[@"processingTimeMs"] = @(processingTime);
         bestResult[@"platform"] = @"ios";
         bestResult[@"recognitionLevel"] = recognitionLevel;
+        bestResult[@"mergedRotations"] = @YES;
 
-        RCTLogInfo(@"[TextRecognizer] Best rotation: %ld degrees, processed in %.0fms",
-                  (long)bestRotation, processingTime);
+        RCTLogInfo(@"[TextRecognizer] Best rotation: %ld degrees, merged lines: %lu, processed in %.0fms",
+                  (long)bestRotation, (unsigned long)mergedLines.count, processingTime);
 
         resolve(bestResult);
       } else {

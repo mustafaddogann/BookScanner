@@ -211,7 +211,8 @@ export async function recognizeAllCrops(
   let withAuthors = 0;
   const rotationCounts: Record<number, number> = {};
 
-  console.log(`[OCR] Processing ${crops.length} crops...`);
+  const CONCURRENCY = 5;
+  console.log(`[OCR] Processing ${crops.length} crops (concurrency=${CONCURRENCY})...`);
 
   // Check availability once
   if (textRecognitionAvailable === null) {
@@ -219,46 +220,48 @@ export async function recognizeAllCrops(
     console.log(`[OCR] Text recognition: ${availability.available ? 'ENABLED' : 'DISABLED'} (${availability.method})`);
   }
 
-  for (let i = 0; i < crops.length; i++) {
-    const crop = crops[i];
+  // Process crops in parallel batches
+  let completedCount = 0;
+  for (let batchStart = 0; batchStart < crops.length; batchStart += CONCURRENCY) {
+    const batch = crops.slice(batchStart, batchStart + CONCURRENCY);
 
-    // Report progress
-    if (onProgress) {
-      onProgress(i, crops.length);
-    }
+    const batchResults = await Promise.all(
+      batch.map(async (crop) => {
+        // Skip if no crop URI or rectification was skipped
+        if (!crop.cropUri || crop.rectificationMethod === 'skipped') {
+          return { index: crop.detectionIndex, result: createSkippedResult('no_crop_available'), wasSkipped: true };
+        }
 
-    // Skip if no crop URI or rectification was skipped
-    if (!crop.cropUri || crop.rectificationMethod === 'skipped') {
-      const result = createSkippedResult('no_crop_available');
-      results[crop.detectionIndex] = result;
-      skipped++;
-      continue;
-    }
+        try {
+          const result = await recognizeCropText(
+            crop.cropUri,
+            sessionId,
+            crop.detectionIndex
+          );
+          return { index: crop.detectionIndex, result, wasSkipped: !result.ok };
+        } catch (error: any) {
+          console.error(`[OCR] Error processing crop ${crop.detectionIndex}:`, error);
+          return { index: crop.detectionIndex, result: createSkippedResult(`error: ${error.message}`), wasSkipped: true };
+        }
+      })
+    );
 
-    try {
-      const result = await recognizeCropText(
-        crop.cropUri,
-        sessionId,
-        crop.detectionIndex
-      );
-
-      results[crop.detectionIndex] = result;
-
-      if (result.ok) {
+    // Collect batch results
+    for (const { index, result, wasSkipped } of batchResults) {
+      results[index] = result;
+      if (wasSkipped) {
+        skipped++;
+      } else {
         succeeded++;
-
         if (result.titleCandidate) withTitles++;
         if (result.authorCandidate) withAuthors++;
-
-        // Track rotation counts
         rotationCounts[result.chosenRotation] = (rotationCounts[result.chosenRotation] || 0) + 1;
-      } else {
-        skipped++;
       }
-    } catch (error: any) {
-      console.error(`[OCR] Error processing crop ${crop.detectionIndex}:`, error);
-      results[crop.detectionIndex] = createSkippedResult(`error: ${error.message}`);
-      skipped++;
+    }
+
+    completedCount += batch.length;
+    if (onProgress) {
+      onProgress(completedCount, crops.length);
     }
   }
 

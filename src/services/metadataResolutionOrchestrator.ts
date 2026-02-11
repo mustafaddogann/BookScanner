@@ -48,14 +48,16 @@ import {
 } from './supabaseResolverClient';
 import { enqueueCandidate } from './offlineResolverQueue';
 import { upsertResolvedBook } from './booksCatalogService';
+import { autoExportRejects } from './autoExportService';
 import {
   OpenLibraryProvider,
   buildResolverKey,
   type EvidenceSearchResult,
 } from './openLibraryProvider';
+import { executeTitleMatchFallback, executeTitleMatchFallbackWithGoogleBooks } from './titleMatchFallback';
 import { getQuerySet } from './queryHypotheses';
 import type { ScoredCandidate, ScoringDecision } from './candidateScoring';
-import { shouldAutoPersist } from './candidateScoring';
+import { shouldAutoPersist, makeDecisionFromScores } from './candidateScoring';
 import { AUTO_BOOST_ENABLED } from '../config/metadataResolutionConfig';
 import { persistResolverAttempts } from './resolverAttemptsService';
 
@@ -579,6 +581,9 @@ export async function runMetadataResolution(
       // Summary log
       logResolverSummary(sessionId, resolvedCandidates, 0);
 
+      // Auto-export rejects for debugging (non-blocking)
+      void autoExportRejects(sessionId, resolvedCandidates);
+
       // Extract resolvedBook and alternatives from decision for UI state
       const resolvedBook = 'book' in overallDecision ? overallDecision.book : undefined;
       const alternatives = 'alternatives' in overallDecision ? overallDecision.alternatives : undefined;
@@ -672,12 +677,60 @@ export async function runMetadataResolution(
   // STAGE 4 & 5: VERIFY & DECIDE - Verify matches and make decision
   // =========================================================================
 
-  const decision = makeDecision({
+  let decision = makeDecision({
     scoredMatches,
     candidate: bestCandidate,
     fullTextBlock,
     evidenceTier: evidenceSummary.sessionTier,
   });
+
+  // =========================================================================
+  // TITLE-MATCH FALLBACK: If no-match, try to find author via title lookup
+  // Uses Open Library first, then Google Books as fallback
+  // =========================================================================
+  if (decision.action === 'no-match' && bestCandidate.titleHint) {
+    console.log(`[MetadataOrchestrator] No match - attempting title-match fallback for "${bestCandidate.titleHint}"`);
+
+    try {
+      // Use the combined fallback that tries Open Library then Google Books
+      const fallbackResult = await executeTitleMatchFallbackWithGoogleBooks(
+        bestCandidate.titleHint,
+        bestCandidate.authorHint || null
+      );
+
+      if (fallbackResult.triggered && fallbackResult.decision === 'suggest') {
+        // Determine source from reason (google_books_ prefix means it came from Google Books)
+        const isGoogleBooks = fallbackResult.reason.startsWith('google_books_');
+        const source = isGoogleBooks ? 'googleBooks' : 'openLibrary';
+
+        console.log(`[MetadataOrchestrator] Title-match fallback SUCCESS (${source}): ` +
+          `title="${fallbackResult.suggestedTitle}", author="${fallbackResult.suggestedAuthor}", ` +
+          `confidence=${fallbackResult.confidence.toFixed(2)}`);
+
+        // Create a suggested book from fallback result
+        const fallbackBook: ResolvedBook = {
+          title: fallbackResult.suggestedTitle || bestCandidate.titleHint,
+          authors: fallbackResult.suggestedAuthor ? [fallbackResult.suggestedAuthor] : [],
+          source,
+          sourceId: fallbackResult.debug.chosenCandidate?.title || 'fallback',
+        };
+
+        // Update decision to suggest
+        // Note: We don't set warnings here as they require specific VerificationFlag values
+        // The reason is logged and available via fallbackResult.reason
+        decision = {
+          action: 'suggest',
+          book: fallbackBook,
+          alternatives: [],
+          confidence: fallbackResult.confidence,
+        };
+      } else {
+        console.log(`[MetadataOrchestrator] Title-match fallback did not trigger: ${fallbackResult.reason}`);
+      }
+    } catch (e: any) {
+      console.warn(`[MetadataOrchestrator] Title-match fallback error:`, e.message);
+    }
+  }
 
   // ALWAYS-ON: Log decision with key details
   const decisionBook = 'book' in decision ? decision.book : undefined;
@@ -791,11 +844,38 @@ export async function resolveBookCandidateByEvidence(
   }
 
   // Get text lines from evidence
-  const evidenceLines = evidence.mergedLines.map((line) => line.text);
+  // DEFENSIVE FIX: If mergedLines is empty but mergedTextBlock has content,
+  // use mergedTextBlock to build lines (handles edge case where arrays weren't populated)
+  let evidenceLines: string[];
+  if (evidence.mergedLines.length > 0) {
+    evidenceLines = evidence.mergedLines.map((line) => line.text);
+  } else if (evidence.mergedTextBlock && evidence.mergedTextBlock.trim().length > 0) {
+    // Fallback: split text block by newlines
+    console.warn(`[EvidenceResolver] Candidate ${candidate.id}: mergedLines empty but mergedTextBlock has content - using fallback`);
+    evidenceLines = evidence.mergedTextBlock.split('\n').filter((line) => line.trim().length > 0);
+  } else {
+    evidenceLines = [];
+  }
 
   // Get OCR title/author as fallback (may be wrong)
   const ocrTitle = candidate.hypothesis?.searchCandidates?.[0]?.titleHint || null;
   const ocrAuthor = candidate.hypothesis?.searchCandidates?.[0]?.authorHint || null;
+
+  // Use perFieldHints if available (from advanced extraction in spineEvidenceMerger)
+  // These have better quality than raw OCR fields
+  const perFieldHints = evidence.perFieldHints;
+  const hintTitle = perFieldHints?.titleHints?.[0] || null;
+  const hintAuthor = perFieldHints?.authorHints?.[0] || null;
+
+  // Use perFieldHints for better query generation if available
+  const effectiveTitle = hintTitle || ocrTitle;
+  const effectiveAuthor = hintAuthor || ocrAuthor;
+
+  // Log only in verbose mode
+  if (verbose) {
+    console.log(`[EvidenceResolver] candidateId="${candidate.id}" evidenceLines=${evidenceLines.length}`);
+    console.log(`[EvidenceResolver]   effectiveTitle="${effectiveTitle}" effectiveAuthor="${effectiveAuthor}"`);
+  }
 
   // Get sourceKind from evidence for ISBN policy (default to spine_crop)
   // This determines whether ISBN is used for scoring:
@@ -811,10 +891,11 @@ export async function resolveBookCandidateByEvidence(
     const debugContext = { candidateId: candidate.id, evidenceTier: hypothesisTier };
 
     // PASS 1: Initial search with source-aware ISBN policy
+    // Use effectiveTitle/Author from perFieldHints (better extraction) over raw OCR
     const pass1Result = await provider.searchByEvidence(
       evidenceLines,
-      ocrTitle,
-      ocrAuthor,
+      effectiveTitle,
+      effectiveAuthor,
       1,
       undefined,
       debugContext,
@@ -838,10 +919,11 @@ export async function resolveBookCandidateByEvidence(
       const pass1Queries = getQuerySet(pass1Result.hypotheses.hypotheses);
 
       // PASS 2: Boost search with expanded hypotheses (same sourceKind)
+      // Use effectiveTitle/Author from perFieldHints (better extraction) over raw OCR
       const pass2Result = await provider.searchByEvidence(
         evidenceLines,
-        ocrTitle,
-        ocrAuthor,
+        effectiveTitle,
+        effectiveAuthor,
         2,
         pass1Queries,
         debugContext,
@@ -858,11 +940,22 @@ export async function resolveBookCandidateByEvidence(
       }
 
       // Re-sort merged candidates by score
-      mergedCandidates.sort((a, b) => b.scoring.score - a.scoring.score);
+      mergedCandidates.sort((a, b) => (b.scoring?.score ?? 0) - (a.scoring?.score ?? 0));
 
-      // Use pass2 result but with merged candidates
+      // CRITICAL FIX: Recompute decision on merged candidates
+      // Pass2 may have found garbage, but pass1's good match is in mergedCandidates
+      // We must re-run decision logic on the merged+sorted list
+      const mergedDecisionResult = makeDecisionFromScores(mergedCandidates, true);
+
+      // Use merged decision, not pass2's decision
       result = {
         ...pass2Result,
+        // Override with merged decision
+        decision: mergedDecisionResult.decision,
+        reason: mergedDecisionResult.reason,
+        scoreGap: mergedDecisionResult.scoreGap,
+        manualReview: mergedDecisionResult.manualReview,
+        reviewCandidates: mergedDecisionResult.reviewCandidates,
         scoredCandidates: mergedCandidates,
         topCandidate: mergedCandidates[0] || null,
         pass1Decision,
@@ -874,7 +967,7 @@ export async function resolveBookCandidateByEvidence(
         ],
       };
 
-      console.log(`[EvidenceResolver] Boost pass 2 decision=${result.decision} (pass1=${pass1Decision})`);
+      console.log(`[EvidenceResolver] Boost pass 2 merged decision=${result.decision} (pass1=${pass1Decision}, pass2Raw=${pass2Result.decision})`);
     }
 
     // Map decision to resolver decision
@@ -893,7 +986,7 @@ export async function resolveBookCandidateByEvidence(
         if (result.topCandidate) {
           resolverDecision = 'accept';
           resolvedBook = result.topCandidate.book;
-          resolvedConfidence = result.topCandidate.scoring.score;
+          resolvedConfidence = result.topCandidate.scoring?.score ?? 0;
           resolverDecisionReason = result.reason;
 
           // ONLY persist to Supabase for accept_high or accept_medium
@@ -919,7 +1012,7 @@ export async function resolveBookCandidateByEvidence(
         resolverDecision = 'suggested';
         if (result.topCandidate) {
           resolvedBook = result.topCandidate.book;
-          resolvedConfidence = result.topCandidate.scoring.score;
+          resolvedConfidence = result.topCandidate.scoring?.score ?? 0;
         }
         resolverDecisionReason = result.reason;
         // Include alternatives only when ambiguity warrants manual review
@@ -935,7 +1028,7 @@ export async function resolveBookCandidateByEvidence(
         resolverDecision = 'suggested';
         if (result.topCandidate) {
           resolvedBook = result.topCandidate.book;
-          resolvedConfidence = result.topCandidate.scoring.score;
+          resolvedConfidence = result.topCandidate.scoring?.score ?? 0;
         }
         resolverDecisionReason = result.reason;
         console.log(`[EvidenceResolver] suggested_weak: "${resolvedBook?.title}" (UI-only, NEVER persisted)`);
@@ -943,10 +1036,45 @@ export async function resolveBookCandidateByEvidence(
 
       case 'reject':
       default:
-        // DO NOT persist for reject - nothing to save
+        // Open Library rejected - try Google Books fallback before giving up
+        // This helps find books that aren't in Open Library
+        if (effectiveTitle) {
+          console.log(`[EvidenceResolver] Rejected by Open Library - trying Google Books fallback for "${effectiveTitle}"`);
+          try {
+            const googleBooksFallbackResult = await executeTitleMatchFallbackWithGoogleBooks(
+              effectiveTitle,
+              effectiveAuthor
+            );
+
+            if (googleBooksFallbackResult.triggered && googleBooksFallbackResult.decision === 'suggest') {
+              const isGoogleBooks = googleBooksFallbackResult.reason.startsWith('google_books_');
+              const source = isGoogleBooks ? 'googleBooks' : 'openLibrary';
+
+              console.log(`[EvidenceResolver] Google Books fallback SUCCESS (${source}): ` +
+                `title="${googleBooksFallbackResult.suggestedTitle}", author="${googleBooksFallbackResult.suggestedAuthor}"`);
+
+              resolverDecision = 'suggested';
+              resolvedBook = {
+                title: googleBooksFallbackResult.suggestedTitle || effectiveTitle,
+                authors: googleBooksFallbackResult.suggestedAuthor ? [googleBooksFallbackResult.suggestedAuthor] : [],
+                source,
+                sourceId: googleBooksFallbackResult.debug.chosenCandidate?.title || 'fallback',
+              };
+              resolvedConfidence = googleBooksFallbackResult.confidence;
+              resolverDecisionReason = `google_books_fallback: ${googleBooksFallbackResult.reason}`;
+              break;
+            } else {
+              console.log(`[EvidenceResolver] Google Books fallback did not find match: ${googleBooksFallbackResult.reason}`);
+            }
+          } catch (e: any) {
+            console.warn(`[EvidenceResolver] Google Books fallback error: ${e.message}`);
+          }
+        }
+
+        // Final reject - nothing to save
         resolverDecision = 'reject';
         if (result.topCandidate) {
-          resolvedConfidence = result.topCandidate.scoring.score;
+          resolvedConfidence = result.topCandidate.scoring?.score ?? 0;
         }
         resolverDecisionReason = result.reason;
         break;
@@ -988,13 +1116,13 @@ export async function resolveBookCandidateByEvidence(
       candidatesFound: result.scoredCandidates.length,
       topScores: result.scoredCandidates.slice(0, 5).map((sc) => ({
         title: sc.book.title,
-        score: sc.scoring.score,
+        score: sc.scoring?.score ?? 0,
         // TASK 4: Include raw_score and final_score for debugging
-        rawScore: sc.scoring.rawScore,
-        finalScore: sc.scoring.finalScore,
-        overlapCount: sc.scoring.overlapCount,
-        isbnMatched: sc.scoring.isbnMatched,
-        minSignalCapped: sc.scoring.minSignalCapped,
+        rawScore: sc.scoring?.rawScore,
+        finalScore: sc.scoring?.finalScore,
+        overlapCount: sc.scoring?.overlapCount ?? 0,
+        isbnMatched: sc.scoring?.isbnMatched ?? false,
+        minSignalCapped: sc.scoring?.minSignalCapped ?? false,
       })),
       searchTimeMs: result.searchTimeMs,
       manualReview: result.manualReview,

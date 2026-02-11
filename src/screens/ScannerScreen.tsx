@@ -28,6 +28,7 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
 import { runPipelineOnCapture } from '../services/pipelineService';
+import { setLastScannedImageUri } from '../services/autoExportService';
 import { useAppStore } from '../store/useAppStore';
 import { normalizeFileUri } from '../utils/frameGeo';
 
@@ -139,9 +140,13 @@ export function ScannerScreen(): React.JSX.Element {
       console.log(`[Scanner] Dimensions: ${photo.width}x${photo.height}`);
 
       // Run pipeline
-      const result = await runPipelineOnCapture(`file://${photo.path}`);
+      const imageUri = `file://${photo.path}`;
+      const result = await runPipelineOnCapture(imageUri);
 
       console.log(`[Scanner] Pipeline complete. ${result.detections.length} detections`);
+
+      // Store image URI for auto-rescan
+      setLastScannedImageUri(imageUri);
 
       // Navigate to results
       navigation.navigate('Results', { sessionId: result.session.sessionId });
@@ -169,6 +174,10 @@ export function ScannerScreen(): React.JSX.Element {
           ? importUri
           : normalizeFileUri(importUri);
         const result = await runPipelineOnCapture(normalizedUri);
+
+        // Store image URI for auto-rescan
+        setLastScannedImageUri(normalizedUri);
+
         navigation.navigate('Results', { sessionId: result.session.sessionId });
       } catch (err: any) {
         setError(err.message || 'Import failed');

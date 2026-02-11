@@ -13,8 +13,8 @@
 /** Maximum hypotheses for pass1 (initial search) */
 export const PASS1_MAX_HYPOTHESES = 5;
 
-/** Maximum hypotheses for pass2 (boost pass) */
-export const PASS2_MAX_HYPOTHESES = 12;
+/** Maximum hypotheses for pass2 (boost pass) - increased for merged word splitting and initial letter fixes */
+export const PASS2_MAX_HYPOTHESES = 25;
 
 /** Minimum query length for hypotheses */
 export const MIN_QUERY_LENGTH = 3;
@@ -48,13 +48,13 @@ export const ACCEPT_MEDIUM_THRESHOLD = 0.88;
 export const ACCEPT_MEDIUM_GAP = 0.12;
 
 /** Minimum overlapping tokens for accept_medium */
-export const ACCEPT_MEDIUM_MIN_OVERLAP = 3;
+export const ACCEPT_MEDIUM_MIN_OVERLAP = 2;
 
 /** Minimum score for suggested (replaces manual_review) */
-export const SUGGESTED_THRESHOLD = 0.60;
+export const SUGGESTED_THRESHOLD = 0.50;
 
 /** Alternate suggested threshold when author signal exists */
-export const SUGGESTED_AUTHOR_THRESHOLD = 0.70;
+export const SUGGESTED_AUTHOR_THRESHOLD = 0.55;
 
 /** Minimum overlap for alternate suggested path */
 export const SUGGESTED_AUTHOR_MIN_OVERLAP = 2;
@@ -64,8 +64,11 @@ export const SUGGESTED_AUTHOR_MIN_OVERLAP = 2;
  * - Never persists to database
  * - Shows user a best guess when nothing else qualifies
  * - Fills UI gaps so users see something for most crops
+ *
+ * Lowered from 0.45 to 0.40 to catch near-misses like "CAN" vs "CAT"
+ * where most words match but one has a single-char OCR error.
  */
-export const SUGGESTED_WEAK_THRESHOLD = 0.45;
+export const SUGGESTED_WEAK_THRESHOLD = 0.40;
 export const SUGGESTED_WEAK_MIN_OVERLAP = 2;
 
 /** Manual review threshold (ambiguity only) */
@@ -107,7 +110,7 @@ export const TITLE_ONLY_AUTHOR_THRESHOLD = 0.30;
 export const TITLE_ONLY_ACCEPT_MIN = 0.92;
 
 /** Minimum title score for TITLE_ONLY suggested (below accept) */
-export const TITLE_ONLY_SUGGESTED_MIN = 0.78;
+export const TITLE_ONLY_SUGGESTED_MIN = 0.72;
 
 /** Minimum margin (gap) for TITLE_ONLY accept without other signals */
 export const TITLE_ONLY_MARGIN_MIN = 0.12;
@@ -146,6 +149,9 @@ export const ISBN_BONUS = 0.15;
 
 /** Penalty for generic single-word titles */
 export const GENERIC_TITLE_PENALTY = 0.15;
+
+/** Penalty for candidates missing author information - prefers editions with known authors */
+export const MISSING_AUTHOR_PENALTY = 0.40;
 
 // ============================================================================
 // Scoring Weights

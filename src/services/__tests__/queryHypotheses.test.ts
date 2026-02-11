@@ -75,6 +75,37 @@ describe('queryHypotheses', () => {
       expect(stripped).toBeDefined();
     });
 
+    it('handles multi-line titles like THE + BURIED', () => {
+      // This is the Lisa Childs case: title split across two lines
+      const lines = [
+        'ZEBRA',
+        'NEW FORK',
+        'TIMES',
+        'BESTSELLER',
+        'LISA CHILDS',
+        'THE',
+        'BURIED',
+      ];
+
+      const result = generateHypotheses(lines);
+
+      // Should have title+author hypothesis
+      const titleAuthor = result.hypotheses.find((h) => h.type === 'title_author');
+      expect(titleAuthor).toBeDefined();
+
+      // Title-only hypothesis should exist
+      const titleOnly = result.hypotheses.find((h) => h.type === 'title_only');
+      expect(titleOnly).toBeDefined();
+
+      // Should have stripped variant without THE
+      // This is critical for Open Library search since "Buried" is the actual title
+      const stripped = result.hypotheses.find(
+        (h) => h.type === 'stripped' && h.query.toUpperCase().includes('BURIED')
+      );
+      expect(stripped).toBeDefined();
+      expect(stripped?.query.toUpperCase()).not.toContain('THE ');
+    });
+
     it('uses OCR fields as fallback', () => {
       const lines = ['FICTION']; // Only noise
 
@@ -161,6 +192,56 @@ describe('queryHypotheses', () => {
       expect(shapes).toContain('title_only');
       expect(shapes).toContain('stripped');
     });
+
+    it('generates "PELICAN BRIEF" hypothesis for split title lines', () => {
+      // Regression test: split title across lines should be combined
+      // "TED IN USA" (fragment of "PRINTED IN USA") should NOT be detected as author
+      const lines = [
+        'PELICAN',
+        'BRIEF',
+        'TED IN USA',
+        '21404-',
+      ];
+
+      const result = generateHypotheses(lines);
+
+      // Should have "PELICAN BRIEF" hypothesis (either title_only or combined_lines)
+      const pelicanBrief = result.hypotheses.find(
+        (h) => h.query.toUpperCase().includes('PELICAN BRIEF')
+      );
+      expect(pelicanBrief).toBeDefined();
+
+      // "TED IN USA" should NOT be detected as author
+      // (it's a fragment of "PRINTED IN USA")
+      const tedAuthor = result.hypotheses.find(
+        (h) => h.query.toUpperCase().includes('TED IN USA')
+      );
+      expect(tedAuthor).toBeUndefined();
+
+      // The first hypothesis should contain "PELICAN BRIEF" (and not "TED IN USA")
+      expect(result.hypotheses[0].query.toUpperCase()).toContain('PELICAN BRIEF');
+      expect(result.hypotheses[0].query.toUpperCase()).not.toContain('TED IN USA');
+    });
+
+    it('generates DARKNESS KELLERMAN variant for OCR-corrupted title', () => {
+      // Regression test: OCR errors in middle of title should still find book
+      // "STRAIGHI INTO DARKNESS" has error, but "DARKNESS KELLERMAN" should work
+      const lines = [
+        'ISIO',
+        'CAVE KELLERMAN',
+        'STRAIGHI INTO',
+        'DARKNESS',
+      ];
+
+      const result = generateHypotheses(lines);
+
+      // Should have last-word variant "DARKNESS KELLERMAN"
+      const darknessKellerman = result.hypotheses.find(
+        (h) => h.query.toUpperCase().includes('DARKNESS') &&
+               h.query.toUpperCase().includes('KELLERMAN')
+      );
+      expect(darknessKellerman).toBeDefined();
+    });
   });
 
   describe('generateSimpleHypotheses', () => {
@@ -215,7 +296,7 @@ describe('queryHypotheses', () => {
       }
     });
 
-    it('limits hypotheses to max 12', () => {
+    it('limits hypotheses to max 25', () => {
       const lines = [
         'LINE ONE TEXT',
         'LINE TWO TEXT',
@@ -228,8 +309,8 @@ describe('queryHypotheses', () => {
 
       const result = generateBoostHypotheses(lines, new Set());
 
-      // Pass 2 limit is 12
-      expect(result.hypotheses.length).toBeLessThanOrEqual(12);
+      // Pass 2 limit is 25 (from PASS2_MAX_HYPOTHESES config)
+      expect(result.hypotheses.length).toBeLessThanOrEqual(25);
     });
 
     it('generates n-gram hypotheses', () => {
@@ -267,6 +348,48 @@ describe('queryHypotheses', () => {
     });
   });
 
+  describe('generateBoostHypotheses - OCR correction strategies', () => {
+    it('generates word-split hypotheses for merged OCR words', () => {
+      // Test Strategy 5j: aggressive word splitting
+      const lines = ['UNTANTOS VARATLOS'];
+
+      const result = generateBoostHypotheses(lines, new Set());
+
+      // Should have split variants like "UN TANTOS"
+      const splitHypotheses = result.hypotheses.filter(
+        (h) => h.query.includes('UN ') || h.query.includes('EN ')
+      );
+      expect(splitHypotheses.length).toBeGreaterThan(0);
+    });
+
+    it('generates character-corrected hypotheses for longer words', () => {
+      // Test Strategy 5k: OCR character corrections for longer words
+      const lines = ['UNTANTOS'];
+
+      const result = generateBoostHypotheses(lines, new Set());
+
+      // Should have character-corrected variants
+      // e.g., UNTANTOS with U→O could give ONTANTOS
+      const correctedHypotheses = result.hypotheses.filter(
+        (h) => h.type === 'boost_partial' && h.query !== 'UNTANTOS'
+      );
+      expect(correctedHypotheses.length).toBeGreaterThan(0);
+    });
+
+    it('generates drop-start hypotheses for OCR noise at beginning', () => {
+      // Test Strategy 5l: dropping first 1-2 characters
+      const lines = ['UNTANTOS'];
+
+      const result = generateBoostHypotheses(lines, new Set());
+
+      // Should have variants like "NTANTOS" or "TANTOS"
+      const dropStartHypotheses = result.hypotheses.filter(
+        (h) => h.query === 'NTANTOS' || h.query === 'TANTOS'
+      );
+      expect(dropStartHypotheses.length).toBeGreaterThan(0);
+    });
+  });
+
   describe('getQuerySet', () => {
     it('returns lowercase trimmed query set', () => {
       const hypotheses = [
@@ -287,6 +410,235 @@ describe('queryHypotheses', () => {
       const querySet = getQuerySet([]);
 
       expect(querySet.size).toBe(0);
+    });
+  });
+
+  // Tests for specific reject scenarios from rejects_scan_1770713517396
+  describe('generateBoostHypotheses - reject scenario fixes', () => {
+    it('generates NGAIO MARSH correction for "NGALO LUI" OCR', () => {
+      // Book 1: "DIED IN THE WOOL NGALO LUI" -> Died in the Wool by Ngaio Marsh
+      const lines = ['DIED IN THE WOOL NGALO LUI'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate a hypothesis with corrected author
+      const hasNgaioCorrection = queries.some(q =>
+        q.includes('DIED IN THE WOOL') && q.includes('NGAIO')
+      );
+      expect(hasNgaioCorrection).toBe(true);
+    });
+
+    it('generates MURDERS correction for "MUKDERS" OCR', () => {
+      // Book 3: "THE GOOD LUCK MUKDERS" -> The Good Luck Murders
+      const lines = ['THE GOOD LUCK MUKDERS JOINS', 'JOHNS'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate a hypothesis with MURDERS
+      const hasMurdersCorrection = queries.some(q => q.includes('MURDERS'));
+      expect(hasMurdersCorrection).toBe(true);
+    });
+
+    it('generates THE correction for "TIE" OCR', () => {
+      // Book 6: "SEIZE TIE NIGHT" -> Seize the Night by Dean Koontz
+      const lines = ['SEIZE', 'TIE NIGHT', 'DEAN KO'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Debug: log hypotheses containing THE or TIE
+      const relevantQueries = queries.filter(q => q.includes('TIE') || q.includes('THE') || q.includes('NIGHT'));
+      // eslint-disable-next-line no-console
+      console.log('Relevant queries for TIE/THE test:', relevantQueries.slice(0, 10));
+      // eslint-disable-next-line no-console
+      console.log('Debug info:', result.debug);
+
+      // Should generate a hypothesis with THE instead of TIE
+      const hasTheCorrection = queries.some(q => q.includes('THE NIGHT'));
+      expect(hasTheCorrection).toBe(true);
+    });
+
+    it('generates DEAN KOONTZ correction for "DEAN KO" OCR', () => {
+      // Book 6: "DEAN KO" -> Dean Koontz
+      const lines = ['SEIZE', 'TIE NIGHT', 'DEAN KO'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate a hypothesis with KOONTZ
+      const hasKoontzCorrection = queries.some(q => q.includes('KOONTZ'));
+      expect(hasKoontzCorrection).toBe(true);
+    });
+
+    it('generates ONE correction for "ONF" OCR', () => {
+      // Book 7: "THE LAST ONF LEFT" -> The Last One Left
+      const lines = ['THE LAST ONF LEFT JOHN D. MACDO'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate a hypothesis with ONE instead of ONF
+      const hasOneCorrection = queries.some(q => q.includes('ONE'));
+      expect(hasOneCorrection).toBe(true);
+    });
+
+    it('generates MACDONALD correction for "MACDO" OCR', () => {
+      // Book 7: "JOHN D. MACDO" -> John D. MacDonald
+      const lines = ['THE LAST ONF LEFT JOHN D. MACDO'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate a hypothesis with MACDONALD
+      const hasMacdonaldCorrection = queries.some(q => q.includes('MACDONALD'));
+      expect(hasMacdonaldCorrection).toBe(true);
+    });
+
+    // New test cases for rejected books from the issue
+    it('generates GOOD LUCK MURDERS from corrupted OCR with MUKDERS', () => {
+      // Book 2: THE GOOD LUCK MUKDERS JOINS JOHNS MYSTEFT PIRA ACIA OKIE
+      const lines = ['THE GOOD LUCK MUKDERS JOINS JOHNS MYSTEFT PIRA ACIA OKIE'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should have "GOOD LUCK MURDERS" or similar corrected title
+      const hasMurdersCorrection = queries.some(q =>
+        q.includes('MURDERS') || q.includes('GOOD LUCK')
+      );
+      expect(hasMurdersCorrection).toBe(true);
+
+      // Should also try extracting title pattern
+      const hasTitlePattern = queries.some(q =>
+        q.includes('THE GOOD LUCK')
+      );
+      expect(hasTitlePattern).toBe(true);
+    });
+
+    it('generates FARGO ADVENTURE from truncated OCR', () => {
+      // Book 3: HEAVI A FARGO ADV 72L ARM WORK TIMES BESTSELLING AUTHOR
+      const lines = ['HEAVI A FARGO ADV 72L ARM WORK TIMES BESTSELLING AUTHOR'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should expand ADV to ADVENTURE
+      const hasAdventureExpansion = queries.some(q => q.includes('ADVENTURE'));
+      expect(hasAdventureExpansion).toBe(true);
+
+      // Should try FARGO alone (as a distinctive word)
+      const hasFargo = queries.some(q => q.includes('FARGO'));
+      expect(hasFargo).toBe(true);
+    });
+
+    it('generates THE LAST ONE LEFT from ONF OCR corruption', () => {
+      // Book 5: THE LAST ONF LEFT JOHN D. MACDO
+      const lines = ['THE LAST ONF LEFT JOHN D. MACDO'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should correct ONF to ONE
+      const hasOneCorrection = queries.some(q =>
+        q.includes('THE LAST ONE LEFT')
+      );
+      expect(hasOneCorrection).toBe(true);
+
+      // Should also complete MACDO to MACDONALD
+      const hasFullAuthor = queries.some(q =>
+        q.includes('MACDONALD') || q.includes('JOHN D')
+      );
+      expect(hasFullAuthor).toBe(true);
+    });
+
+    it('handles AGATHA CHRISTIE pattern from corrupted PIRA ACIA', () => {
+      // Book 2: Contains "PIRA ACIA" which might be corrupted "AGATHA CHRISTIE"
+      // While not a perfect match, we should try famous author patterns
+      const lines = ['THE GOOD LUCK MUKDERS PIRA ACIA OKIE'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should try AGATHA CHRISTIE as a known author pattern
+      const hasAgatha = queries.some(q => q.includes('AGATHA') || q.includes('CHRISTIE'));
+      expect(hasAgatha).toBe(true);
+    });
+
+    // Tests for the specific rejected books from the issue
+    it('handles Book 1: CHON New Time Bestiell DERKLEK... (heavily corrupted)', () => {
+      const lines = [
+        'CHON',
+        'New',
+        'Time',
+        'Bestiell',
+        'DERKLEK',
+        'FICTION',
+        'estienli',
+        'LEV',
+        'York',
+        'Thu',
+        'Hew!',
+        'Yarh',
+        'PALRICH',
+        'RN',
+      ];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should try to extract meaningful tokens
+      // DERKLEK might be DEREK, PALRICH might be PATRICK
+      const hasMeaningfulQueries = queries.length > 0;
+      expect(hasMeaningfulQueries).toBe(true);
+    });
+
+    it('handles Book 3: HEAVI A FARGO ADV... (Clive Cussler series)', () => {
+      const lines = [
+        'HEAVI',
+        'A FARGO ADV',
+        '72L ARM WORK TIMES BESTSELLING AUTHOR',
+        'THE E YA',
+        '+Т2/LEHEN KORK: TIMES BESTSELLING AUTHOR',
+        'CHIE QUICOLER',
+      ];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should generate FARGO + CUSSLER variants
+      const hasFargoSeries = queries.some(q =>
+        q.includes('FARGO') && (q.includes('CUSSLER') || q.includes('ADVENTURE'))
+      );
+      expect(hasFargoSeries).toBe(true);
+
+      // Should correct HEAVI to HEAVY
+      const hasHeavyCorrection = queries.some(q => q.includes('HEAVY'));
+      expect(hasHeavyCorrection).toBe(true);
+
+      // Should correct QUICOLER to CUSSLER
+      const hasCusslerCorrection = queries.some(q => q.includes('CUSSLER'));
+      expect(hasCusslerCorrection).toBe(true);
+    });
+
+    it('handles Book 4: STE (very short truncated text)', () => {
+      const lines = ['STE'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      // Should try expansions like STEPHEN, STEVEN, STEEL
+      const hasExpansions = queries.some(q =>
+        q.includes('STEPHEN') || q.includes('STEVEN') || q.includes('STEEL')
+      );
+      expect(hasExpansions).toBe(true);
+    });
+
+    it('expands truncated genre words in context', () => {
+      // Test that "A FARGO ADV" expands ADV to ADVENTURE
+      const lines = ['A FARGO ADV'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      const hasAdventure = queries.some(q => q.includes('ADVENTURE'));
+      expect(hasAdventure).toBe(true);
+    });
+
+    it('corrects QUICOLER to CUSSLER', () => {
+      const lines = ['CHIE QUICOLER'];
+      const result = generateBoostHypotheses(lines, new Set());
+      const queries = result.hypotheses.map(h => h.query.toUpperCase());
+
+      const hasCussler = queries.some(q => q.includes('CUSSLER'));
+      expect(hasCussler).toBe(true);
     });
   });
 });

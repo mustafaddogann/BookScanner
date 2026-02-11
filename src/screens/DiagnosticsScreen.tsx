@@ -428,13 +428,18 @@ export function DiagnosticsScreen(): React.JSX.Element {
   const metadataResolution = sessionMeta?.metadataResolution;
   const evidenceSummary = sessionMeta?.evidenceSummary;
 
-  // Compute resolver stats
+  // Compute resolver stats - matches Results screen counting
+  const accepted = bookCandidates.filter(c => c.resolverDecision === 'accept').length;
+  const suggested = bookCandidates.filter(c => c.resolverDecision === 'suggested').length;
+  // Rejected = everything else (reject, pending, error, disabled, offline, undefined)
+  const rejected = bookCandidates.length - accepted - suggested;
+
   const resolverStats = {
     total: bookCandidates.length,
-    accepted: bookCandidates.filter(c => c.resolverDecision === 'accept').length,
-    rejected: bookCandidates.filter(c => c.resolverDecision === 'reject').length,
-    suggested: bookCandidates.filter(c => c.resolverDecision === 'suggested').length,
-    pending: bookCandidates.filter(c => c.resolverDecision === 'pending' || !c.resolverDecision).length,
+    accepted,
+    rejected,
+    suggested,
+    pending: 0, // Included in rejected count now
   };
 
   if (loading) {

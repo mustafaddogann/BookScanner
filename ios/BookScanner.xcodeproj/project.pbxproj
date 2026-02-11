@@ -16,6 +16,8 @@
 		761780EF2CA45675006654F0 /* SceneDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 761780EE2CA45675006654F0 /* SceneDelegate.swift */; };
 		7E34C907730A22F397EDC1D6 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */; };
 		81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */; };
+		A1B2C3D42F20AAAA00SHELF1 /* shelf_001.jpg in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D52F20AAAA00SHELF1 /* shelf_001.jpg */; };
+		A1B2C3D62F20AAAA00SHELF2 /* shelf_002.jpg in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D72F20AAAA00SHELF2 /* shelf_002.jpg */; };
 		E81043FC45F0DB7D2DB852ED /* libPods-BookScanner.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1573D2E85263DE734D38DB /* libPods-BookScanner.a */; };
 /* End PBXBuildFile section */
 
@@ -34,6 +36,8 @@
 		761780EE2CA45675006654F0 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = BookScanner/SceneDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = BookScanner/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		8D2630672457DFBB10A68236 /* Pods-BookScanner.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-BookScanner.release.xcconfig"; path = "Target Support Files/Pods-BookScanner/Pods-BookScanner.release.xcconfig"; sourceTree = "<group>"; };
+		A1B2C3D52F20AAAA00SHELF1 /* shelf_001.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = shelf_001.jpg; sourceTree = "<group>"; };
+		A1B2C3D72F20AAAA00SHELF2 /* shelf_002.jpg */ = {isa = PBXFileReference; lastKnownFileType = image.jpeg; path = shelf_002.jpg; sourceTree = "<group>"; };
 		ED297162215061F000B7C4FE /* JavaScriptCore.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = JavaScriptCore.framework; path = System/Library/Frameworks/JavaScriptCore.framework; sourceTree = SDKROOT; };
 /* End PBXFileReference section */
 
@@ -52,6 +56,7 @@
 		13B07FAE1A68108700A75B9A /* BookScanner */ = {
 			isa = PBXGroup;
 			children = (
+				A1B2C3D82F20AAAA00TESTFX /* TestFixtures */,
 				5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */,
 				5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */,
 				5DB985242F1ABE70000B11F2 /* TextRecognizer.m */,
@@ -102,6 +107,16 @@
 				13B07F961A680F5B00A75B9A /* BookScanner.app */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A1B2C3D82F20AAAA00TESTFX /* TestFixtures */ = {
+			isa = PBXGroup;
+			children = (
+				A1B2C3D52F20AAAA00SHELF1 /* shelf_001.jpg */,
+				A1B2C3D72F20AAAA00SHELF2 /* shelf_002.jpg */,
+			);
+			name = TestFixtures;
+			path = BookScanner/TestFixtures;
 			sourceTree = "<group>";
 		};
 		BBD78D7AC51CEA395F1C20DB /* Pods */ = {
@@ -177,6 +192,8 @@
 				81AB9BB82411601600AC10FF /* LaunchScreen.storyboard in Resources */,
 				13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */,
 				7E34C907730A22F397EDC1D6 /* PrivacyInfo.xcprivacy in Resources */,
+				A1B2C3D42F20AAAA00SHELF1 /* shelf_001.jpg in Resources */,
+				A1B2C3D62F20AAAA00SHELF2 /* shelf_002.jpg in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -207,9 +224,13 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-resources-${CONFIGURATION}-input-files.xcfilelist",
 			);
+			inputPaths = (
+			);
 			name = "[CP] Copy Pods Resources";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-resources-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -246,9 +267,13 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
+			inputPaths = (
+			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
+			);
+			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

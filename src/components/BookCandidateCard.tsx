@@ -18,15 +18,28 @@ type EvidenceSnapshot = {
   avgConfidence?: number;
 };
 
-function formatConfidence(value?: number | null): string | null {
+/**
+ * Format confidence value for display
+ * @param value - Confidence value (0-1 or 0-100)
+ * @param clampMax - Optional maximum value to clamp to (e.g., 0.49 for rejected items)
+ */
+function formatConfidence(value?: number | null, clampMax?: number): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  if (value >= 0 && value <= 1) {
-    return `${Math.round(value * 100)}%`;
-  }
+
+  let normalized = value;
+  // Normalize to 0-1 range if in 0-100 range
   if (value > 1 && value <= 100) {
-    return `${Math.round(value)}%`;
+    normalized = value / 100;
   }
-  return null;
+  // Skip invalid ranges
+  if (normalized < 0 || normalized > 1) return null;
+
+  // Apply clamp if specified
+  if (typeof clampMax === 'number' && normalized > clampMax) {
+    normalized = clampMax;
+  }
+
+  return `${Math.round(normalized * 100)}%`;
 }
 
 function BookCandidateCardBase({
@@ -61,18 +74,61 @@ function BookCandidateCardBase({
     ? resolvedBook.authors?.join(', ')
     : author;
 
-  const avgConfidence = useMemo(() => {
+  // Calculate base OCR confidence
+  const ocrConfidence = useMemo(() => {
     if (typeof explicitAvg === 'number') return explicitAvg;
     if (mergedLines.length === 0) return null;
     const total = mergedLines.reduce((sum, line) => sum + line.confidence, 0);
     return total / mergedLines.length;
   }, [explicitAvg, mergedLines]);
 
+  // Get resolver confidence if available
+  const resolverConfidenceValue = candidate.resolvedConfidence;
+
+  /**
+   * Confidence alignment with resolver status:
+   * - If resolver accepts: use resolver confidence (or OCR confidence if not available)
+   * - If resolver suggests: use resolver confidence (or OCR confidence)
+   * - If resolver rejects: clamp to max 49% to indicate unverified status
+   * - If pending/disabled: use OCR confidence as-is
+   */
+  const { displayConfidence, confidenceClampMax, isUnverified } = useMemo(() => {
+    // Use resolver confidence when available, fallback to OCR confidence
+    const baseConfidence = typeof resolverConfidenceValue === 'number'
+      ? resolverConfidenceValue
+      : ocrConfidence;
+
+    if (isRejected) {
+      // Rejected: clamp to 49% max, mark as unverified
+      return {
+        displayConfidence: baseConfidence,
+        confidenceClampMax: 0.49,
+        isUnverified: true,
+      };
+    }
+
+    if (isAccepted || isSuggested) {
+      // Accepted/Suggested: use resolver confidence without clamping
+      return {
+        displayConfidence: baseConfidence,
+        confidenceClampMax: undefined,
+        isUnverified: false,
+      };
+    }
+
+    // Pending/disabled/error: use OCR confidence as-is
+    return {
+      displayConfidence: ocrConfidence,
+      confidenceClampMax: undefined,
+      isUnverified: false,
+    };
+  }, [ocrConfidence, resolverConfidenceValue, isRejected, isAccepted, isSuggested]);
+
   const candidateId = (candidate as { candidateId?: string }).candidateId;
   const label = Number.isFinite(candidate.orderingKey)
     ? `Book ${candidate.orderingKey + 1}`
     : (candidateId || candidate.id);
-  const confidenceLabel = formatConfidence(avgConfidence);
+  const confidenceLabel = formatConfidence(displayConfidence, confidenceClampMax);
 
   const content = (
     <View style={styles.card}>
@@ -145,8 +201,8 @@ function BookCandidateCardBase({
       )}
 
       {confidenceLabel && (
-        <Text style={styles.confidence}>
-          Confidence {confidenceLabel}
+        <Text style={[styles.confidence, isUnverified && styles.confidenceUnverified]}>
+          {isUnverified ? 'Unverified' : 'Confidence'} {confidenceLabel}
         </Text>
       )}
 
@@ -304,6 +360,10 @@ const styles = StyleSheet.create({
     color: '#30D158',
     fontSize: 12,
     marginBottom: 6,
+  },
+  // Unverified confidence styling (for rejected resolver decisions)
+  confidenceUnverified: {
+    color: '#FF9F0A', // Orange to indicate unverified status
   },
   evidence: {
     color: '#a0a0a5',

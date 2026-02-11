@@ -69,14 +69,14 @@ export const DEFAULT_CONFIG: AppConfig = {
     writeArtifacts: false,
     nmsMode: 'aabb',
     scoreThreshold: 0.50,
-    maxDetections: 30,
+    maxDetections: 50,
     skipRectification: true,
   },
   captureMode: {
     writeArtifacts: true,
     nmsMode: 'obb',
     scoreThreshold: 0.85,
-    maxDetections: 50,
+    maxDetections: 100,
     skipRectification: false,
   },
   debug: {

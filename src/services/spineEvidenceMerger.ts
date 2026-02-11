@@ -11,6 +11,7 @@ import type {
   BookEvidence,
   BookEvidenceLine,
 } from '../types';
+import { extractTitleAndAuthor } from './titleAuthorExtraction';
 
 // ============================================================================
 // Configuration Constants
@@ -266,6 +267,11 @@ export function mergeEvidenceForCandidate(input: MergeInput): BookEvidence {
   // Extract per-field hints (basic heuristic for now)
   const perFieldHints = extractFieldHints(mergedLines, topCrops);
 
+  // ALWAYS-ON: Log what we extracted for debugging
+  console.log(`[EvidenceMerger] Merged lines: ${mergedLines.map(l => `"${l.text}"`).join(', ')}`);
+  console.log(`[EvidenceMerger] Title hints: ${perFieldHints?.titleHints?.join(', ') || 'none'}`);
+  console.log(`[EvidenceMerger] Author hints: ${perFieldHints?.authorHints?.join(', ') || 'none'}`);
+
   return {
     topCrops: topCropIndices,
     mergedLines,
@@ -275,8 +281,17 @@ export function mergeEvidenceForCandidate(input: MergeInput): BookEvidence {
 }
 
 /**
- * Extract basic field hints from merged lines
- * This provides hints for Gate 8 field extraction
+ * Extract field hints from merged lines using advanced extraction for filtering
+ *
+ * Strategy:
+ * 1. Collect native OCR title/author candidates (as before)
+ * 2. Use advanced extraction to FILTER bad candidates:
+ *    - Marketing badges (e.g., "New York Times" + "bestseller")
+ *    - ORG-like text (e.g., "New York Times", "Random House Press")
+ * 3. If filtering removes all author candidates, use advanced extraction's author
+ *
+ * This preserves compatibility with existing behavior while adding the critical
+ * filtering needed to prevent "New York Times" from being selected as author.
  */
 function extractFieldHints(
   lines: BookEvidenceLine[],
@@ -285,14 +300,81 @@ function extractFieldHints(
   const titleHints: string[] = [];
   const authorHints: string[] = [];
 
-  // Collect title/author candidates from OCR results
+  // Import helpers for filtering native OCR candidates
+  const { isOrgLikeLine, isPublisherOrMarketing, isAllCapsNameCandidate } = require('./titleAuthorExtraction');
+  const { getRoleScore } = require('./roleScoring');
+
+  // Extract text lines for advanced processing
+  const textLines = lines.map(l => l.text);
+
+  // Run advanced extraction to get filtering info and backup candidates
+  const advancedResult = extractTitleAndAuthor(textLines);
+
+  // Build set of excluded badge texts for quick lookup
+  const excludedBadgeTexts = new Set(
+    (advancedResult.debug.excludedBadgeLines || []).map(b => b.text.toLowerCase())
+  );
+
+  // Collect native OCR candidates, but FILTER out bad ones
   for (const { ocrResult } of topCrops) {
+    // Title candidate: filter out marketing badges AND person-like lines
     if (ocrResult.titleCandidate && !titleHints.includes(ocrResult.titleCandidate)) {
-      titleHints.push(ocrResult.titleCandidate);
+      const nativeTitle = ocrResult.titleCandidate;
+      const isBadge = excludedBadgeTexts.has(nativeTitle.toLowerCase()) ||
+                      isPublisherOrMarketing(nativeTitle);
+
+      // NEW: Also filter person-like lines from title candidates
+      // This prevents "LISA CHILDS" from being used as title
+      const roleScore = getRoleScore(nativeTitle);
+      const isPersonLike = roleScore.recommendedRole === 'author' &&
+                           roleScore.personLikeness >= 0.7;
+
+      if (!isBadge && !isPersonLike) {
+        titleHints.push(nativeTitle);
+      } else if (isPersonLike) {
+        console.log(`[EvidenceMerger] Filtered person-like title candidate: "${nativeTitle}" (personLikeness=${roleScore.personLikeness.toFixed(2)})`);
+      }
     }
+
+    // Author candidate: filter out badges, org-like text, AND title-like text
     if (ocrResult.authorCandidate && !authorHints.includes(ocrResult.authorCandidate)) {
-      authorHints.push(ocrResult.authorCandidate);
+      const nativeAuthor = ocrResult.authorCandidate;
+      const isBadge = excludedBadgeTexts.has(nativeAuthor.toLowerCase()) ||
+                      isPublisherOrMarketing(nativeAuthor);
+      const isOrg = isOrgLikeLine(nativeAuthor);
+
+      // NEW: Also filter title-like lines from author candidates
+      // This prevents "OVERTURE TO DEATH" from being used as author
+      // Check if title score is higher than person score, OR if it's clearly title-like
+      const authorRoleScore = getRoleScore(nativeAuthor);
+      const isTitleLike = (authorRoleScore.titleLikeness > authorRoleScore.personLikeness) ||
+                          (authorRoleScore.recommendedRole === 'title') ||
+                          (authorRoleScore.titleLikeness >= 0.7);
+
+      // REJECT if it's a marketing badge OR looks like an organization OR looks like a title
+      if (!isBadge && !isOrg && !isTitleLike) {
+        authorHints.push(nativeAuthor);
+      } else {
+        console.log(`[EvidenceMerger] Filtered out bad author candidate: "${nativeAuthor}" (badge=${isBadge}, org=${isOrg}, titleLike=${isTitleLike})`);
+      }
     }
+  }
+
+  // FALLBACK: If all native author candidates were filtered out, use advanced extraction
+  if (authorHints.length === 0 && advancedResult.author) {
+    authorHints.push(advancedResult.author);
+    console.log(`[EvidenceMerger] Using advanced extraction author: "${advancedResult.author}"`);
+  }
+
+  // FALLBACK: If all native title candidates were filtered out, use advanced extraction
+  if (titleHints.length === 0 && advancedResult.title) {
+    titleHints.push(advancedResult.title);
+  }
+
+  // Log debug info
+  if (advancedResult.debug.excludedBadgeLines && advancedResult.debug.excludedBadgeLines.length > 0) {
+    console.log('[EvidenceMerger] Excluded marketing badges:',
+      advancedResult.debug.excludedBadgeLines.map(b => `"${b.text}" (${b.reason})`).join(', '));
   }
 
   return { titleHints, authorHints };
