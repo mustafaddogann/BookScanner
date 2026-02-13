@@ -11,11 +11,12 @@
 
 import { NativeModules, Platform } from 'react-native';
 import RNFS from 'react-native-fs';
-import type { OCRResult, OCRSummary, TextRecognitionOptions } from '../types';
+import type { OCRResult, OCRSummary, TextRecognitionOptions, RectifyResult, OBBCorners } from '../types';
 import { isArtifactWritingEnabled, getSessionDir } from './debugArtifacts';
 
-// Get native TextRecognizer module
+// Get native modules
 const TextRecognizer = NativeModules.TextRecognizer;
+const ImagePreprocessor = NativeModules.ImagePreprocessor;
 
 // Cache for availability check
 let textRecognitionAvailable: boolean | null = null;
@@ -158,7 +159,7 @@ export async function recognizeCropText(
 
     const recognitionOptions = {
       imagePath: cropImagePath.startsWith('file://') ? cropImagePath : `file://${cropImagePath}`,
-      rotationsToTry: options?.rotationsToTry || [0, 90, 180, 270],
+      rotationsToTry: options?.rotationsToTry || [0, 90],
       recognitionLevel: options?.recognitionLevel || 'accurate',
       languages: options?.languages,
     };
@@ -185,6 +186,62 @@ export async function recognizeCropText(
     await writeOCRArtifact(sessionId, cropIndex, result);
     return result;
   }
+}
+
+/**
+ * Check if the combined rectify+recognize native method is available
+ */
+export function isCombinedPathAvailable(): boolean {
+  return Platform.OS === 'ios' && !!ImagePreprocessor?.rectifyAndRecognize;
+}
+
+/**
+ * Combined rectify + OCR in a single native call (eliminates JPEG round-trip).
+ */
+export async function rectifyAndRecognizeCrop(
+  imageUri: string,
+  corners: OBBCorners,
+  outputPath: string,
+  targetHeight: number,
+  sessionId: string,
+  cropIndex: number,
+  options?: Partial<TextRecognitionOptions>
+): Promise<{ rectifyResult: RectifyResult; ocrResult: OCRResult }> {
+  if (!isCombinedPathAvailable()) {
+    throw new Error('Combined rectify+recognize not available');
+  }
+
+  const cleanUri = imageUri.startsWith('file://') ? imageUri : `file://${imageUri}`;
+
+  const nativeResult = await ImagePreprocessor.rectifyAndRecognize(
+    cleanUri,
+    {
+      topLeft: { x: corners.topLeft.x, y: corners.topLeft.y },
+      topRight: { x: corners.topRight.x, y: corners.topRight.y },
+      bottomRight: { x: corners.bottomRight.x, y: corners.bottomRight.y },
+      bottomLeft: { x: corners.bottomLeft.x, y: corners.bottomLeft.y },
+    },
+    outputPath,
+    targetHeight,
+    options?.recognitionLevel || 'accurate',
+    options?.languages || null,
+    options?.rotationsToTry || [0, 90]
+  );
+
+  const rectifyResult: RectifyResult = {
+    cropUri: nativeResult.rectifyResult.path ? `file://${nativeResult.rectifyResult.path}` : '',
+    sourceCorners: corners,
+    outputWidth: nativeResult.rectifyResult.width,
+    outputHeight: nativeResult.rectifyResult.height,
+    paddingUsed: 0.15,
+    detectionIndex: cropIndex,
+    rectificationMethod: 'native_opencv',
+  };
+
+  const ocrResult: OCRResult = nativeResult.ocrResult;
+  await writeOCRArtifact(sessionId, cropIndex, ocrResult);
+
+  return { rectifyResult, ocrResult };
 }
 
 /**

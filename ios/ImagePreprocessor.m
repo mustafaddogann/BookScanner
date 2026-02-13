@@ -10,8 +10,26 @@
 @import Foundation;
 @import UIKit;
 @import CoreImage;
+@import Vision;
 #import <React/RCTBridgeModule.h>
 #import <React/RCTLog.h>
+
+@interface TextRecognizer : NSObject
++ (UIImage *)rotateImage:(UIImage *)image byDegrees:(NSInteger)degrees;
++ (void)recognizeTextInImage:(UIImage *)image
+            recognitionLevel:(NSString *)level
+                   languages:(NSArray<NSString *> *)languages
+                  completion:(void (^)(NSArray<NSDictionary *> *lines, NSError *error))completion
+    API_AVAILABLE(ios(13.0));
++ (void)recognizeTextInCGImage:(CGImageRef)cgImage
+              recognitionLevel:(NSString *)level
+                     languages:(NSArray<NSString *> *)languages
+                    completion:(void (^)(NSArray<NSDictionary *> *lines, NSError *error))completion
+    API_AVAILABLE(ios(13.0));
++ (NSDictionary *)calculateMetricsForLines:(NSArray<NSDictionary *> *)lines;
++ (NSComparisonResult)compareMetricsA:(NSDictionary *)a withB:(NSDictionary *)b;
++ (NSDictionary *)extractTitleAuthorFromLines:(NSArray<NSDictionary *> *)lines;
+@end
 
 @interface ImagePreprocessor : NSObject <RCTBridgeModule>
 @end
@@ -1069,6 +1087,474 @@ RCT_EXPORT_METHOD(createDisplayImage:(NSString *)sourcePath
     @"scale": @(scale),
     @"resized": @YES
   });
+}
+
+/**
+ * Enhance image for OCR retry path (grayscale + contrast + sharpen + min-width upscale).
+ */
++ (CGImageRef)enhanceForOCR:(CGImageRef)inputImage {
+  if (!inputImage) return nil;
+
+  CIImage *ciImage = [CIImage imageWithCGImage:inputImage];
+  if (!ciImage) return nil;
+
+  CGFloat width = CGImageGetWidth(inputImage);
+  CGFloat height = CGImageGetHeight(inputImage);
+
+  // Upscale to minimum width 300px (uniform scale; no stretching)
+  if (width > 0 && width < 300.0f) {
+    CGFloat targetWidth = 300.0f;
+    CGFloat scaleFactor = targetWidth / width;
+    CGFloat scaledHeight = height * scaleFactor;
+
+    CIFilter *scaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+    if (scaleFilter) {
+      [scaleFilter setValue:ciImage forKey:kCIInputImageKey];
+      [scaleFilter setValue:@(scaleFactor) forKey:kCIInputScaleKey];
+      [scaleFilter setValue:@(1.0f) forKey:kCIInputAspectRatioKey];
+      if (scaleFilter.outputImage) {
+        ciImage = scaleFilter.outputImage;
+      }
+    }
+
+    // If needed, letterbox to exactly 300 width with gray bars
+    CGRect scaledExtent = ciImage.extent;
+    if (scaledExtent.size.width < targetWidth) {
+      CGFloat padLeft = (targetWidth - scaledExtent.size.width) * 0.5f;
+      CIImage *translated = [ciImage imageByApplyingTransform:CGAffineTransformMakeTranslation(padLeft, 0)];
+
+      CIFilter *colorGen = [CIFilter filterWithName:@"CIConstantColorGenerator"];
+      [colorGen setValue:[CIColor colorWithRed:0.5f green:0.5f blue:0.5f alpha:1.0f] forKey:kCIInputColorKey];
+      CIImage *background = [[colorGen outputImage] imageByCroppingToRect:CGRectMake(0, 0, targetWidth, scaledHeight)];
+
+      CIFilter *composite = [CIFilter filterWithName:@"CISourceOverCompositing"];
+      [composite setValue:translated forKey:kCIInputImageKey];
+      [composite setValue:background forKey:kCIInputBackgroundImageKey];
+      if (composite.outputImage) {
+        ciImage = [composite.outputImage imageByCroppingToRect:CGRectMake(0, 0, targetWidth, scaledHeight)];
+      }
+    }
+  }
+
+  // Grayscale + light contrast bump
+  CIFilter *colorControls = [CIFilter filterWithName:@"CIColorControls"];
+  if (colorControls) {
+    [colorControls setValue:ciImage forKey:kCIInputImageKey];
+    [colorControls setValue:@0.0f forKey:kCIInputSaturationKey];
+    [colorControls setValue:@1.1f forKey:kCIInputContrastKey];
+    [colorControls setValue:@0.0f forKey:kCIInputBrightnessKey];
+    if (colorControls.outputImage) {
+      ciImage = colorControls.outputImage;
+    }
+  }
+
+  // Unsharp mask for text edges
+  CIFilter *unsharp = [CIFilter filterWithName:@"CIUnsharpMask"];
+  if (unsharp) {
+    [unsharp setValue:ciImage forKey:kCIInputImageKey];
+    [unsharp setValue:@1.5f forKey:kCIInputRadiusKey];
+    [unsharp setValue:@0.5f forKey:kCIInputIntensityKey];
+    if (unsharp.outputImage) {
+      ciImage = unsharp.outputImage;
+    }
+  }
+
+  CGRect extent = ciImage.extent;
+  CIContext *context = [CIContext contextWithOptions:nil];
+  return [context createCGImage:ciImage fromRect:extent];
+}
+
+/**
+ * Combined rectification + OCR path.
+ * OCR runs on in-memory image to avoid JPEG quality loss.
+ */
+RCT_EXPORT_METHOD(rectifyAndRecognize:(NSString *)imagePath
+                  corners:(NSDictionary *)corners
+                  outputPath:(NSString *)outputPath
+                  targetHeight:(NSNumber *)targetHeight
+                  recognitionLevel:(NSString *)recognitionLevel
+                  languages:(NSArray<NSString *> *)languages
+                  rotationsToTry:(NSArray<NSNumber *> *)rotationsToTry
+                  resolve:(RCTPromiseResolveBlock)resolve
+                  reject:(RCTPromiseRejectBlock)reject)
+{
+  if (@available(iOS 13.0, *)) {
+
+  NSString *cleanInputPath = imagePath;
+  if ([cleanInputPath hasPrefix:@"file://"]) {
+    cleanInputPath = [cleanInputPath substringFromIndex:7];
+  }
+
+  NSString *cleanOutputPath = outputPath;
+  if ([cleanOutputPath hasPrefix:@"file://"]) {
+    cleanOutputPath = [cleanOutputPath substringFromIndex:7];
+  }
+
+  NSDictionary *tlDict = corners[@"topLeft"];
+  NSDictionary *trDict = corners[@"topRight"];
+  NSDictionary *brDict = corners[@"bottomRight"];
+  NSDictionary *blDict = corners[@"bottomLeft"];
+  if (!tlDict || !trDict || !brDict || !blDict) {
+    reject(@"RECTIFY_OCR_FAILED", @"Missing corner coordinates", nil);
+    return;
+  }
+
+  CGFloat tlX = [tlDict[@"x"] floatValue];
+  CGFloat tlY = [tlDict[@"y"] floatValue];
+  CGFloat trX = [trDict[@"x"] floatValue];
+  CGFloat trY = [trDict[@"y"] floatValue];
+  CGFloat brX = [brDict[@"x"] floatValue];
+  CGFloat brY = [brDict[@"y"] floatValue];
+  CGFloat blX = [blDict[@"x"] floatValue];
+  CGFloat blY = [blDict[@"y"] floatValue];
+
+  UIImage *rawImage = [UIImage imageWithContentsOfFile:cleanInputPath];
+  if (!rawImage) {
+    reject(@"RECTIFY_OCR_FAILED", [NSString stringWithFormat:@"Failed to load image: %@", cleanInputPath], nil);
+    return;
+  }
+
+  UIImage *image = [ImagePreprocessor normalizeImageOrientation:rawImage];
+  CGFloat imageHeight = image.size.height;
+
+  CIImage *ciImage = [[CIImage alloc] initWithImage:image];
+  if (!ciImage) {
+    reject(@"RECTIFY_OCR_FAILED", @"Failed to create CIImage", nil);
+    return;
+  }
+
+  CIVector *topLeft = [CIVector vectorWithX:tlX Y:(imageHeight - tlY)];
+  CIVector *topRight = [CIVector vectorWithX:trX Y:(imageHeight - trY)];
+  CIVector *bottomRight = [CIVector vectorWithX:brX Y:(imageHeight - brY)];
+  CIVector *bottomLeft = [CIVector vectorWithX:blX Y:(imageHeight - blY)];
+
+  CIFilter *perspectiveFilter = [CIFilter filterWithName:@"CIPerspectiveCorrection"];
+  if (!perspectiveFilter) {
+    reject(@"RECTIFY_OCR_FAILED", @"CIPerspectiveCorrection not available", nil);
+    return;
+  }
+
+  [perspectiveFilter setValue:ciImage forKey:kCIInputImageKey];
+  [perspectiveFilter setValue:topLeft forKey:@"inputTopLeft"];
+  [perspectiveFilter setValue:topRight forKey:@"inputTopRight"];
+  [perspectiveFilter setValue:bottomRight forKey:@"inputBottomRight"];
+  [perspectiveFilter setValue:bottomLeft forKey:@"inputBottomLeft"];
+
+  CIImage *correctedImage = perspectiveFilter.outputImage;
+  if (!correctedImage) {
+    reject(@"RECTIFY_OCR_FAILED", @"CIPerspectiveCorrection produced no output", nil);
+    return;
+  }
+
+  CGRect extent = correctedImage.extent;
+  if (extent.origin.x != 0 || extent.origin.y != 0) {
+    correctedImage = [correctedImage imageByApplyingTransform:CGAffineTransformMakeTranslation(-extent.origin.x, -extent.origin.y)];
+    extent = correctedImage.extent;
+  }
+
+  CGFloat outputHeight = extent.size.height;
+  CGFloat targetH = [targetHeight floatValue];
+  if (targetH > 0 && outputHeight > 0) {
+    CGFloat scaleFactor = targetH / outputHeight;
+    CIFilter *scaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+    if (scaleFilter) {
+      [scaleFilter setValue:correctedImage forKey:kCIInputImageKey];
+      [scaleFilter setValue:@(scaleFactor) forKey:kCIInputScaleKey];
+      [scaleFilter setValue:@(1.0f) forKey:kCIInputAspectRatioKey];
+      if (scaleFilter.outputImage) {
+        correctedImage = scaleFilter.outputImage;
+      }
+    }
+  }
+
+  CGFloat maxDimension = 2048.0f;
+  extent = correctedImage.extent;
+  CGFloat outputWidth = extent.size.width;
+  outputHeight = extent.size.height;
+  if (outputWidth > maxDimension || outputHeight > maxDimension) {
+    CGFloat clampScale = MIN(maxDimension / outputWidth, maxDimension / outputHeight);
+    CIFilter *clampScaleFilter = [CIFilter filterWithName:@"CILanczosScaleTransform"];
+    if (clampScaleFilter) {
+      [clampScaleFilter setValue:correctedImage forKey:kCIInputImageKey];
+      [clampScaleFilter setValue:@(clampScale) forKey:kCIInputScaleKey];
+      [clampScaleFilter setValue:@(1.0f) forKey:kCIInputAspectRatioKey];
+      if (clampScaleFilter.outputImage) {
+        correctedImage = clampScaleFilter.outputImage;
+      }
+    }
+  }
+
+  CIContext *context = [CIContext contextWithOptions:nil];
+  extent = correctedImage.extent;
+  CGImageRef rectifiedCGImage = [context createCGImage:correctedImage fromRect:extent];
+  if (!rectifiedCGImage) {
+    reject(@"RECTIFY_OCR_FAILED", @"Failed to render corrected image", nil);
+    return;
+  }
+
+  UIImage *rectifiedUIImage = [UIImage imageWithCGImage:rectifiedCGImage];
+  if (!rectifiedUIImage) {
+    CGImageRelease(rectifiedCGImage);
+    reject(@"RECTIFY_OCR_FAILED", @"Failed to create UIImage from rectified image", nil);
+    return;
+  }
+
+  if (cleanOutputPath && cleanOutputPath.length > 0) {
+    NSString *outputDir = [cleanOutputPath stringByDeletingLastPathComponent];
+    [[NSFileManager defaultManager] createDirectoryAtPath:outputDir
+                              withIntermediateDirectories:YES
+                                               attributes:nil
+                                                    error:nil];
+    NSData *debugJpegData = UIImageJPEGRepresentation(rectifiedUIImage, 0.92f);
+    [debugJpegData writeToFile:cleanOutputPath options:NSDataWritingAtomic error:nil];
+  }
+
+  NSDictionary *rectifyResult = @{
+    @"path": cleanOutputPath ?: @"",
+    @"width": @((NSInteger)CGImageGetWidth(rectifiedCGImage)),
+    @"height": @((NSInteger)CGImageGetHeight(rectifiedCGImage)),
+    @"method": @"native_coreimage"
+  };
+
+  NSArray<NSNumber *> *rotations =
+      ([rotationsToTry isKindOfClass:[NSArray class]] && rotationsToTry.count > 0)
+          ? rotationsToTry
+          : @[@0, @90];
+  NSString *ocrLevel = recognitionLevel ?: @"accurate";
+  NSArray<NSString *> *safeLanguages = [languages isKindOfClass:[NSArray class]] ? languages : nil;
+
+  NSDate *startTime = [NSDate date];
+
+  __block NSMutableDictionary *bestResult = nil;
+  __block NSDictionary *bestMetrics = nil;
+  __block NSInteger bestRotation = 0;
+  __block NSMutableDictionary<NSNumber *, NSArray *> *allRotationLines = [NSMutableDictionary dictionary];
+  __block NSError *lastError = nil;
+
+  dispatch_group_t group = dispatch_group_create();
+  dispatch_queue_t queue = dispatch_queue_create("com.bookscanner.rectify_ocr", DISPATCH_QUEUE_SERIAL);
+
+  for (NSNumber *rotation in rotations) {
+    dispatch_group_enter(group);
+    dispatch_async(queue, ^{
+      NSInteger rotationDegrees = [rotation integerValue];
+
+      dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+      void (^handleResult)(NSArray<NSDictionary *> *, NSError *) = ^(NSArray<NSDictionary *> *lines, NSError *error) {
+        if (error) {
+          lastError = error;
+        } else {
+          NSDictionary *metrics = [TextRecognizer calculateMetricsForLines:lines];
+          @synchronized (self) {
+            allRotationLines[@(rotationDegrees)] = lines;
+            if (!bestMetrics ||
+                [TextRecognizer compareMetricsA:metrics withB:bestMetrics] == NSOrderedAscending) {
+              bestMetrics = metrics;
+              bestRotation = rotationDegrees;
+              NSMutableString *fullText = [NSMutableString string];
+              for (NSDictionary *line in lines) {
+                if (fullText.length > 0) [fullText appendString:@"\n"];
+                [fullText appendString:line[@"text"]];
+              }
+              NSDictionary *titleAuthor = [TextRecognizer extractTitleAuthorFromLines:lines];
+              bestResult = [@{
+                @"ok": @YES,
+                @"chosenRotation": @(rotationDegrees),
+                @"fullText": fullText,
+                @"lines": lines,
+                @"avgConfidence": metrics[@"avgConfidence"],
+                @"alnumRatio": metrics[@"alnumRatio"],
+                @"charCount": metrics[@"charCount"],
+                @"lineCount": metrics[@"lineCount"],
+                @"titleCandidate": titleAuthor[@"titleCandidate"],
+                @"authorCandidate": titleAuthor[@"authorCandidate"]
+              } mutableCopy];
+            }
+          }
+        }
+        dispatch_semaphore_signal(semaphore);
+      };
+
+      if (rotationDegrees == 0) {
+        [TextRecognizer recognizeTextInCGImage:rectifiedCGImage
+                              recognitionLevel:ocrLevel
+                                     languages:safeLanguages
+                                    completion:handleResult];
+      } else {
+        UIImage *rotatedImage = [TextRecognizer rotateImage:rectifiedUIImage byDegrees:rotationDegrees];
+        [TextRecognizer recognizeTextInImage:rotatedImage
+                            recognitionLevel:ocrLevel
+                                   languages:safeLanguages
+                                  completion:handleResult];
+      }
+
+      dispatch_semaphore_wait(semaphore, DISPATCH_TIME_FOREVER);
+      dispatch_group_leave(group);
+    });
+  }
+
+    dispatch_group_notify(group, dispatch_get_main_queue(), ^{
+    NSTimeInterval processingTime = [[NSDate date] timeIntervalSinceDate:startTime] * 1000;
+
+    if (!bestResult) {
+      CGImageRelease(rectifiedCGImage);
+      resolve(@{
+        @"rectifyResult": rectifyResult,
+        @"ocrResult": @{
+          @"ok": @NO,
+          @"error": lastError ? lastError.localizedDescription : @"No text found",
+          @"chosenRotation": @0,
+          @"fullText": @"",
+          @"lines": @[],
+          @"avgConfidence": @0,
+          @"alnumRatio": @0,
+          @"charCount": @0,
+          @"lineCount": @0,
+          @"titleCandidate": [NSNull null],
+          @"authorCandidate": [NSNull null],
+          @"processingTimeMs": @(processingTime),
+          @"platform": @"ios",
+          @"combinedPath": @YES
+        }
+      });
+      return;
+    }
+
+    NSMutableArray *mergedLines = [NSMutableArray array];
+    NSMutableSet *seenTexts = [NSMutableSet set];
+    for (NSDictionary *line in bestResult[@"lines"]) {
+      NSString *text = [line[@"text"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+      NSString *normalized = [[text lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+      if (normalized.length >= 2 && ![seenTexts containsObject:normalized]) {
+        [seenTexts addObject:normalized];
+        [mergedLines addObject:line];
+      }
+    }
+
+    NSInteger complementaryRotation = (bestRotation + 90) % 360;
+    NSArray *complementaryLines = allRotationLines[@(complementaryRotation)];
+    if (!complementaryLines) {
+      for (NSNumber *rotation in rotations) {
+        NSInteger candidateRotation = [rotation integerValue];
+        if (candidateRotation == bestRotation) continue;
+        complementaryRotation = candidateRotation;
+        complementaryLines = allRotationLines[@(candidateRotation)];
+        if (complementaryLines) break;
+      }
+    }
+    if (complementaryLines) {
+      for (NSDictionary *line in complementaryLines) {
+        NSString *text = [line[@"text"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceCharacterSet]];
+        NSString *normalized = [[text lowercaseString] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (normalized.length < 3) continue;
+        if ([seenTexts containsObject:normalized]) continue;
+
+        BOOL isSubstring = NO;
+        for (NSString *existing in seenTexts) {
+          if ([existing containsString:normalized] || [normalized containsString:existing]) {
+            isSubstring = YES;
+            break;
+          }
+        }
+        if (isSubstring) continue;
+
+        [seenTexts addObject:normalized];
+        [mergedLines addObject:line];
+      }
+    }
+
+    NSMutableString *mergedFullText = [NSMutableString string];
+    for (NSDictionary *line in mergedLines) {
+      if (mergedFullText.length > 0) [mergedFullText appendString:@"\n"];
+      [mergedFullText appendString:line[@"text"]];
+    }
+
+    NSDictionary *mergedMetrics = [TextRecognizer calculateMetricsForLines:mergedLines];
+    NSDictionary *mergedTitleAuthor = [TextRecognizer extractTitleAuthorFromLines:mergedLines];
+
+    bestResult[@"fullText"] = mergedFullText;
+    bestResult[@"lines"] = mergedLines;
+    bestResult[@"avgConfidence"] = mergedMetrics[@"avgConfidence"];
+    bestResult[@"alnumRatio"] = mergedMetrics[@"alnumRatio"];
+    bestResult[@"charCount"] = mergedMetrics[@"charCount"];
+    bestResult[@"lineCount"] = mergedMetrics[@"lineCount"];
+    bestResult[@"titleCandidate"] = mergedTitleAuthor[@"titleCandidate"];
+    bestResult[@"authorCandidate"] = mergedTitleAuthor[@"authorCandidate"];
+    bestResult[@"processingTimeMs"] = @(processingTime);
+    bestResult[@"platform"] = @"ios";
+    bestResult[@"recognitionLevel"] = ocrLevel;
+    bestResult[@"mergedRotations"] = @YES;
+    bestResult[@"combinedPath"] = @YES;
+
+    CGFloat avgConfidence = [mergedMetrics[@"avgConfidence"] floatValue];
+    if (avgConfidence < 0.4f) {
+      CGImageRef enhancedCGImage = [ImagePreprocessor enhanceForOCR:rectifiedCGImage];
+      if (enhancedCGImage) {
+        UIImage *enhancedUIImage = [UIImage imageWithCGImage:enhancedCGImage];
+        CGImageRelease(enhancedCGImage);
+
+        if (enhancedUIImage) {
+          dispatch_semaphore_t enhanceSema = dispatch_semaphore_create(0);
+          __block NSArray<NSDictionary *> *enhancedLines = nil;
+
+          void (^enhancedHandler)(NSArray<NSDictionary *> *, NSError *) = ^(NSArray<NSDictionary *> *lines, NSError *error) {
+            if (!error && lines) {
+              enhancedLines = lines;
+            }
+            dispatch_semaphore_signal(enhanceSema);
+          };
+
+          if (bestRotation == 0) {
+            [TextRecognizer recognizeTextInCGImage:enhancedUIImage.CGImage
+                                  recognitionLevel:ocrLevel
+                                         languages:safeLanguages
+                                        completion:enhancedHandler];
+          } else {
+            UIImage *enhancedRotated = [TextRecognizer rotateImage:enhancedUIImage byDegrees:bestRotation];
+            [TextRecognizer recognizeTextInImage:enhancedRotated
+                                recognitionLevel:ocrLevel
+                                       languages:safeLanguages
+                                      completion:enhancedHandler];
+          }
+          dispatch_semaphore_wait(enhanceSema, DISPATCH_TIME_FOREVER);
+
+          if (enhancedLines) {
+            NSDictionary *enhancedMetrics = [TextRecognizer calculateMetricsForLines:enhancedLines];
+            if ([TextRecognizer compareMetricsA:enhancedMetrics withB:mergedMetrics] == NSOrderedAscending) {
+              NSMutableString *enhancedFullText = [NSMutableString string];
+              for (NSDictionary *line in enhancedLines) {
+                if (enhancedFullText.length > 0) [enhancedFullText appendString:@"\n"];
+                [enhancedFullText appendString:line[@"text"]];
+              }
+              NSDictionary *enhancedTitleAuthor = [TextRecognizer extractTitleAuthorFromLines:enhancedLines];
+
+              bestResult[@"fullText"] = enhancedFullText;
+              bestResult[@"lines"] = enhancedLines;
+              bestResult[@"avgConfidence"] = enhancedMetrics[@"avgConfidence"];
+              bestResult[@"alnumRatio"] = enhancedMetrics[@"alnumRatio"];
+              bestResult[@"charCount"] = enhancedMetrics[@"charCount"];
+              bestResult[@"lineCount"] = enhancedMetrics[@"lineCount"];
+              bestResult[@"titleCandidate"] = enhancedTitleAuthor[@"titleCandidate"];
+              bestResult[@"authorCandidate"] = enhancedTitleAuthor[@"authorCandidate"];
+              bestResult[@"enhanced"] = @YES;
+            }
+          }
+        }
+      }
+    }
+
+    NSTimeInterval totalTime = [[NSDate date] timeIntervalSinceDate:startTime] * 1000;
+    bestResult[@"processingTimeMs"] = @(totalTime);
+    CGImageRelease(rectifiedCGImage);
+
+    resolve(@{
+      @"rectifyResult": rectifyResult,
+      @"ocrResult": bestResult
+    });
+    });
+  } else {
+    reject(@"RECTIFY_OCR_FAILED", @"Requires iOS 13.0+", nil);
+  }
 }
 
 @end

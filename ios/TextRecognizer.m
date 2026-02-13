@@ -13,7 +13,12 @@
 #import <React/RCTBridgeModule.h>
 #import <React/RCTLog.h>
 
+static const NSUInteger kTopCandidatesPerObservation = 5;
+static const CGFloat kLineRejectMinConfidence = 0.3f;
+static const CGFloat kLineRejectMinAlnumRatio = 0.5f;
+
 @interface TextRecognizer : NSObject <RCTBridgeModule>
++ (CGFloat)alnumRatioForString:(NSString *)str;
 @end
 
 @implementation TextRecognizer
@@ -85,6 +90,144 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
 #pragma mark - Text Recognition Core
 
 /**
+ * Return YES when character is an ASCII letter.
+ */
++ (BOOL)isAsciiLetter:(unichar)c {
+  return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+}
+
+/**
+ * Return YES when character is an ASCII vowel.
+ */
++ (BOOL)isAsciiVowel:(unichar)c {
+  switch (c) {
+    case 'a': case 'e': case 'i': case 'o': case 'u':
+    case 'A': case 'E': case 'I': case 'O': case 'U':
+      return YES;
+    default:
+      return NO;
+  }
+}
+
+/**
+ * Find longest run of consecutive consonants in the text.
+ */
++ (NSUInteger)longestConsecutiveConsonantRun:(NSString *)text {
+  NSUInteger longest = 0;
+  NSUInteger current = 0;
+  for (NSUInteger i = 0; i < text.length; i++) {
+    unichar c = [text characterAtIndex:i];
+    if ([self isAsciiLetter:c] && ![self isAsciiVowel:c]) {
+      current++;
+      if (current > longest) {
+        longest = current;
+      }
+    } else {
+      current = 0;
+    }
+  }
+  return longest;
+}
+
+/**
+ * Detect digit runs inside words (e.g. "BO0K"), a common OCR artifact.
+ */
++ (BOOL)containsInnerDigitPattern:(NSString *)text {
+  NSRegularExpression *regex = [NSRegularExpression regularExpressionWithPattern:@"[A-Za-z]+[0-9]+[A-Za-z]+"
+                                                                         options:0
+                                                                           error:nil];
+  if (!regex) return NO;
+  NSRange range = NSMakeRange(0, text.length);
+  return [regex firstMatchInString:text options:0 range:range] != nil;
+}
+
+/**
+ * Score whether tokens look word-like (letters, apostrophes, hyphens).
+ */
++ (CGFloat)tokenStructureScoreForString:(NSString *)text {
+  NSString *trimmed = [text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+  if (trimmed.length == 0) return 0.0f;
+
+  NSArray<NSString *> *rawTokens = [trimmed componentsSeparatedByCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+  NSUInteger totalTokens = 0;
+  NSUInteger wordLikeTokens = 0;
+
+  for (NSString *raw in rawTokens) {
+    NSString *token = [raw stringByTrimmingCharactersInSet:[NSCharacterSet punctuationCharacterSet]];
+    if (token.length == 0) continue;
+    totalTokens++;
+
+    NSUInteger letters = 0;
+    NSUInteger digits = 0;
+    for (NSUInteger i = 0; i < token.length; i++) {
+      unichar c = [token characterAtIndex:i];
+      if ([self isAsciiLetter:c]) letters++;
+      else if (c >= '0' && c <= '9') digits++;
+    }
+
+    CGFloat letterRatio = token.length > 0 ? (CGFloat)letters / token.length : 0.0f;
+    BOOL looksWordLike = (letters >= 2 && letterRatio >= 0.7f && digits <= 1);
+    if (looksWordLike) {
+      wordLikeTokens++;
+    }
+  }
+
+  if (totalTokens == 0) return 0.0f;
+  return (CGFloat)wordLikeTokens / totalTokens;
+}
+
+/**
+ * Score text length plausibility for a single OCR line candidate.
+ */
++ (CGFloat)lengthScoreForString:(NSString *)text {
+  NSUInteger length = [[text stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] length];
+  if (length == 0) return 0.0f;
+  if (length < 2) return 0.1f;
+  if (length <= 4) return 0.6f;
+  if (length <= 36) return 1.0f;
+  if (length <= 56) return 0.7f;
+  return 0.4f;
+}
+
+/**
+ * Score a candidate string to prefer plausible spine text over OCR garbage.
+ */
++ (NSDictionary *)scoreCandidateText:(NSString *)text confidence:(CGFloat)confidence {
+  NSString *safeText = text ?: @"";
+  CGFloat alnumRatio = [self alnumRatioForString:safeText];
+  CGFloat tokenStructure = [self tokenStructureScoreForString:safeText];
+  CGFloat lengthScore = [self lengthScoreForString:safeText];
+
+  NSUInteger consonantRun = [self longestConsecutiveConsonantRun:safeText];
+  BOOL hasInnerDigits = [self containsInnerDigitPattern:safeText];
+
+  CGFloat garbagePenalty = 0.0f;
+  if (consonantRun >= 5) {
+    garbagePenalty += MIN(0.25f, 0.04f * (CGFloat)(consonantRun - 4));
+  }
+  if (hasInnerDigits) {
+    garbagePenalty += 0.15f;
+  }
+  if (safeText.length >= 2 && alnumRatio < 0.4f) {
+    garbagePenalty += 0.1f;
+  }
+
+  CGFloat score = 0.7f * confidence +
+                  0.15f * tokenStructure +
+                  0.10f * alnumRatio +
+                  0.05f * lengthScore -
+                  garbagePenalty;
+  score = MAX(0.0f, MIN(1.0f, score));
+
+  return @{
+    @"text": safeText,
+    @"confidence": @(confidence),
+    @"alnumRatio": @(alnumRatio),
+    @"score": @(score)
+  };
+}
+
+/**
  * Perform text recognition on a single image
  * Returns array of line dictionaries with text, bbox, and confidence
  */
@@ -115,11 +258,25 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
     NSMutableArray<NSDictionary *> *results = [NSMutableArray array];
 
     for (VNRecognizedTextObservation *observation in request.results) {
-      VNRecognizedText *topCandidate = [[observation topCandidates:1] firstObject];
-      if (!topCandidate) continue;
+      NSArray<VNRecognizedText *> *candidates = [observation topCandidates:kTopCandidatesPerObservation];
+      if (candidates.count == 0) continue;
 
-      NSString *text = topCandidate.string;
-      CGFloat confidence = topCandidate.confidence;
+      NSDictionary *bestCandidate = nil;
+      for (VNRecognizedText *candidate in candidates) {
+        NSDictionary *scored = [self scoreCandidateText:candidate.string confidence:candidate.confidence];
+        if (!bestCandidate || [scored[@"score"] floatValue] > [bestCandidate[@"score"] floatValue]) {
+          bestCandidate = scored;
+        }
+      }
+
+      if (!bestCandidate) continue;
+
+      NSString *text = bestCandidate[@"text"];
+      CGFloat confidence = [bestCandidate[@"confidence"] floatValue];
+      CGFloat alnumRatio = [bestCandidate[@"alnumRatio"] floatValue];
+      if (confidence < kLineRejectMinConfidence && alnumRatio < kLineRejectMinAlnumRatio) {
+        continue;
+      }
 
       // Convert normalized bbox to pixel coordinates
       // Vision uses bottom-left origin, we convert to top-left
@@ -137,7 +294,8 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
           @"width": @(w),
           @"height": @(h)
         },
-        @"confidence": @(confidence)
+        @"confidence": @(confidence),
+        @"candidateCount": @(candidates.count)
       }];
     }
 
@@ -183,6 +341,26 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
       });
     }
   });
+}
+
+/**
+ * Perform text recognition directly on a CGImage (used to avoid JPEG round-trip).
+ */
++ (void)recognizeTextInCGImage:(CGImageRef)cgImage
+              recognitionLevel:(NSString *)level
+                     languages:(NSArray<NSString *> *)languages
+                    completion:(void (^)(NSArray<NSDictionary *> *lines, NSError *error))completion
+    API_AVAILABLE(ios(13.0))
+{
+  if (!cgImage) {
+    completion(nil, [NSError errorWithDomain:@"TextRecognizer"
+                                        code:1
+                                    userInfo:@{NSLocalizedDescriptionKey: @"CGImage is nil"}]);
+    return;
+  }
+
+  UIImage *image = [UIImage imageWithCGImage:cgImage];
+  [self recognizeTextInImage:image recognitionLevel:level languages:languages completion:completion];
 }
 
 #pragma mark - Scoring and Selection
@@ -441,7 +619,7 @@ RCT_EXPORT_METHOD(recognizeText:(NSDictionary *)options
 {
   if (@available(iOS 13.0, *)) {
     NSString *imagePath = options[@"imagePath"];
-    NSArray<NSNumber *> *rotationsToTry = options[@"rotationsToTry"] ?: @[@0, @90, @180, @270];
+    NSArray<NSNumber *> *rotationsToTry = options[@"rotationsToTry"] ?: @[@0, @90];
     NSString *recognitionLevel = options[@"recognitionLevel"] ?: @"accurate";
     NSArray<NSString *> *languages = options[@"languages"];
 
@@ -586,6 +764,15 @@ RCT_EXPORT_METHOD(recognizeText:(NSDictionary *)options
         // This captures text that's perpendicular to the main orientation
         NSInteger complementaryRotation = (bestRotation + 90) % 360;
         NSArray *complementaryLines = allRotationLines[@(complementaryRotation)];
+        if (!complementaryLines) {
+          for (NSNumber *rotation in rotationsToTry) {
+            NSInteger candidateRotation = [rotation integerValue];
+            if (candidateRotation == bestRotation) continue;
+            complementaryRotation = candidateRotation;
+            complementaryLines = allRotationLines[@(candidateRotation)];
+            if (complementaryLines) break;
+          }
+        }
         if (complementaryLines) {
           RCTLogInfo(@"[TextRecognizer] Merging lines from complementary rotation %ld°", (long)complementaryRotation);
           for (NSDictionary *line in complementaryLines) {

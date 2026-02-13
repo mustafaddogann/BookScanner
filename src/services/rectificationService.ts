@@ -16,7 +16,7 @@ import { writeCrop } from './debugArtifacts';
 
 // Target height for rectified crops
 const TARGET_HEIGHT = 768;
-const PADDING_MARGIN = 0.05; // 5% padding
+const PADDING_MARGIN = 0.15; // 15% padding for wider crops that capture full spine text
 
 // Get native ImagePreprocessor module
 const ImagePreprocessor = NativeModules.ImagePreprocessor;
@@ -118,17 +118,27 @@ function calculateDestSize(
 /**
  * Add padding margin to corners (expand outward from center)
  */
-function addPaddingToCorners(corners: OBBCorners, margin: number): OBBCorners {
+function addPaddingToCorners(
+  corners: OBBCorners,
+  margin: number,
+  imageDimensions?: { width: number; height: number }
+): OBBCorners {
   // Calculate center
   const cx = (corners.topLeft.x + corners.topRight.x + corners.bottomRight.x + corners.bottomLeft.x) / 4;
   const cy = (corners.topLeft.y + corners.topRight.y + corners.bottomRight.y + corners.bottomLeft.y) / 4;
 
   // Scale corners outward from center
   const scale = 1 + margin;
+  const clampX = imageDimensions
+    ? (value: number) => Math.max(0, Math.min(value, imageDimensions.width))
+    : (value: number) => value;
+  const clampY = imageDimensions
+    ? (value: number) => Math.max(0, Math.min(value, imageDimensions.height))
+    : (value: number) => value;
 
   const scalePoint = (p: { x: number; y: number }) => ({
-    x: cx + (p.x - cx) * scale,
-    y: cy + (p.y - cy) * scale,
+    x: clampX(cx + (p.x - cx) * scale),
+    y: clampY(cy + (p.y - cy) * scale),
   });
 
   return {
@@ -218,13 +228,15 @@ async function rectifyWithNativeModule(
  * @param obb - OBB detection in original pixel coordinates
  * @param detectionIndex - Index of this detection (for naming)
  * @param sessionId - Session ID for artifact storage
+ * @param imageDimensions - Source image dimensions for corner clamping
  * @returns RectifyResult with crop path and metadata, or skipped status
  */
 export async function rectify(
   imageUri: string,
   obb: OBBDetection,
   detectionIndex: number,
-  sessionId: string
+  sessionId: string,
+  imageDimensions?: { width: number; height: number }
 ): Promise<RectifyResult> {
   // Compute corners from OBB
   const corners = computeCorners(obb);
@@ -249,8 +261,8 @@ export async function rectify(
     };
   }
 
-  // Add padding margin to corners
-  const paddedCorners = addPaddingToCorners(corners, PADDING_MARGIN);
+  // Add padding margin to corners, clamped to image bounds
+  const paddedCorners = addPaddingToCorners(corners, PADDING_MARGIN, imageDimensions);
 
   // Calculate destination size
   const destSize = calculateDestSize(paddedCorners, TARGET_HEIGHT);
@@ -325,7 +337,8 @@ export interface RectificationSummary {
 export async function rectifyAll(
   imageUri: string,
   detections: OBBDetection[],
-  sessionId: string
+  sessionId: string,
+  imageDimensions?: { width: number; height: number }
 ): Promise<RectificationSummary> {
   const results: RectifyResult[] = [];
   let succeeded = 0;
@@ -341,7 +354,7 @@ export async function rectifyAll(
 
   for (let i = 0; i < detections.length; i++) {
     try {
-      const result = await rectify(imageUri, detections[i], i, sessionId);
+      const result = await rectify(imageUri, detections[i], i, sessionId, imageDimensions);
       results.push(result);
 
       if (result.rectificationMethod === 'skipped') {

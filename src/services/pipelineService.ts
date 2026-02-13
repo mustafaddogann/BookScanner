@@ -28,6 +28,8 @@ import type {
   PipelineMode,
   SavedTensor,
   NativeLetterboxTruth,
+  OCRResult,
+  OCRSummary,
 } from '../types';
 import type { ImageSource } from './imageSource';
 import {
@@ -82,8 +84,14 @@ import {
   SPINE_PRESET,
   LIVE_PREVIEW_PRESET,
 } from './inferenceService';
-import { rectifyAll } from './rectificationService';
-import { recognizeAllCrops, isTextRecognitionAvailable } from './textRecognitionService';
+import { rectifyAll, computeCorners } from './rectificationService';
+import {
+  recognizeAllCrops,
+  isTextRecognitionAvailable,
+  isCombinedPathAvailable,
+  rectifyAndRecognizeCrop,
+  recognizeCropText,
+} from './textRecognitionService';
 import { groupDetectionsIntoCandidates } from './bookCandidateGrouper';
 import { mergeEvidenceForAllCandidates } from './spineEvidenceMerger';
 import { generateHypotheses } from './hypothesisGenerationService';
@@ -823,7 +831,10 @@ export async function runPipeline(
       try {
         // Use normalized image path for rectification to match detection coordinates
         const rectifyImagePath = normalizedImagePath || imageUri;
-        const rectifyResult = await rectifyAll(rectifyImagePath, detections, sessionId);
+        const rectifyResult = await rectifyAll(rectifyImagePath, detections, sessionId, {
+          width: frameGeo ? frameGeo.pixelW : imageMeta.width,
+          height: frameGeo ? frameGeo.pixelH : imageMeta.height,
+        });
         rectification = rectifyResult.results;
         rectificationSummary = {
           total: rectifyResult.total,
@@ -925,30 +936,129 @@ export async function runPipeline(
         const ocrAvailability = await isTextRecognitionAvailable();
 
         if (ocrAvailability.available) {
-          console.log(`[Pipeline] Running OCR on ${successfulCrops.length} crops...`);
-
-          const ocrInput = successfulCrops.map(r => ({
-            cropUri: r.cropUri,
-            detectionIndex: r.detectionIndex,
-            rectificationMethod: r.rectificationMethod,
-          }));
-
-          const { summary: ocrSummary, results: ocrResults } = await recognizeAllCrops(
-            sessionId,
-            ocrInput,
-            (completed, total) => {
-              store.setProcessing(true, `ocr (${completed + 1}/${total})`);
-            }
+          const useCombinedPath = isCombinedPathAvailable();
+          console.log(
+            `[Pipeline] Running OCR on ${successfulCrops.length} crops...${
+              useCombinedPath ? ' (combined path)' : ''
+            }`
           );
 
-          // Update sessionMeta with OCR results (MERGE semantics)
-          // NOTE: setSessionMeta now merges, so we don't need to spread currentMeta
-          store.setSessionMeta({
-            ocrResultsByCropIndex: ocrResults,
-            ocrSummary,
-          });
+          if (useCombinedPath) {
+            const rectifyImagePath = normalizedImagePath || imageUri;
+            const ocrResults: Record<number, OCRResult> = {};
+            let ocrSucceeded = 0;
+            let ocrSkipped = 0;
 
-          console.log(`[Pipeline] OCR complete: ${ocrSummary.succeeded}/${ocrSummary.total} succeeded`);
+            const imageBounds = {
+              width: frameGeo ? frameGeo.pixelW : imageMeta.width,
+              height: frameGeo ? frameGeo.pixelH : imageMeta.height,
+            };
+
+            for (let ci = 0; ci < successfulCrops.length; ci++) {
+              const crop = successfulCrops[ci];
+              store.setProcessing(true, `ocr (${ci + 1}/${successfulCrops.length})`);
+
+              try {
+                const det = detections[crop.detectionIndex];
+                const corners = computeCorners(det);
+                const cx =
+                  (corners.topLeft.x +
+                    corners.topRight.x +
+                    corners.bottomRight.x +
+                    corners.bottomLeft.x) /
+                  4;
+                const cy =
+                  (corners.topLeft.y +
+                    corners.topRight.y +
+                    corners.bottomRight.y +
+                    corners.bottomLeft.y) /
+                  4;
+                const scale = 1.15; // 1 + PADDING_MARGIN (0.15)
+                const clampX = (v: number) => Math.max(0, Math.min(v, imageBounds.width));
+                const clampY = (v: number) => Math.max(0, Math.min(v, imageBounds.height));
+                const scalePoint = (p: { x: number; y: number }) => ({
+                  x: clampX(cx + (p.x - cx) * scale),
+                  y: clampY(cy + (p.y - cy) * scale),
+                });
+                const paddedCorners = {
+                  topLeft: scalePoint(corners.topLeft),
+                  topRight: scalePoint(corners.topRight),
+                  bottomRight: scalePoint(corners.bottomRight),
+                  bottomLeft: scalePoint(corners.bottomLeft),
+                };
+
+                const outputPath = crop.cropUri.replace('file://', '');
+                const { ocrResult } = await rectifyAndRecognizeCrop(
+                  rectifyImagePath,
+                  paddedCorners,
+                  outputPath,
+                  768,
+                  sessionId,
+                  crop.detectionIndex,
+                  { rotationsToTry: [0, 90] }
+                );
+                ocrResults[crop.detectionIndex] = ocrResult;
+                if (ocrResult.ok) ocrSucceeded++;
+                else ocrSkipped++;
+              } catch (cropError: any) {
+                console.warn(
+                  `[Pipeline] Combined OCR failed for crop ${crop.detectionIndex}, fallback to crop OCR: ${cropError.message}`
+                );
+                try {
+                  const fallbackResult = await recognizeCropText(
+                    crop.cropUri,
+                    sessionId,
+                    crop.detectionIndex,
+                    { rotationsToTry: [0, 90] }
+                  );
+                  ocrResults[crop.detectionIndex] = fallbackResult;
+                  if (fallbackResult.ok) ocrSucceeded++;
+                  else ocrSkipped++;
+                } catch {
+                  ocrSkipped++;
+                }
+              }
+            }
+
+            const ocrSummary: OCRSummary = {
+              total: successfulCrops.length,
+              succeeded: ocrSucceeded,
+              skipped: ocrSkipped,
+              withTitles: Object.values(ocrResults).filter(r => r.ok && r.titleCandidate).length,
+              withAuthors: Object.values(ocrResults).filter(r => r.ok && r.authorCandidate).length,
+              completedAt: new Date().toISOString(),
+            };
+
+            store.setSessionMeta({
+              ocrResultsByCropIndex: ocrResults,
+              ocrSummary,
+            });
+
+            console.log(`[Pipeline] OCR complete (combined): ${ocrSummary.succeeded}/${ocrSummary.total} succeeded`);
+          } else {
+            const ocrInput = successfulCrops.map(r => ({
+              cropUri: r.cropUri,
+              detectionIndex: r.detectionIndex,
+              rectificationMethod: r.rectificationMethod,
+            }));
+
+            const { summary: ocrSummary, results: ocrResults } = await recognizeAllCrops(
+              sessionId,
+              ocrInput,
+              (completed, total) => {
+                store.setProcessing(true, `ocr (${completed + 1}/${total})`);
+              }
+            );
+
+            // Update sessionMeta with OCR results (MERGE semantics)
+            // NOTE: setSessionMeta now merges, so we don't need to spread currentMeta
+            store.setSessionMeta({
+              ocrResultsByCropIndex: ocrResults,
+              ocrSummary,
+            });
+
+            console.log(`[Pipeline] OCR complete: ${ocrSummary.succeeded}/${ocrSummary.total} succeeded`);
+          }
         } else {
           console.log(`[Pipeline] OCR skipped: ${ocrAvailability.reason || ocrAvailability.method}`);
         }

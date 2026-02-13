@@ -592,7 +592,7 @@ export interface MetadataMatch {
 export interface TextRecognitionOptions {
   /** Path to the image file */
   imagePath: string;
-  /** Rotations to try in degrees (default: [0, 90, 180, 270]) */
+  /** Rotations to try in degrees (default: [0, 90]) */
   rotationsToTry?: number[];
   /** Recognition accuracy level */
   recognitionLevel?: 'fast' | 'accurate';
