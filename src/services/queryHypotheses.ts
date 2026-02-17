@@ -15,6 +15,11 @@ import {
   buildEvidenceTokens,
   stripLeadingArticle,
   normalizeForScoring,
+  hasInformativeSearchSignal,
+  hasUsableAuthorNameSignal,
+  buildSearchSignalKey,
+  buildFocusedSearchTitle,
+  shouldPreferFocusedTitleVariant,
   looksLikeTitle,
   looksLikePersonName,
   type EvidenceTokens,
@@ -91,6 +96,232 @@ export interface HypothesisDebugContext {
 /** Re-export for backwards compatibility */
 export const MAX_HYPOTHESES = PASS1_MAX_HYPOTHESES;
 
+function isEchoQuery(query: string): boolean {
+  const tokens = normalizeForScoring(query);
+  if (tokens.length < 2) {
+    return false;
+  }
+
+  if (new Set(tokens).size === 1) {
+    return true;
+  }
+
+  if (tokens.length % 2 !== 0) {
+    return false;
+  }
+
+  const half = tokens.length / 2;
+  for (let i = 0; i < half; i++) {
+    if (tokens[i] !== tokens[i + half]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function hasRepeatedTrailingSignal(query: string): boolean {
+  const tokens = normalizeForScoring(query);
+  if (tokens.length < 4) {
+    return false;
+  }
+
+  const maxPhraseSize = Math.floor(tokens.length / 2);
+  for (let size = 1; size <= maxPhraseSize; size++) {
+    const trailing = tokens.slice(tokens.length - size);
+    const preceding = tokens.slice(tokens.length - size * 2, tokens.length - size);
+    if (
+      trailing.length === size &&
+      preceding.length === size &&
+      trailing.every((token, index) => token === preceding[index])
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Detect "A x A" query shapes created by noisy title/author blending.
+ *
+ * Example rejected shape:
+ * - "WARANLOS NEW WARANLOS"
+ *
+ * We only block when the middle bridge token is short (<=4) so real
+ * repeated-title queries like "TIME AFTER TIME" are preserved.
+ */
+function hasWrappedSingleTokenEcho(query: string): boolean {
+  const tokens = normalizeForScoring(query);
+  if (tokens.length !== 3) {
+    return false;
+  }
+
+  if (tokens[0] !== tokens[2]) {
+    return false;
+  }
+
+  return tokens[1].length <= 4;
+}
+
+/**
+ * Prefer focused single-token titles for sparse two-token OCR shards.
+ *
+ * Example:
+ * - "UINT INUIVOLO" -> "INUIVOLO"
+ * - "NEW WARANLOS" -> "WARANLOS"
+ */
+function shouldPreferSparseFocusedTitleVariant(rawTitle: string, focusedTitle: string): boolean {
+  const rawTokens = normalizeForScoring(rawTitle);
+  const focusedTokens = normalizeForScoring(focusedTitle);
+
+  if (rawTokens.length !== 2 || focusedTokens.length !== 1) {
+    return false;
+  }
+
+  const focusedToken = focusedTokens[0];
+  const droppedTokens = rawTokens.filter((token) => token !== focusedToken);
+  if (droppedTokens.length !== 1) {
+    return false;
+  }
+
+  return focusedToken.length >= 6 && droppedTokens[0].length <= 4;
+}
+
+/**
+ * Detect short multi-token query shapes that are usually synthetic OCR shards.
+ *
+ * Example rejected shape:
+ * - "TEST OCR BAD" -> 3 tokens, longest token length 4, only one medium token.
+ *
+ * We keep 1-2 token queries (e.g., "DEAN KO", "DIED WOOL") to avoid
+ * over-pruning compact but potentially useful hypotheses.
+ */
+function isLowDiscriminativeShortQueryShape(query: string): boolean {
+  const tokens = normalizeForScoring(query);
+  if (tokens.length < 3) {
+    return false;
+  }
+
+  const longestTokenLength = tokens.reduce((max, token) => Math.max(max, token.length), 0);
+  if (longestTokenLength >= 5) {
+    return false;
+  }
+
+  const mediumTokenCount = tokens.filter((token) => token.length >= 4).length;
+  return mediumTokenCount < 2;
+}
+
+function hasDistinctSignalKeyPair(
+  titleValue: string,
+  authorValue: string
+): boolean {
+  const titleKey = buildSearchSignalKey(titleValue);
+  const authorKey = buildSearchSignalKey(authorValue);
+  return titleKey.length > 0 && authorKey.length > 0 && titleKey !== authorKey;
+}
+
+function selectHighConfidenceRecoveredAuthor(evidence: EvidenceTokens): string | null {
+  const recovered = evidence.recoveredAuthorCandidates.find(
+    (candidate) =>
+      candidate.confidence >= 0.6 &&
+      hasUsableAuthorNameSignal(candidate.line)
+  );
+  return recovered ? recovered.line.trim() : null;
+}
+
+const OCR_TOKEN_SUBSTITUTIONS: ReadonlyArray<readonly [string, string]> = [
+  ['o', 'a'],
+  ['e', 'a'],
+  ['p', 'r'],
+  ['f', 't'],
+  ['i', 'l'],
+];
+
+const COMMON_LANGUAGE_BIGRAMS = [
+  'th', 'he', 'in', 'er', 'an', 're', 'on', 'at', 'en', 'nd',
+  'or', 'ar', 'st', 'to', 'tr', 'ra', 'ck',
+];
+
+const COMMON_LANGUAGE_TRIGRAMS = [
+  'the', 'and', 'ing', 'ion', 'ent', 'tra', 'ack', 'ter', 'rea',
+];
+
+function languageShapeScore(token: string): number {
+  let score = 0;
+
+  for (let i = 0; i < token.length - 1; i++) {
+    const bigram = token.slice(i, i + 2);
+    if (COMMON_LANGUAGE_BIGRAMS.includes(bigram)) {
+      score += 1;
+    }
+  }
+
+  for (let i = 0; i < token.length - 2; i++) {
+    const trigram = token.slice(i, i + 3);
+    if (COMMON_LANGUAGE_TRIGRAMS.includes(trigram)) {
+      score += 2;
+    }
+  }
+
+  return score;
+}
+
+/**
+ * Generate OCR-corrected variants for a noisy single title token.
+ *
+ * This is deliberately constrained:
+ * - only 5-10 char alphabetic tokens
+ * - only interior single-char substitutions
+ * - two-step substitutions allowed to recover common OCR double-errors
+ */
+function generateOcrTokenCorrectionVariants(token: string, limit: number = 2): string[] {
+  const normalized = token.toLowerCase();
+  if (!/^[a-z]+$/.test(normalized) || normalized.length < 5 || normalized.length > 10) {
+    return [];
+  }
+
+  const baseScore = languageShapeScore(normalized);
+  const candidates = new Map<string, number>();
+  const oneStep = new Set<string>();
+
+  const applySubstitutions = (input: string): string[] => {
+    const next: string[] = [];
+    for (const [fromChar, toChar] of OCR_TOKEN_SUBSTITUTIONS) {
+      for (let i = 1; i < input.length - 1; i++) {
+        if (input[i] !== fromChar) {
+          continue;
+        }
+        const variant = `${input.slice(0, i)}${toChar}${input.slice(i + 1)}`;
+        next.push(variant);
+      }
+    }
+    return next;
+  };
+
+  for (const variant of applySubstitutions(normalized)) {
+    oneStep.add(variant);
+  }
+
+  for (const variant of oneStep) {
+    candidates.set(variant, languageShapeScore(variant));
+    for (const secondStepVariant of applySubstitutions(variant)) {
+      candidates.set(secondStepVariant, languageShapeScore(secondStepVariant));
+    }
+  }
+
+  return Array.from(candidates.entries())
+    .filter(([variant, score]) => {
+      if (variant === normalized) return false;
+      if (!/[aeiou]/.test(variant)) return false;
+      if (score <= baseScore) return false;
+      return hasInformativeSearchSignal(variant, { minSingleTokenLength: 5 });
+    })
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, Math.max(1, limit))
+    .map(([variant]) => variant);
+}
+
 // ============================================================================
 // Hypothesis Generation
 // ============================================================================
@@ -111,6 +342,7 @@ export function generateHypotheses(
 ): HypothesisGenerationResult {
   const hypotheses: SearchHypothesis[] = [];
   const usedQueries = new Set<string>();
+  const usedSignalQueries = new Set<string>();
 
   // Build evidence tokens
   const evidence = buildEvidenceTokens(evidenceLines);
@@ -124,13 +356,7 @@ export function generateHypotheses(
     explanation: string
   ) => {
     let trimmed = query.trim();
-    const normalized = trimmed.toLowerCase();
-
-    // Skip if too short
-    if (normalized.length < MIN_QUERY_LENGTH) return;
-
-    // Skip duplicates
-    if (usedQueries.has(normalized)) return;
+    if (trimmed.length < MIN_QUERY_LENGTH) return;
 
     // Trim to max tokens if needed (except ISBN)
     if (type !== 'isbn') {
@@ -138,6 +364,69 @@ export function generateHypotheses(
       if (tokens.length > MAX_QUERY_TOKENS) {
         trimmed = tokens.slice(0, MAX_QUERY_TOKENS).join(' ');
       }
+
+      if (type === 'title_only') {
+        const focusedTitle = buildFocusedSearchTitle(trimmed);
+        if (focusedTitle && focusedTitle !== trimmed) {
+          const shouldPreferFocused =
+            shouldPreferFocusedTitleVariant(trimmed, focusedTitle) ||
+            shouldPreferSparseFocusedTitleVariant(trimmed, focusedTitle);
+          if (shouldPreferFocused) {
+            trimmed = focusedTitle;
+          }
+        }
+      }
+
+      const rawWordCount = trimmed.split(/\s+/).filter(Boolean).length;
+      const signalTokens = normalizeForScoring(trimmed);
+      const dedupedSignalTokens = signalTokens.filter(
+        (token, index) => index === 0 || token !== signalTokens[index - 1]
+      );
+
+      // If a noisy multi-word query collapses to a single informative token
+      // (e.g., "NEW WARANLOS" -> "waranlos"), prefer the focused token.
+      if (rawWordCount > 1 && dedupedSignalTokens.length === 1) {
+        trimmed = dedupedSignalTokens[0];
+      }
+
+      // Skip duplicated echo patterns like "NEW WARANLOS NEW WARANLOS".
+      if (isEchoQuery(trimmed)) return;
+      // Skip low-value repeated suffixes like
+      // "THE GUARDIAN NICHOLAS SPARKS NICHOLAS SPARKS".
+      if (hasRepeatedTrailingSignal(trimmed)) return;
+      // Skip wrapped single-token echoes like
+      // "WARANLOS NEW WARANLOS".
+      if (hasWrappedSingleTokenEcho(trimmed)) return;
+
+      const hasSignal = hasInformativeSearchSignal(trimmed, {
+        minSingleTokenLength: type === 'author_only' ? 4 : 5,
+      });
+      if (!hasSignal) return;
+
+      // Title-only queries need stronger standalone title signal to avoid
+      // emitting short OCR shards (e.g., "THE FHE CIDE").
+      if (type === 'title_only' && !hasStrongStandaloneTitleSignal(trimmed)) {
+        return;
+      }
+    }
+
+    const normalized = trimmed.toLowerCase();
+
+    // Skip if too short after trimming
+    if (normalized.length < MIN_QUERY_LENGTH) return;
+
+    // Skip duplicates
+    if (usedQueries.has(normalized)) return;
+
+    // Skip semantically equivalent queries (e.g., "NEW WARANLOS" vs "WARANLOS").
+    // Keep stripped variants even when they share the same semantic key so
+    // article-stripped alternatives remain available.
+    const shouldApplySemanticDedup = type !== 'isbn' && type !== 'stripped';
+    if (shouldApplySemanticDedup) {
+      const signalKey = buildSearchSignalKey(trimmed);
+      if (!signalKey) return;
+      if (usedSignalQueries.has(signalKey)) return;
+      usedSignalQueries.add(signalKey);
     }
 
     usedQueries.add(normalized);
@@ -159,17 +448,519 @@ export function generateHypotheses(
     (a, b) => b.length - a.length
   );
 
+  const isInformativeTokens = (tokens: string[]): boolean =>
+    tokens.length >= 2 || (tokens.length === 1 && tokens[0].length >= 5);
+
+  const rankedBySignal = evidence.candidatePhrases
+    .map((line) => {
+      const tokens = normalizeForScoring(line);
+      const substantiveTokens = tokens.filter((token) => token.length >= 3);
+      const longTokenCount = substantiveTokens.filter((token) => token.length >= 5).length;
+      const shortSubstantiveCount = substantiveTokens.filter((token) => token.length <= 4).length;
+      const longestTokenLength = substantiveTokens.reduce(
+        (max, token) => Math.max(max, token.length),
+        0
+      );
+      const shortTokenPenalty = Math.max(0, tokens.length - substantiveTokens.length) * 2;
+      // Prefer lines with fewer but more distinctive long tokens over clusters
+      // of short OCR shards (e.g., "GUARDIAN" over "THE FHE CIDE").
+      const score =
+        substantiveTokens.length * 8 +
+        longTokenCount * 7 +
+        longestTokenLength * 2 -
+        shortSubstantiveCount * 5 -
+        shortTokenPenalty * 3;
+      return {
+        line,
+        tokens,
+        key: tokens.join(' '),
+        score,
+      };
+    })
+    .sort((a, b) => b.score - a.score || b.line.length - a.line.length);
+
+  const isInformativeHint = (value: string | null | undefined): value is string => {
+    return hasInformativeSearchSignal(value, {
+      minSingleTokenLength: 5,
+      requireLongTokenForMultiToken: true,
+      minLongTokenLength: 5,
+    });
+  };
+
+  const selectFocusedTitleToken = (
+    titleHintValue: string | null,
+    authorHintValue?: string | null
+  ): string | null => {
+    if (!titleHintValue) return null;
+
+    const titleTokens = normalizeForScoring(titleHintValue);
+    const authorTokenSet = new Set(
+      authorHintValue ? normalizeForScoring(authorHintValue) : []
+    );
+    const distinctTitleTokens = titleTokens.filter((t) => !authorTokenSet.has(t));
+    if (distinctTitleTokens.length === 0) return null;
+
+    const prioritized = [...distinctTitleTokens].sort((a, b) => b.length - a.length);
+    return prioritized.find((t) => t.length >= 5) ?? prioritized[0] ?? null;
+  };
+
+  const buildFocusedTitleAuthorHint = (
+    titleHintValue: string | null,
+    authorHintValue: string | null
+  ): string | null => {
+    if (!titleHintValue || !authorHintValue) return null;
+
+    const focusedTitle = buildFocusedSearchTitle(titleHintValue);
+    if (!shouldPreferFocusedTitleVariant(titleHintValue, focusedTitle)) {
+      return null;
+    }
+
+    // Prefer longer, more informative title tokens for noisy OCR hints.
+    // Example: "TIMES GUARDIAN CIDE" + "NICHOLAS SPARKS" => "GUARDIAN NICHOLAS SPARKS"
+    const bestToken =
+      selectFocusedTitleToken(focusedTitle, authorHintValue) ??
+      selectFocusedTitleToken(titleHintValue, authorHintValue);
+    if (!bestToken) return null;
+
+    return `${bestToken} ${authorHintValue}`.trim();
+  };
+
+  const stripAuthorFromTitleEdges = (
+    titleValue: string,
+    authorValue: string
+  ): string | null => {
+    const titleWords = titleValue.trim().split(/\s+/).filter(Boolean);
+    const authorWords = authorValue.trim().split(/\s+/).filter(Boolean);
+
+    if (authorWords.length < 2 || titleWords.length <= authorWords.length) {
+      return null;
+    }
+
+    const normalizeWord = (word: string): string =>
+      word.toLowerCase().replace(/[^a-z]/g, '');
+
+    const hasExactMatchAt = (startIndex: number): boolean =>
+      authorWords.every((authorWord, idx) => {
+        const titleWord = titleWords[startIndex + idx];
+        const normalizedAuthor = normalizeWord(authorWord);
+        const normalizedTitle = normalizeWord(titleWord);
+        return normalizedAuthor.length > 0 && normalizedAuthor === normalizedTitle;
+      });
+
+    let strippedWords: string[] | null = null;
+
+    // Handles "TITLE AUTHOR" inline OCR.
+    if (hasExactMatchAt(titleWords.length - authorWords.length)) {
+      strippedWords = titleWords.slice(0, titleWords.length - authorWords.length);
+    }
+
+    // Handles "AUTHOR TITLE" inline OCR (e.g., "NICHOLAS SPARKS GUARDIAN").
+    if (!strippedWords && hasExactMatchAt(0)) {
+      strippedWords = titleWords.slice(authorWords.length);
+    }
+
+    if (!strippedWords) {
+      return null;
+    }
+
+    const stripped = strippedWords.join(' ').trim();
+    return stripped.length >= MIN_QUERY_LENGTH ? stripped : null;
+  };
+
+  const hasSubstantiveAuthorTokens = (value: string): boolean =>
+    hasUsableAuthorNameSignal(value);
+
+  const getDistinctTitleSignalTokens = (
+    titleValue: string,
+    authorValue?: string | null
+  ): string[] => {
+    const titleTokens = normalizeForScoring(titleValue);
+    const authorTokenSet = new Set(
+      authorValue ? normalizeForScoring(authorValue) : []
+    );
+    return titleTokens.filter((token) => !authorTokenSet.has(token));
+  };
+
+  const hasStrongStandaloneTitleSignal = (titleValue: string): boolean => {
+    const tokens = normalizeForScoring(titleValue);
+    if (tokens.length === 0) {
+      return false;
+    }
+
+    if (tokens.length === 1) {
+      const rawWordCount = titleValue.trim().split(/\s+/).filter(Boolean).length;
+      return tokens[0].length >= 5 || (tokens[0].length >= 4 && rawWordCount === 1);
+    }
+
+    if (tokens.some((token) => token.length >= 5)) {
+      return true;
+    }
+
+    return tokens.every((token) => token.length >= 4);
+  };
+
+  const hasDistinctTitleAuthorSignal = (
+    titleValue: string,
+    authorValue: string
+  ): boolean => {
+    const distinctTitleTokens = getDistinctTitleSignalTokens(titleValue, authorValue);
+    if (distinctTitleTokens.length === 0) {
+      return false;
+    }
+
+    if (distinctTitleTokens.length === 1) {
+      const rawWordCount = titleValue.trim().split(/\s+/).filter(Boolean).length;
+      return (
+        distinctTitleTokens[0].length >= 5 ||
+        (distinctTitleTokens[0].length >= 4 && rawWordCount === 1)
+      );
+    }
+
+    if (distinctTitleTokens.some((token) => token.length >= 5)) {
+      return true;
+    }
+
+    return distinctTitleTokens.every((token) => token.length >= 4);
+  };
+
+  const shouldEmitAuthorFirstVariant = (
+    titleValue: string,
+    authorValue: string
+  ): boolean => {
+    const distinctTitleTokens = getDistinctTitleSignalTokens(titleValue, authorValue);
+    return distinctTitleTokens.length === 1 && distinctTitleTokens[0].length >= 5;
+  };
+
+  const rawHintTitle = (() => {
+    if (!isInformativeHint(ocrTitle)) {
+      return null;
+    }
+    const trimmed = ocrTitle.trim();
+    // Suppress hints that collapse to pure badge residue (e.g., "NEW YORK TIMES").
+    return buildFocusedSearchTitle(trimmed) ? trimmed : null;
+  })();
+  const hintAuthor =
+    ocrAuthor &&
+    looksLikePersonName(ocrAuthor) &&
+    hasSubstantiveAuthorTokens(ocrAuthor)
+      ? ocrAuthor.trim()
+      : null;
+  const hintTitle = (() => {
+    if (!rawHintTitle) {
+      return null;
+    }
+
+    // OCR title hints can include a trailing author fragment
+    // (e.g., "THE GUARDIAN NICHOLAS SPARKS"). Strip author edges when we
+    // already have a clean author hint so title+author queries stay distinct.
+    if (!hintAuthor) {
+      return rawHintTitle;
+    }
+
+    const stripped = stripAuthorFromTitleEdges(rawHintTitle, hintAuthor);
+    if (stripped && isInformativeHint(stripped)) {
+      return stripped;
+    }
+
+    return rawHintTitle;
+  })();
+  const recoveredHintAuthor =
+    !hintAuthor
+      ? (evidence.personNameLines.find(
+          (line) => hasSubstantiveAuthorTokens(line)
+        ) ?? selectHighConfidenceRecoveredAuthor(evidence))
+      : null;
+
+  // Hint-first hypotheses:
+  // perField/title-author hints are often cleaner than raw line-role inference.
+  if (hintTitle && hintAuthor && hasDistinctTitleAuthorSignal(hintTitle, hintAuthor)) {
+    const rawHintTitleAuthor = `${hintTitle} ${hintAuthor}`;
+    const focusedTitleAuthor = buildFocusedTitleAuthorHint(hintTitle, hintAuthor);
+    const rawHintSignalKey = buildSearchSignalKey(rawHintTitleAuthor);
+    const focusedHintSignalKey = focusedTitleAuthor
+      ? buildSearchSignalKey(focusedTitleAuthor)
+      : '';
+    const shouldPreferFocusedHintTitleAuthor =
+      !!focusedTitleAuthor &&
+      focusedHintSignalKey.length > 0 &&
+      rawHintSignalKey.length > 0 &&
+      focusedHintSignalKey !== rawHintSignalKey;
+
+    // When a focused title+author variant exists, prefer it over the noisier
+    // raw hint pair (e.g., "TIMES GUARDIAN CIDE NICHOLAS SPARKS").
+    if (shouldPreferFocusedHintTitleAuthor && focusedTitleAuthor) {
+      addHypothesis(
+        focusedTitleAuthor,
+        'title_author',
+        8,
+        `Focused title token + author: "${focusedTitleAuthor}"`
+      );
+    } else {
+      addHypothesis(
+        rawHintTitleAuthor,
+        'title_author',
+        8,
+        `Hint title+author: "${hintTitle}" + "${hintAuthor}"`
+      );
+    }
+
+    if (shouldEmitAuthorFirstVariant(hintTitle, hintAuthor)) {
+      addHypothesis(
+        `${hintAuthor} ${hintTitle}`,
+        'author_title',
+        9,
+        `Hint author+title (single-token title): "${hintAuthor}" + "${hintTitle}"`
+      );
+    }
+
+    if (focusedTitleAuthor && !shouldPreferFocusedHintTitleAuthor) {
+      addHypothesis(
+        focusedTitleAuthor,
+        'title_author',
+        9,
+        `Focused title token + author: "${focusedTitleAuthor}"`
+      );
+    }
+  }
+  if (hintTitle && recoveredHintAuthor) {
+    const recoveredHintTitle = (() => {
+      const stripped = stripAuthorFromTitleEdges(hintTitle, recoveredHintAuthor);
+      if (stripped && isInformativeHint(stripped)) {
+        return stripped;
+      }
+      return hintTitle;
+    })();
+    if (hasDistinctTitleAuthorSignal(recoveredHintTitle, recoveredHintAuthor)) {
+      const recoveredTitleAuthorQuery = `${recoveredHintTitle} ${recoveredHintAuthor}`;
+      const focusedTitleAuthor = buildFocusedTitleAuthorHint(recoveredHintTitle, recoveredHintAuthor);
+      addHypothesis(
+        recoveredTitleAuthorQuery,
+        'title_author',
+        8,
+        `Recovered title+author: "${recoveredHintTitle}" + "${recoveredHintAuthor}"`
+      );
+      if (shouldEmitAuthorFirstVariant(recoveredHintTitle, recoveredHintAuthor)) {
+        addHypothesis(
+          `${recoveredHintAuthor} ${recoveredHintTitle}`,
+          'author_title',
+          9,
+          `Recovered author+title (single-token title): "${recoveredHintAuthor}" + "${recoveredHintTitle}"`
+        );
+      }
+      if (focusedTitleAuthor) {
+        addHypothesis(
+          focusedTitleAuthor,
+          'title_author',
+          9,
+          `Focused title token + recovered author: "${focusedTitleAuthor}"`
+        );
+      }
+    }
+  }
+  if (hintTitle) {
+    const focusedHintTitle = buildFocusedSearchTitle(hintTitle);
+    const shouldEmitFocusedHintTitle =
+      !!focusedHintTitle &&
+      focusedHintTitle !== hintTitle &&
+      isInformativeHint(focusedHintTitle);
+    const shouldPreferFocusedHintTitle =
+      shouldEmitFocusedHintTitle &&
+      shouldPreferFocusedTitleVariant(hintTitle, focusedHintTitle);
+
+    if (
+      shouldEmitFocusedHintTitle &&
+      focusedHintTitle
+    ) {
+      addHypothesis(
+        focusedHintTitle,
+        'title_only',
+        17,
+        `Focused hint title: "${focusedHintTitle}" (from "${hintTitle}")`
+      );
+    }
+
+    // When focused title is strongly preferred, skip raw noisy hint variant.
+    if (!shouldPreferFocusedHintTitle) {
+      addHypothesis(
+        hintTitle,
+        'title_only',
+        18,
+        `Hint title: "${hintTitle}"`
+      );
+    }
+  }
+  if (hintAuthor) {
+    addHypothesis(
+      hintAuthor,
+      'author_only',
+      24,
+      `Hint author: "${hintAuthor}"`
+    );
+  }
+
   let bestTitle: string | null = null;
   let bestAuthor: string | null = null;
 
-  if (evidence.titleLikeLines.length > 0) {
-    bestTitle = evidence.titleLikeLines[0];
-  } else if (sortedByLength.length > 0) {
-    bestTitle = sortedByLength[0];
+  const firstStrongTitleLike = evidence.titleLikeLines.find((line) => {
+    const tokens = normalizeForScoring(line);
+    return tokens.length >= 2 || (tokens.length === 1 && tokens[0].length >= 5);
+  });
+
+  const bestSignalNonNameTitle = rankedBySignal.find(
+    (entry) => isInformativeTokens(entry.tokens) && !looksLikePersonName(entry.line)
+  );
+  const bestSignalTitle = rankedBySignal.find((entry) => isInformativeTokens(entry.tokens));
+
+  if (bestSignalNonNameTitle) {
+    bestTitle = bestSignalNonNameTitle.line;
+  } else if (firstStrongTitleLike) {
+    bestTitle = firstStrongTitleLike;
+  } else {
+    if (bestSignalTitle) {
+      bestTitle = bestSignalTitle.line;
+    } else if (sortedByLength.length > 0) {
+      bestTitle = sortedByLength[0];
+    }
   }
 
   if (evidence.personNameLines.length > 0) {
-    bestAuthor = evidence.personNameLines[0];
+    bestAuthor =
+      evidence.personNameLines.find((line) => hasSubstantiveAuthorTokens(line)) ??
+      null;
+  } else {
+    bestAuthor = selectHighConfidenceRecoveredAuthor(evidence);
+  }
+
+  const advanced = evidence.advancedExtraction;
+  const advancedTitle = advanced?.title?.trim() ?? null;
+  const advancedAuthor = advanced?.author?.trim() ?? null;
+  const advancedTitleWithoutAuthor =
+    advancedTitle && advancedAuthor
+      ? (stripAuthorFromTitleEdges(advancedTitle, advancedAuthor) ?? advancedTitle)
+      : advancedTitle;
+  const hasConfidentAdvancedSplit =
+    advanced !== undefined &&
+    advancedTitle !== null &&
+    advancedTitleWithoutAuthor !== null &&
+    advancedAuthor !== null &&
+    advanced.titleConfidence >= 0.65 &&
+    advanced.authorConfidence >= 0.65 &&
+    advancedTitleWithoutAuthor.length > 0 &&
+    hasStrongStandaloneTitleSignal(advancedTitleWithoutAuthor) &&
+    hasDistinctTitleAuthorSignal(advancedTitleWithoutAuthor, advancedAuthor) &&
+    hasSubstantiveAuthorTokens(advancedAuthor) &&
+    looksLikePersonName(advancedAuthor);
+
+  const shouldUseAdvancedSplit =
+    hasConfidentAdvancedSplit &&
+    (() => {
+      if (!bestTitle || !advancedTitleWithoutAuthor) {
+        return true;
+      }
+
+      const currentTokens = normalizeForScoring(bestTitle);
+      const advancedTokens = normalizeForScoring(advancedTitleWithoutAuthor);
+      if (currentTokens.length === 0 || advancedTokens.length === 0) {
+        return true;
+      }
+
+      // If advanced extraction only adds short OCR shards onto an existing
+      // strong title signal, keep the cleaner line-derived title.
+      const currentSet = new Set(currentTokens);
+      const allCurrentTokensPresent = currentTokens.every((token) =>
+        advancedTokens.includes(token)
+      );
+      if (!allCurrentTokensPresent) {
+        return true;
+      }
+
+      const extraAdvancedTokens = advancedTokens.filter((token) => !currentSet.has(token));
+      if (extraAdvancedTokens.length === 0) {
+        return true;
+      }
+
+      return extraAdvancedTokens.some((token) => token.length >= 5);
+    })();
+
+  if (shouldUseAdvancedSplit) {
+    bestTitle = advancedTitle;
+    bestAuthor = advancedAuthor;
+  }
+
+  // Fallback: when OCR collapsed "TITLE AUTHOR" into one line, recover
+  // author from suffix only if stripping leaves an informative title.
+  if (bestTitle && !bestAuthor) {
+    for (const recovered of evidence.recoveredAuthorCandidates) {
+      const recoveredAuthor = recovered.line.trim();
+      if (!looksLikePersonName(recoveredAuthor)) continue;
+      if (!hasSubstantiveAuthorTokens(recoveredAuthor)) continue;
+
+      const strippedTitle = stripAuthorFromTitleEdges(bestTitle, recoveredAuthor);
+      if (!strippedTitle) continue;
+      if (!isInformativeHint(strippedTitle)) continue;
+
+      bestTitle = strippedTitle;
+      bestAuthor = recoveredAuthor;
+      break;
+    }
+  }
+
+  // If title still contains the chosen author tokens at the start/end, strip them
+  // for cleaner queries.
+  if (bestTitle && bestAuthor) {
+    const strippedTitle = stripAuthorFromTitleEdges(bestTitle, bestAuthor);
+    if (strippedTitle && isInformativeHint(strippedTitle)) {
+      bestTitle = strippedTitle;
+    }
+  }
+
+  // Avoid degenerate title=author hypotheses when both collapse to the same tokens.
+  if (bestTitle && bestAuthor) {
+    const titleKey = normalizeForScoring(bestTitle).join(' ');
+    const authorKey = normalizeForScoring(bestAuthor).join(' ');
+    if (titleKey.length > 0 && titleKey === authorKey) {
+      const alternativeTitle = rankedBySignal.find(
+        (entry) =>
+          isInformativeTokens(entry.tokens) &&
+          entry.key.length > 0 &&
+          entry.key !== authorKey
+      );
+      if (alternativeTitle) {
+        bestTitle = alternativeTitle.line;
+      } else {
+        // If title/author collapse to the exact same low-signal text, avoid
+        // emitting duplicated title+author queries.
+        bestAuthor = null;
+      }
+    }
+  }
+
+  // If title signal is weak compared with recovered author signal, prefer a
+  // distinct informative title candidate to avoid low-value queries.
+  if (bestTitle && bestAuthor) {
+    const weakTitleSignal = !hasDistinctTitleAuthorSignal(bestTitle, bestAuthor);
+
+    if (weakTitleSignal) {
+      // When line-derived title is weak, prefer the strongest distinct token
+      // from a validated title hint before falling back to other OCR lines.
+      const hintFocusedToken = selectFocusedTitleToken(hintTitle, bestAuthor);
+      if (hintFocusedToken) {
+        bestTitle = hintFocusedToken;
+      } else {
+        const authorKey = normalizeForScoring(bestAuthor).join(' ');
+        const replacement = rankedBySignal.find(
+          (entry) =>
+            isInformativeTokens(entry.tokens) &&
+            entry.tokens.some((token) => token.length >= 5) &&
+            entry.key.length > 0 &&
+            entry.key !== authorKey &&
+            !looksLikePersonName(entry.line)
+        );
+        if (replacement) {
+          bestTitle = replacement.line;
+        }
+      }
+    }
   }
 
   // 1) ISBN
@@ -179,13 +970,81 @@ export function generateHypotheses(
   }
 
   // 2) Title + Author
-  if (bestTitle && bestAuthor) {
+  if (bestTitle && bestAuthor && hasDistinctTitleAuthorSignal(bestTitle, bestAuthor)) {
     addHypothesis(
       `${bestTitle} ${bestAuthor}`,
       'title_author',
       10,
       `Title "${bestTitle}" + author "${bestAuthor}"`
     );
+
+    if (shouldEmitAuthorFirstVariant(bestTitle, bestAuthor)) {
+      addHypothesis(
+        `${bestAuthor} ${bestTitle}`,
+        'author_title',
+        11,
+        `Author "${bestAuthor}" + title "${bestTitle}" (single-token title variant)`
+      );
+    }
+
+    const normalizedTitleTokens = normalizeForScoring(bestTitle);
+    const hasNoisyShortToken = normalizedTitleTokens.some((token) => token.length <= 3);
+    let addedFocusedNoisyTitle = false;
+
+    // For OCR-noisy titles (e.g., "TROCK OF THE CON"), prefer a focused
+    // long-token + author query over secondary noisy line combinations.
+    if (normalizedTitleTokens.length >= 2 && hasNoisyShortToken) {
+      const focusedBestToken = selectFocusedTitleToken(bestTitle, bestAuthor);
+      if (focusedBestToken && focusedBestToken.length >= 5) {
+        addHypothesis(
+          `${focusedBestToken} ${bestAuthor}`,
+          'title_author',
+          12,
+          `Focused noisy title token "${focusedBestToken}" + author "${bestAuthor}"`
+        );
+        addedFocusedNoisyTitle = true;
+      }
+    }
+
+    const bestTitleKey = normalizeForScoring(bestTitle).join(' ');
+    const authorKey = normalizeForScoring(bestAuthor).join(' ');
+    const isSecondaryTitleRedundant = (line: string): boolean => {
+      const stripped = stripAuthorFromTitleEdges(line, bestAuthor);
+      if (!stripped) {
+        return false;
+      }
+
+      const strippedKey = normalizeForScoring(stripped).join(' ');
+      return strippedKey.length > 0 && strippedKey === bestTitleKey;
+    };
+    const secondaryTitle = rankedBySignal.find(
+      (entry) =>
+        isInformativeTokens(entry.tokens) &&
+        entry.tokens.some((token) => token.length >= 5) &&
+        entry.key.length > 0 &&
+        entry.key !== bestTitleKey &&
+        entry.key !== authorKey &&
+        !isSecondaryTitleRedundant(entry.line) &&
+        !looksLikePersonName(entry.line)
+    );
+    if (secondaryTitle) {
+      addHypothesis(
+        `${secondaryTitle.line} ${bestAuthor}`,
+        'title_author',
+        addedFocusedNoisyTitle ? 13 : 12,
+        `Secondary title "${secondaryTitle.line}" + author "${bestAuthor}"`
+      );
+    }
+
+    if (normalizedTitleTokens.length >= 2) {
+      const normalizedTitle = normalizedTitleTokens.join(' ');
+      addHypothesis(
+        `${normalizedTitle} ${bestAuthor}`,
+        'title_author',
+        14,
+        `Normalized title "${normalizedTitle}" + author "${bestAuthor}"`
+      );
+    }
   }
 
   // 3) Title-only (longest substantive line)
@@ -196,6 +1055,28 @@ export function generateHypotheses(
       20,
       `Title-only: "${bestTitle}"`
     );
+  }
+
+  // 3b) OCR-corrected single-token title variants (only when author signal is absent).
+  // This helps sparse noisy inputs like "WARANLOS" without relaxing scoring thresholds.
+  if (bestTitle && !bestAuthor) {
+    const normalizedTitleTokens = normalizeForScoring(bestTitle);
+    if (normalizedTitleTokens.length === 1) {
+      const baseToken = normalizedTitleTokens[0];
+      const correctedVariants = generateOcrTokenCorrectionVariants(baseToken, 2);
+      correctedVariants.forEach((correctedToken, index) => {
+        if (correctedToken === baseToken) {
+          return;
+        }
+
+        addHypothesis(
+          correctedToken,
+          'title_only',
+          21 + index * 0.1,
+          `OCR-corrected single-token title: "${baseToken}" -> "${correctedToken}"`
+        );
+      });
+    }
   }
 
   // 4) Author-only (if detected)
@@ -244,38 +1125,74 @@ export function generateHypotheses(
   // If still sparse, try a normalized-token variant of the best title
   if (hypotheses.length < 3 && bestTitle) {
     const normalizedTokens = normalizeForScoring(bestTitle);
-    if (normalizedTokens.length >= 2) {
+    const normalizedTitle = normalizedTokens.join(' ');
+    if (normalizedTokens.length >= 2 && hasStrongStandaloneTitleSignal(normalizedTitle)) {
       addHypothesis(
-        normalizedTokens.join(' '),
+        normalizedTitle,
         'stripped',
         45,
-        `Normalized tokens: "${normalizedTokens.join(' ')}"`
+        `Normalized tokens: "${normalizedTitle}"`
       );
     }
   }
 
   // OCR field fallback (only if we have room and evidence was sparse)
+  const fallbackTitleHint = (() => {
+    if (!isInformativeHint(ocrTitle)) {
+      return null;
+    }
+    const trimmed = ocrTitle.trim();
+    if (!trimmed) {
+      return null;
+    }
+    const focused = buildFocusedSearchTitle(trimmed);
+    if (
+      focused &&
+      isInformativeHint(focused) &&
+      (
+        shouldPreferFocusedTitleVariant(trimmed, focused) ||
+        shouldPreferSparseFocusedTitleVariant(trimmed, focused)
+      ) &&
+      buildSearchSignalKey(focused) !== buildSearchSignalKey(trimmed)
+    ) {
+      return focused;
+    }
+    return trimmed;
+  })();
+  const fallbackAuthorHint =
+    ocrAuthor &&
+    looksLikePersonName(ocrAuthor) &&
+    hasSubstantiveAuthorTokens(ocrAuthor) &&
+    hasInformativeSearchSignal(ocrAuthor, { minSingleTokenLength: 4 })
+      ? ocrAuthor.trim()
+      : null;
+
   if (hypotheses.length < 3) {
-    if (ocrTitle && ocrAuthor) {
+    if (
+      fallbackTitleHint &&
+      fallbackAuthorHint &&
+      hasDistinctTitleAuthorSignal(fallbackTitleHint, fallbackAuthorHint) &&
+      hasDistinctSignalKeyPair(fallbackTitleHint, fallbackAuthorHint)
+    ) {
       addHypothesis(
-        `${ocrTitle} ${ocrAuthor}`,
+        `${fallbackTitleHint} ${fallbackAuthorHint}`,
         'fallback',
         50,
-        `OCR fields fallback: title="${ocrTitle}" author="${ocrAuthor}"`
+        `OCR fields fallback: title="${fallbackTitleHint}" author="${fallbackAuthorHint}"`
       );
-    } else if (ocrTitle) {
+    } else if (fallbackTitleHint) {
       addHypothesis(
-        ocrTitle,
+        fallbackTitleHint,
         'fallback',
         51,
-        `OCR title fallback: "${ocrTitle}"`
+        `OCR title fallback: "${fallbackTitleHint}"`
       );
-    } else if (ocrAuthor) {
+    } else if (fallbackAuthorHint) {
       addHypothesis(
-        ocrAuthor,
+        fallbackAuthorHint,
         'fallback',
         52,
-        `OCR author fallback: "${ocrAuthor}"`
+        `OCR author fallback: "${fallbackAuthorHint}"`
       );
     }
   }
@@ -394,7 +1311,20 @@ export function generateBoostHypotheses(
   debugContext?: HypothesisDebugContext
 ): HypothesisGenerationResult {
   const hypotheses: SearchHypothesis[] = [];
-  const usedQueries = new Set<string>(excludeQueries);
+  const usedQueries = new Set<string>();
+  const usedSignalQueries = new Set<string>();
+
+  for (const query of excludeQueries) {
+    const normalized = query.toLowerCase().trim();
+    if (normalized) {
+      usedQueries.add(normalized);
+    }
+
+    const signalKey = buildSearchSignalKey(query);
+    if (signalKey) {
+      usedSignalQueries.add(signalKey);
+    }
+  }
 
   // Build evidence tokens
   const evidence = buildEvidenceTokens(evidenceLines);
@@ -408,6 +1338,23 @@ export function generateBoostHypotheses(
     explanation: string
   ) => {
     let trimmed = query.trim();
+    if (trimmed.length < MIN_QUERY_LENGTH) return;
+
+    // Trim to max tokens if needed
+    const tokens = trimmed.split(/\s+/).filter(Boolean);
+    if (tokens.length > MAX_QUERY_TOKENS) {
+      trimmed = tokens.slice(0, MAX_QUERY_TOKENS).join(' ');
+    }
+
+    if (isEchoQuery(trimmed)) return;
+    if (hasRepeatedTrailingSignal(trimmed)) return;
+    if (
+      isLowDiscriminativeShortQueryShape(trimmed) &&
+      !hasUsableAuthorNameSignal(trimmed)
+    ) {
+      return;
+    }
+
     const normalized = trimmed.toLowerCase();
 
     // Skip if too short
@@ -416,13 +1363,11 @@ export function generateBoostHypotheses(
     // Skip duplicates
     if (usedQueries.has(normalized)) return;
 
-    // Trim to max tokens if needed
-    const tokens = trimmed.split(/\s+/).filter(Boolean);
-    if (tokens.length > MAX_QUERY_TOKENS) {
-      trimmed = tokens.slice(0, MAX_QUERY_TOKENS).join(' ');
-    }
+    const signalKey = buildSearchSignalKey(trimmed);
+    if (!signalKey || usedSignalQueries.has(signalKey)) return;
 
     usedQueries.add(normalized);
+    usedSignalQueries.add(signalKey);
     hypotheses.push({ query: trimmed, type, priority, explanation });
   };
 
@@ -477,6 +1422,57 @@ export function generateBoostHypotheses(
 
     const tokenQuery = sortedTokens.join(' ');
     addHypothesis(tokenQuery, 'boost_tokens', 120, `Top ${sortedTokens.length} tokens: ${tokenQuery}`);
+  }
+
+  // =========================================================================
+  // Strategy 3b: OCR-correct focused token + strong author
+  // =========================================================================
+  // For noisy multi-word titles with a short shard, recover a cleaner
+  // single-token title variant and pair it with author signal.
+  const boostAuthor =
+    evidence.personNameLines.find((line) => hasUsableAuthorNameSignal(line)) ??
+    selectHighConfidenceRecoveredAuthor(evidence) ??
+    (ocrAuthor && hasUsableAuthorNameSignal(ocrAuthor) ? ocrAuthor.trim() : null);
+
+  if (boostAuthor) {
+    for (const line of sortedByLength.slice(0, 4)) {
+      const signalTokens = normalizeForScoring(line);
+      if (signalTokens.length < 2) {
+        continue;
+      }
+
+      const hasShortShard = signalTokens.some((token) => token.length <= 3);
+      if (!hasShortShard) {
+        continue;
+      }
+
+      const focusedToken = [...signalTokens]
+        .sort((a, b) => b.length - a.length)
+        .find((token) => token.length >= 5);
+
+      if (!focusedToken) {
+        continue;
+      }
+
+      const correctedToken = generateOcrTokenCorrectionVariants(focusedToken, 1)[0];
+      if (!correctedToken) {
+        continue;
+      }
+
+      addHypothesis(
+        `${correctedToken} ${boostAuthor}`,
+        'boost_combo',
+        133,
+        `OCR-corrected token "${focusedToken}" + author "${boostAuthor}"`
+      );
+      addHypothesis(
+        correctedToken,
+        'boost_partial',
+        133.5,
+        `OCR-corrected token "${focusedToken}" -> "${correctedToken}"`
+      );
+      break;
+    }
   }
 
   // =========================================================================
@@ -745,6 +1741,65 @@ export function generateBoostHypotheses(
             );
           }
         }
+
+        // When trailing part is a single word (e.g., "JOINS"→"JONES" or "LUI"),
+        // try combining the corrected title prefix with recovered authors from other lines.
+        // This handles "THE GOOD LUCK MURDERS JOINS" where JONES is a surname that
+        // should pair with PATRICIA from another line.
+        const authorTokens = authorPart.split(/\s+/).filter(Boolean);
+        if (authorTokens.length <= 2 && titlePart.length >= MIN_QUERY_LENGTH) {
+          // Try corrected title prefix alone (title-only search)
+          let correctedTitlePart = titlePart;
+          for (const [pattern, replacement] of nameCompletions) {
+            correctedTitlePart = correctedTitlePart.replace(pattern, replacement);
+          }
+          for (const [pattern, replacement] of letterConfusions) {
+            correctedTitlePart = correctedTitlePart.replace(pattern, replacement);
+          }
+          if (correctedTitlePart !== titlePart) {
+            addHypothesis(correctedTitlePart, 'boost_partial', 149.91, `Corrected title prefix: "${correctedTitlePart}"`);
+          }
+
+          // Combine corrected trailing word with recovered author candidates from other lines
+          if (evidence.recoveredAuthorCandidates && evidence.recoveredAuthorCandidates.length > 0) {
+            let correctedTrailing = authorPart;
+            for (const [pattern, replacement] of nameCompletions) {
+              correctedTrailing = correctedTrailing.replace(pattern, replacement);
+            }
+            for (const [pattern, replacement] of letterConfusions) {
+              correctedTrailing = correctedTrailing.replace(pattern, replacement);
+            }
+
+            for (const authorCandidate of evidence.recoveredAuthorCandidates.slice(0, 3)) {
+              if (authorCandidate.confidence < 0.4) continue;
+              let correctedAuthorLine = authorCandidate.line;
+              for (const [p, r] of nameCompletions) {
+                correctedAuthorLine = correctedAuthorLine.replace(p, r);
+              }
+              for (const [p, r] of letterConfusions) {
+                correctedAuthorLine = correctedAuthorLine.replace(p, r);
+              }
+
+              // Build full author: e.g., "PATRICIA" + "JONES" or "JONES" + "PATRICIA"
+              const fullAuthor1 = `${correctedAuthorLine} ${correctedTrailing}`;
+              const fullAuthor2 = `${correctedTrailing} ${correctedAuthorLine}`;
+              const bestTitle = correctedTitlePart !== titlePart ? correctedTitlePart : titlePart;
+
+              addHypothesis(
+                `${bestTitle} ${fullAuthor1}`,
+                'boost_combo',
+                149.93,
+                `Split trailing+recovered: "${bestTitle}" + "${fullAuthor1}"`
+              );
+              addHypothesis(
+                `${bestTitle} ${fullAuthor2}`,
+                'boost_combo',
+                149.94,
+                `Split trailing+recovered rev: "${bestTitle}" + "${fullAuthor2}"`
+              );
+            }
+          }
+        }
       }
     }
   }
@@ -780,6 +1835,26 @@ export function generateBoostHypotheses(
           const tokens = combined.split(/\s+/).filter(Boolean);
           if (tokens.length >= 3 && tokens.length <= MAX_QUERY_TOKENS) {
             addHypothesis(combined, 'boost_combo', 147.5, `Cross-line reassembly: "${combined}"`);
+
+            // Also combine reassembled title with best recovered author
+            // e.g., "DEAD AS A DOORNAIL" + "CHARLAINE HARRIS"
+            if (evidence.recoveredAuthorCandidates && evidence.recoveredAuthorCandidates.length > 0) {
+              for (const authorCandidate of evidence.recoveredAuthorCandidates.slice(0, 2)) {
+                if (authorCandidate.confidence < 0.4) continue;
+                let correctedAuthorLine = authorCandidate.line;
+                for (const [p, r] of nameCompletions) {
+                  correctedAuthorLine = correctedAuthorLine.replace(p, r);
+                }
+                for (const [p, r] of letterConfusions) {
+                  correctedAuthorLine = correctedAuthorLine.replace(p, r);
+                }
+                const titleAuthor = `${combined} ${correctedAuthorLine}`;
+                const taTokens = titleAuthor.split(/\s+/).filter(Boolean);
+                if (taTokens.length <= MAX_QUERY_TOKENS) {
+                  addHypothesis(titleAuthor, 'boost_combo', 147.3, `Cross-line title+author: "${combined}" + "${correctedAuthorLine}"`);
+                }
+              }
+            }
           }
         }
       }
@@ -953,6 +2028,24 @@ export function generateBoostHypotheses(
             'boost_combo',
             145,
             `Corrected phrase+recovered author: "${correctedPhrase}" + "${correctedAuthor}"`
+          );
+        }
+      }
+
+      // Also try single-word distinctive candidates (e.g., "Bundori") + corrected author
+      // These aren't detected as titleLikeLines (requires 2+ words) but are valid titles
+      for (const phrase of evidence.candidatePhrases.slice(0, 8)) {
+        const words = phrase.split(/\s+/).filter(Boolean);
+        if (words.length === 1 && phrase.length >= 5) {
+          let correctedPhrase = phrase;
+          for (const [pattern, replacement] of letterConfusions) {
+            correctedPhrase = correctedPhrase.replace(pattern, replacement);
+          }
+          addHypothesis(
+            `${correctedPhrase} ${correctedAuthor}`,
+            'boost_combo',
+            145.5,
+            `Single-word title+recovered author: "${correctedPhrase}" + "${correctedAuthor}"`
           );
         }
       }

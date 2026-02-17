@@ -13,17 +13,45 @@
 const http = require('http');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 const os = require('os');
+const {
+  automationHome,
+  documentsDir,
+  scanImagesDir,
+  instructionsFile,
+  telegramSendScript,
+  autoFixScript,
+  rescanSignalFile,
+  getServerPort,
+  getAgentName,
+  ensureAutomationDirs,
+} = require('./automationConfig');
 
-const PORT = 8765;
-const EXPORTS_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/documents');
-const SCAN_IMAGES_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/scan-images');
-const INSTRUCTIONS_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/instructions.md');
+const PORT = getServerPort();
 const ANALYZE_SCRIPT = path.join(__dirname, 'analyzeRejects.js');
-const TELEGRAM_SEND = path.join(os.homedir(), '.claude/clawdbot-instructions/telegram-bot/send.py');
-const AUTO_FIX_SCRIPT = path.join(os.homedir(), '.claude/clawdbot-instructions/auto-fix.py');
-const RESCAN_SIGNAL_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/rescan_signal.json');
+const AGENT_NAME = getAgentName();
+const AUTOFIX_TRIGGER_MODE = (
+  process.env.BOOKSCANNER_AUTOFIX_TRIGGER_MODE ||
+  (AGENT_NAME === 'Codex' ? 'daemon' : 'server')
+).toLowerCase();
+const FIX_REQUEST_STATE_FILE = path.join(automationHome, '.fix_request_state.json');
+const FIX_WATCHER_STATE_FILE = path.join(automationHome, '.fix_watcher_state.json');
+const FIX_REQUEST_COOLDOWN_SEC = Number.parseInt(
+  process.env.BOOKSCANNER_SERVER_REQUEST_COOLDOWN_SEC || '45',
+  10
+);
+const DEFAULT_DUPLICATE_WINDOW_SEC = FIX_REQUEST_COOLDOWN_SEC;
+const FIX_REQUEST_DUPLICATE_WINDOW_SEC = Number.parseInt(
+  process.env.BOOKSCANNER_SERVER_DUPLICATE_WINDOW_SEC ||
+    `${DEFAULT_DUPLICATE_WINDOW_SEC}`,
+  10
+);
+const ACTIVE_REQUEST_MAX_AGE_SEC = Number.parseInt(
+  process.env.BOOKSCANNER_SERVER_ACTIVE_REQUEST_MAX_AGE_SEC || '7200',
+  10
+);
 
 // Track latest analysis result
 let latestAnalysis = {
@@ -35,12 +63,7 @@ let latestAnalysis = {
 };
 
 // Ensure directories exist
-if (!fs.existsSync(EXPORTS_DIR)) {
-  fs.mkdirSync(EXPORTS_DIR, { recursive: true });
-}
-if (!fs.existsSync(SCAN_IMAGES_DIR)) {
-  fs.mkdirSync(SCAN_IMAGES_DIR, { recursive: true });
-}
+ensureAutomationDirs();
 
 function getLocalIP() {
   const interfaces = os.networkInterfaces();
@@ -105,16 +128,17 @@ function parseAnalysisOutput(output) {
 }
 
 function sendToTelegram(message) {
-  if (!fs.existsSync(TELEGRAM_SEND)) {
+  if (!fs.existsSync(telegramSendScript)) {
     console.log('Telegram send not available');
     return false;
   }
 
   try {
     // Use stdin piping to avoid shell escaping issues with special chars
-    execSync(`python3 "${TELEGRAM_SEND}"`, {
+    execSync(`python3 "${telegramSendScript}"`, {
       input: message,
       encoding: 'utf8',
+      timeout: 15000,
     });
     console.log('Telegram notification sent');
     return true;
@@ -124,14 +148,111 @@ function sendToTelegram(message) {
   }
 }
 
+function loadFixRequestState() {
+  if (!fs.existsSync(FIX_REQUEST_STATE_FILE)) {
+    return { recent: {} };
+  }
+  try {
+    const parsed = JSON.parse(fs.readFileSync(FIX_REQUEST_STATE_FILE, 'utf8'));
+    if (parsed && typeof parsed === 'object' && parsed.recent && typeof parsed.recent === 'object') {
+      return parsed;
+    }
+  } catch (_err) {
+    // ignore parse failures; start clean
+  }
+  return { recent: {} };
+}
+
+function saveFixRequestState(state) {
+  try {
+    fs.writeFileSync(FIX_REQUEST_STATE_FILE, JSON.stringify(state, null, 2));
+  } catch (err) {
+    console.error('Failed to save FIX_REQUEST state:', err.message);
+  }
+}
+
+function computeRejectsFingerprint(data) {
+  const rejects = Array.isArray(data.rejects) ? data.rejects : [];
+  const rows = rejects
+    .map((item) => {
+      const id = String(item.id || '');
+      const reason = String(item.resolverDecisionReason || '');
+      const mergedText = String(item.mergedText || '').slice(0, 160);
+      return `${id}|${reason}|${mergedText}`;
+    })
+    .sort()
+    .join('\n');
+  return crypto.createHash('sha1').update(rows).digest('hex');
+}
+
+function shouldQueueFixRequest(sessionId, fingerprint) {
+  if (!fingerprint) return true;
+
+  const state = loadFixRequestState();
+  const key = `${sessionId}|${fingerprint}`;
+  const lastQueuedAt = state.recent[key];
+  const nowMs = Date.now();
+  const withinDuplicateWindow =
+    typeof lastQueuedAt === 'number' &&
+    nowMs - lastQueuedAt < FIX_REQUEST_DUPLICATE_WINDOW_SEC * 1000;
+
+  if (withinDuplicateWindow) {
+    return false;
+  }
+
+  state.recent[key] = nowMs;
+
+  // Compact stale entries to keep state small.
+  const maxAgeMs = FIX_REQUEST_DUPLICATE_WINDOW_SEC * 1000 * 2;
+  const compacted = {};
+  for (const [stateKey, ts] of Object.entries(state.recent)) {
+    if (typeof ts === 'number' && nowMs - ts < maxAgeMs) {
+      compacted[stateKey] = ts;
+    }
+  }
+  state.recent = compacted;
+  saveFixRequestState(state);
+  return true;
+}
+
+function hasActiveFixForSession(sessionId) {
+  if (!fs.existsSync(FIX_WATCHER_STATE_FILE)) {
+    return false;
+  }
+
+  try {
+    const state = JSON.parse(fs.readFileSync(FIX_WATCHER_STATE_FILE, 'utf8'));
+    const active = state?.activeRequest;
+    if (!active || active.sessionId !== sessionId) {
+      return false;
+    }
+
+    const startedAtMs = new Date(active.startedAt || 0).getTime();
+    if (!Number.isFinite(startedAtMs) || startedAtMs <= 0) {
+      return true;
+    }
+
+    const ageMs = Date.now() - startedAtMs;
+    return ageMs < ACTIVE_REQUEST_MAX_AGE_SEC * 1000;
+  } catch (_err) {
+    return false;
+  }
+}
+
 function writeFixRequest(filepath, summary, sessionId) {
   const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
   const issues = summary.issues.slice(0, 3).join('; ') || 'Unknown issues';
+  const requestId = `${sessionId}_${Date.now().toString(36)}_${crypto
+    .createHash('sha1')
+    .update(`${filepath}|${timestamp}`)
+    .digest('hex')
+    .slice(0, 6)}`;
 
   const instruction = `
 ---
 **[${timestamp}]** ACTION: FIX_REQUEST
 From: auto-rejects-server
+**Request ID:** ${requestId}
 
 **Problem:** ${summary.rejectCount} books rejected out of ${summary.totalBooks}
 **Rejects File:** ${filepath}
@@ -141,28 +262,35 @@ From: auto-rejects-server
 ---`;
 
   try {
-    fs.appendFileSync(INSTRUCTIONS_FILE, instruction);
-    console.log('FIX_REQUEST written to instructions.md');
-    return true;
+    fs.appendFileSync(instructionsFile, instruction);
+    console.log(`FIX_REQUEST written to instructions.md (requestId=${requestId})`);
+    return { ok: true, requestId };
   } catch (err) {
     console.error('Failed to write FIX_REQUEST:', err.message);
-    return false;
+    return { ok: false, requestId: null };
   }
 }
 
-function runAutoFix(filepath) {
-  if (!fs.existsSync(AUTO_FIX_SCRIPT)) {
+function runAutoFix(filepath, requestId = null) {
+  if (!fs.existsSync(autoFixScript)) {
     console.log('Auto-fix script not available');
     return;
   }
 
-  console.log('Running auto-fix analysis...');
+  console.log(`Running auto-fix analysis${requestId ? ` (requestId=${requestId})` : ''}...`);
   try {
     // Run async - don't block the response
     const { spawn } = require('child_process');
-    const proc = spawn('python3', [AUTO_FIX_SCRIPT, filepath], {
+    const autoFixLogFile = path.join(automationHome, 'auto-fix.log');
+    const logFd = fs.openSync(autoFixLogFile, 'a');
+    const proc = spawn('python3', [autoFixScript, filepath], {
+      env: {
+        ...process.env,
+        BOOKSCANNER_AUTOMATION_HOME: automationHome,
+        BOOKSCANNER_PROJECT_DIR: path.resolve(__dirname, '..'),
+      },
       detached: true,
-      stdio: 'ignore'
+      stdio: ['ignore', logFd, logFd]
     });
     proc.unref();
     console.log('Auto-fix analysis started in background');
@@ -174,7 +302,7 @@ function runAutoFix(filepath) {
 const server = http.createServer((req, res) => {
   // CORS headers for local network
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
 
   if (req.method === 'OPTIONS') {
@@ -202,7 +330,7 @@ const server = http.createServer((req, res) => {
         const sessionId = data.sessionId || 'unknown';
         const timestamp = Date.now();
         const filename = `rejects_${sessionId}_${timestamp}.json`;
-        const filepath = path.join(EXPORTS_DIR, filename);
+        const filepath = path.join(documentsDir, filename);
 
         // Save the file
         fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
@@ -215,22 +343,31 @@ const server = http.createServer((req, res) => {
         const analysisOutput = runAnalysis(filepath);
         console.log(analysisOutput);
 
-        // Parse and send to Telegram
+        // Parse analysis output
         const summary = parseAnalysisOutput(analysisOutput);
+        const hasRejects = summary.rejectCount > 0;
+        const rejectsFingerprint = hasRejects ? computeRejectsFingerprint(data) : null;
+        const activeFixInProgress = hasRejects && hasActiveFixForSession(sessionId);
+        const shouldQueue =
+          hasRejects &&
+          !activeFixInProgress &&
+          shouldQueueFixRequest(sessionId, rejectsFingerprint);
 
-        let telegramMsg = `📊 *New Rejects Received*\n\n`;
-        telegramMsg += `Session: \`${sessionId}\`\n`;
-        telegramMsg += `Total: ${summary.totalBooks} books\n`;
-        telegramMsg += `Rejected: ${summary.rejectCount}\n\n`;
+        if (hasRejects && shouldQueue) {
+          let telegramMsg = `📊 *New Rejects Received*\n\n`;
+          telegramMsg += `Session: \`${sessionId}\`\n`;
+          telegramMsg += `Total: ${summary.totalBooks} books\n`;
+          telegramMsg += `Rejected: ${summary.rejectCount}\n\n`;
 
-        if (summary.issues.length > 0) {
-          telegramMsg += `*Top Issues:*\n`;
-          for (const issue of summary.issues.slice(0, 3)) {
-            telegramMsg += `• ${issue}\n`;
+          if (summary.issues.length > 0) {
+            telegramMsg += `*Top Issues:*\n`;
+            for (const issue of summary.issues.slice(0, 3)) {
+              telegramMsg += `• ${issue}\n`;
+            }
           }
-        }
 
-        sendToTelegram(telegramMsg);
+          sendToTelegram(telegramMsg);
+        }
 
         // Update latest analysis
         latestAnalysis = {
@@ -243,9 +380,23 @@ const server = http.createServer((req, res) => {
         };
 
         // Auto-trigger analysis
-        if (summary.rejectCount > 0) {
-          writeFixRequest(filepath, summary, sessionId);
-          runAutoFix(filepath);
+        if (hasRejects) {
+          if (activeFixInProgress) {
+            console.log(
+              `Skipping FIX_REQUEST because active fix is already running for session=${sessionId}`
+            );
+          } else if (!shouldQueue) {
+            console.log(
+              `Skipping duplicate FIX_REQUEST within dedupe window (${FIX_REQUEST_DUPLICATE_WINDOW_SEC}s) for session=${sessionId}`
+            );
+          } else {
+            const fixRequest = writeFixRequest(filepath, summary, sessionId);
+            if (AUTOFIX_TRIGGER_MODE === 'server') {
+              runAutoFix(filepath, fixRequest.requestId);
+            } else {
+              console.log(`Auto-fix queued for daemon (mode=${AUTOFIX_TRIGGER_MODE})`);
+            }
+          }
         } else {
           // All books accepted!
           sendToTelegram(`🎉 *Tüm kitaplar kabul edildi!* (${summary.totalBooks}/${summary.totalBooks})`);
@@ -273,11 +424,11 @@ const server = http.createServer((req, res) => {
     // Check if there's a rescan signal
     let signal = { rescan: false, reason: null };
 
-    if (fs.existsSync(RESCAN_SIGNAL_FILE)) {
+    if (fs.existsSync(rescanSignalFile)) {
       try {
-        signal = JSON.parse(fs.readFileSync(RESCAN_SIGNAL_FILE, 'utf8'));
+        signal = JSON.parse(fs.readFileSync(rescanSignalFile, 'utf8'));
         // Clear the signal after reading
-        fs.unlinkSync(RESCAN_SIGNAL_FILE);
+        fs.unlinkSync(rescanSignalFile);
         console.log('Rescan signal consumed by app');
       } catch (err) {
         console.error('Error reading rescan signal:', err.message);
@@ -297,9 +448,9 @@ const server = http.createServer((req, res) => {
 
   } else if (req.method === 'POST' && req.url === '/clear-rescan') {
     // Clear rescan signal explicitly
-    if (fs.existsSync(RESCAN_SIGNAL_FILE)) {
+    if (fs.existsSync(rescanSignalFile)) {
       try {
-        fs.unlinkSync(RESCAN_SIGNAL_FILE);
+        fs.unlinkSync(rescanSignalFile);
         console.log('Rescan signal cleared by app');
       } catch (err) {
         console.error('Error clearing rescan signal:', err.message);
@@ -336,7 +487,7 @@ const server = http.createServer((req, res) => {
 
         // Save the image
         const filename = `scan_${sessionId}.jpg`;
-        const filepath = path.join(SCAN_IMAGES_DIR, filename);
+        const filepath = path.join(scanImagesDir, filename);
         const imageBuffer = Buffer.from(imageBase64, 'base64');
         fs.writeFileSync(filepath, imageBuffer);
 
@@ -355,7 +506,7 @@ const server = http.createServer((req, res) => {
   } else if (req.method === 'GET' && req.url.startsWith('/scan-image/')) {
     // Serve scan image for a session
     const sessionId = req.url.replace('/scan-image/', '');
-    const filepath = path.join(SCAN_IMAGES_DIR, `scan_${sessionId}.jpg`);
+    const filepath = path.join(scanImagesDir, `scan_${sessionId}.jpg`);
 
     if (fs.existsSync(filepath)) {
       const imageBuffer = fs.readFileSync(filepath);
@@ -380,8 +531,11 @@ const localIP = getLocalIP();
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log('╔════════════════════════════════════════════════════════════╗');
-  console.log('║         BookScanner Rejects Upload Server                  ║');
+  console.log('║      BookScanner Automation Rejects Upload Server          ║');
   console.log('╚════════════════════════════════════════════════════════════╝');
+  console.log('');
+  console.log(`Automation Home: ${automationHome}`);
+  console.log(`Agent: ${AGENT_NAME}`);
   console.log('');
   console.log(`Server running on:`);
   console.log(`  Local:   http://localhost:${PORT}`);
@@ -391,4 +545,15 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`  http://${localIP}:${PORT}/upload`);
   console.log('');
   console.log('Press Ctrl+C to stop\n');
+});
+
+server.on('error', (err) => {
+  if (err && err.code === 'EADDRINUSE') {
+    console.error(
+      `Port ${PORT} is already in use. Set BOOKSCANNER_SERVER_PORT to a free port and restart.`
+    );
+  } else {
+    console.error('Rejects server failed:', err?.message || err);
+  }
+  process.exit(1);
 });

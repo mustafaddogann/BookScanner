@@ -20,6 +20,7 @@ import {
 } from './isbnUtils';
 import { isMetadataVerboseDebug } from '../config/debug';
 import { levenshteinSimilarity, FUZZY_MATCH_THRESHOLD } from './tokenSetFuzzyScoring';
+import { normalizeForOcrComparison } from './ocrConfusionMatching';
 import {
   ACCEPT_HIGH_THRESHOLD as CONFIG_ACCEPT_HIGH,
   ACCEPT_MEDIUM_THRESHOLD as CONFIG_ACCEPT_MEDIUM,
@@ -142,6 +143,8 @@ export interface CandidateScore {
   authorScore: number | null;
   /** Number of title tokens that matched */
   titleTokenCount: number;
+  /** Number of raw title words before normalization (articles retained) */
+  titleRawWordCount?: number;
   /** Number of author tokens in candidate (0 if none) */
   authorTokenCount: number;
   /** Resolution mode determined for this candidate */
@@ -187,6 +190,9 @@ const GENERIC_TITLE_PENALTY = CONFIG_GENERIC_PENALTY;
 
 /** Penalty for candidates missing author information */
 const MISSING_AUTHOR_PENALTY = CONFIG_MISSING_AUTHOR_PENALTY;
+
+/** Penalty for ambiguous single-token titles without author support */
+const SHORT_TITLE_PENALTY = 0.18;
 
 /** Minimum overlapping tokens required for meaningful score */
 const MIN_OVERLAP_COUNT = CONFIG_MIN_OVERLAP_COUNT;
@@ -242,6 +248,13 @@ function calculateTokenOverlap(
         break;
       }
 
+      // OCR-confusable equivalent check (e.g., K1LLING vs KILLING, MAR5H vs MARSH).
+      if (isOcrConfusionEquivalent(candidateToken, evidenceToken)) {
+        bestMatch = evidenceToken;
+        bestSimilarity = 0.99;
+        break;
+      }
+
       // Fuzzy Levenshtein match
       const similarity = levenshteinSimilarity(candidateToken, evidenceToken);
       if (similarity > bestSimilarity) {
@@ -268,6 +281,30 @@ function calculateTokenOverlap(
     matched,
     matchedPairs,
   };
+}
+
+function isOcrConfusionEquivalent(candidateToken: string, evidenceToken: string): boolean {
+  // Conservative guardrails:
+  // - require meaningful token length
+  // - avoid large length drifts that are unlikely to be OCR confusions
+  if (candidateToken.length < 4 || evidenceToken.length < 4) {
+    return false;
+  }
+
+  if (Math.abs(candidateToken.length - evidenceToken.length) > 1) {
+    return false;
+  }
+
+  if (candidateToken === evidenceToken) {
+    return false;
+  }
+
+  const normalizedCandidate = normalizeForOcrComparison(candidateToken);
+  const normalizedEvidence = normalizeForOcrComparison(evidenceToken);
+  return (
+    normalizedCandidate.length > 0 &&
+    normalizedCandidate === normalizedEvidence
+  );
 }
 
 /**
@@ -458,21 +495,15 @@ export function scoreCandidate(
   const bestAuthorTokenCount = evidenceTokens.bestAuthorTokenCount ?? 0;
   // Strong author evidence: 2+ words with high confidence (full name like "JOHN SANDFORD")
   const hasStrongAuthorEvidence = bestAuthorConfidence >= 0.70 && bestAuthorTokenCount >= 2;
-  // Weak author evidence: single surname with moderate confidence (like "CRANKIN", "SANDFORD")
-  // This helps rescue single-word titles when we have a potential author surname
-  const hasWeakAuthorEvidence = bestAuthorConfidence >= 0.40 && bestAuthorTokenCount >= 1;
+  const hasMatchedAuthorSignal = authorOnlyResult.overlapCount >= 1;
 
   let resolutionMode: ResolutionMode = 'FULL_MATCH';
   // Use titleRawWordCount for MIN_TOKENS check to prevent "The Fingerprint" (2 words) from
   // being rejected just because "the" is filtered during normalization
   if (titleRawWordCount < TITLE_ONLY_MIN_TOKENS) {
     // Weak title - check if author evidence can save us
-    if (titleTokenCount >= 1 && hasStrongAuthorEvidence) {
-      // Proceed with weak title but strong author
-      resolutionMode = 'WEAK_TITLE_STRONG_AUTHOR';
-    } else if (titleTokenCount >= 1 && hasWeakAuthorEvidence) {
-      // Single-word title + single-word author surname: still attempt matching
-      // Example: "FALLS" + "CRANKIN" should try to match "Falls" by Ian Rankin
+    if (titleTokenCount >= 1 && hasStrongAuthorEvidence && hasMatchedAuthorSignal) {
+      // Proceed with weak title only when strong author evidence is actually matched.
       resolutionMode = 'WEAK_TITLE_STRONG_AUTHOR';
     } else {
       resolutionMode = 'NO_MATCH';
@@ -501,6 +532,15 @@ export function scoreCandidate(
       type: 'missing_author',
       amount: MISSING_AUTHOR_PENALTY,
       reason: `Candidate "${candidate.title}" has no author information`,
+    });
+  }
+
+  // Single-token titles are highly ambiguous unless author evidence supports them.
+  if (titleTokenCount <= 1 && authorOnlyResult.overlapCount === 0 && !isbnMatched) {
+    penalties.push({
+      type: 'short_title',
+      amount: SHORT_TITLE_PENALTY,
+      reason: `Single-token title "${candidate.title}" without matched author signal`,
     });
   }
 
@@ -569,6 +609,7 @@ export function scoreCandidate(
     titleScore,
     authorScore,
     titleTokenCount,
+    titleRawWordCount,
     authorTokenCount,
     resolutionMode,
     publisherScore,
@@ -798,6 +839,24 @@ function logGateDecision(
   });
 }
 
+/**
+ * Detect low-confidence cases where both title and author signals are present
+ * but noise-heavy evidence depresses aggregate confidence.
+ *
+ * This is intentionally narrow and only used as a non-persisted fallback.
+ */
+function hasMixedSignalLowConfidenceFallback(top: ScoredCandidate): boolean {
+  const matchedTitleCount = top.scoring.matchedTitleTokens?.length ?? 0;
+  const matchedAuthorCount = top.scoring.matchedAuthorTokens?.length ?? 0;
+
+  return (
+    top.scoring.overlapCount >= 2 &&
+    matchedTitleCount >= 1 &&
+    matchedAuthorCount >= 1 &&
+    top.scoring.score >= 0.40
+  );
+}
+
 export function makeDecisionFromScores(
   scoredCandidates: ScoredCandidate[],
   isAfterBoostPass: boolean = false,
@@ -872,6 +931,7 @@ export function makeDecisionFromScores(
   const titleScore = top.scoring.titleScore ?? 0;
   const authorScore = top.scoring.authorScore;
   const titleTokenCount = top.scoring.titleTokenCount ?? 0;
+  const titleRawWordCount = top.scoring.titleRawWordCount ?? titleTokenCount;
   const publisherScore = top.scoring.publisherScore;
   // Safe access for matchedAuthorTokens
   const hasAuthorSignal = (top.scoring.matchedAuthorTokens?.length ?? 0) >= 1;
@@ -932,8 +992,8 @@ export function makeDecisionFromScores(
     // Up-weight author match: if author tokens matched, score is more reliable
     const authorMatchCount = top.scoring.matchedAuthorTokens.length;
 
-    // If we have both title and author overlap, suggest
-    if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1) {
+    // Require both title and author signal; otherwise these are usually false positives.
+    if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1 && top.scoring.score >= SUGGESTED_THRESHOLD) {
       logGateDecision('suggested', 'weak_title_strong_author_proceeded', resolutionMode, top, debugContext);
       return {
         decision: 'suggested',
@@ -947,44 +1007,27 @@ export function makeDecisionFromScores(
       };
     }
 
-    // If only author matched but title didn't, still suggest with manual review
-    if (authorMatchCount >= 2) {
-      logGateDecision('suggested', 'weak_title_author_only_match', resolutionMode, top, debugContext);
-      return {
-        decision: 'suggested',
-        topCandidate: top,
-        reviewCandidates: alternatives,
-        scoreGap,
-        reason: 'weak_title_author_only_match',
-        manualReview: true,
-        resolutionMode,
-        ambiguityMetrics,
-      };
-    }
-
-    // Fallback: some signal but weak - suggest_weak with manual review
-    if (top.scoring.overlapCount >= 1) {
-      logGateDecision('suggested_weak', 'weak_title_and_author_manual_review', resolutionMode, top, debugContext);
+    if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1 && top.scoring.score >= SUGGESTED_WEAK_THRESHOLD) {
+      logGateDecision('suggested_weak', 'weak_title_author_supported_but_low_confidence', resolutionMode, top, debugContext);
       return {
         decision: 'suggested_weak',
         topCandidate: top,
-        reviewCandidates: alternatives,
+        reviewCandidates: [],
         scoreGap,
-        reason: 'weak_title_and_author_manual_review',
-        manualReview: true,
+        reason: 'weak_title_author_supported_but_low_confidence',
+        manualReview: false,
         resolutionMode,
         ambiguityMetrics,
       };
     }
 
-    // No overlap at all - reject
-    logGateDecision('reject', 'no_evidence_overlap', resolutionMode, top, debugContext);
+    logGateDecision('reject', 'weak_title_author_mismatch', resolutionMode, top, debugContext);
     return {
       decision: 'reject',
       topCandidate: top,
       reviewCandidates: [],
       scoreGap,
-      reason: 'no_evidence_overlap',
+      reason: 'weak_title_author_mismatch',
       resolutionMode,
       ambiguityMetrics,
     };
@@ -1063,6 +1106,20 @@ export function makeDecisionFromScores(
       };
     }
 
+    if (hasMixedSignalLowConfidenceFallback(top)) {
+      logGateDecision('suggested_weak', 'mixed_signal_low_confidence_fallback', resolutionMode, top, debugContext);
+      return {
+        decision: 'suggested_weak',
+        topCandidate: top,
+        reviewCandidates: [],
+        scoreGap,
+        reason: 'mixed_signal_low_confidence_fallback',
+        manualReview: false,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
     // Reject in FULL_MATCH mode - due to low title/author confidence
     logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
     return {
@@ -1092,8 +1149,43 @@ export function makeDecisionFromScores(
   // This fallback allows cases where evidence extraction picked wrong lines
   // but the overall match is still good (e.g., "The Nanny" with score 0.50
   // but titleHint was "MORROT Thriler")
-  const titleTooWeak = titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS;
+  // Use raw title word count here (not normalized token count) so article-prefixed
+  // two-word titles like "The Guardian" are not falsely treated as <2-token titles.
+  const titleTooWeak = titleScore < SUGGESTED_WEAK_THRESHOLD || titleRawWordCount < TITLE_ONLY_MIN_TOKENS;
   const overallScoreGood = overallScore >= SUGGESTED_THRESHOLD;
+  const hasWeakOverallFallbackSignal =
+    overallScore >= SUGGESTED_WEAK_THRESHOLD &&
+    top.scoring.overlapCount >= SUGGESTED_WEAK_MIN_OVERLAP &&
+    (top.scoring.matchedTitleTokens?.length ?? 0) >= 1 &&
+    titleRawWordCount >= TITLE_ONLY_MIN_TOKENS;
+
+  if (titleTooWeak && !overallScoreGood && hasWeakOverallFallbackSignal) {
+    logGateDecision('suggested_weak', 'overall_score_weak_fallback', resolutionMode, top, debugContext);
+    return {
+      decision: 'suggested_weak',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'overall_score_weak_fallback',
+      manualReview: false,
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
+  if (titleTooWeak && !overallScoreGood && hasMixedSignalLowConfidenceFallback(top)) {
+    logGateDecision('suggested_weak', 'mixed_signal_low_confidence_fallback', resolutionMode, top, debugContext);
+    return {
+      decision: 'suggested_weak',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'mixed_signal_low_confidence_fallback',
+      manualReview: false,
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
 
   if (titleTooWeak && !overallScoreGood) {
     logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);

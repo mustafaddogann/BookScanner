@@ -8,7 +8,18 @@
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
-    "test:coverage": "jest --coverage"
+    "test:coverage": "jest --coverage",
+    "loop:server": "node scripts/rejectsServer.js",
+    "loop:start": "node scripts/startAutomationLoop.js",
+    "loop:start:legacy": "BOOKSCANNER_AUTOMATION_PROFILE=legacy node scripts/startAutomationLoop.js",
+    "loop:start:codex": "BOOKSCANNER_AUTOMATION_PROFILE=codex BOOKSCANNER_AUTOFIX_TRIGGER_MODE=daemon BOOKSCANNER_AUTOFIX_FORCE_FIX=1 BOOKSCANNER_AUTOFIX_DISABLE_FINGERPRINT_DEDUPE=1 BOOKSCANNER_SERVER_DUPLICATE_WINDOW_SEC=45 BOOKSCANNER_AUTOFIX_ALLOWED_FILES='*' BOOKSCANNER_AUTOFIX_REBUILD_CMD='npm run ios' BOOKSCANNER_AUTOFIX_SIGNAL_RESCAN=1 node scripts/startAutomationLoop.js",
+    "loop:reset:codex": "BOOKSCANNER_AUTOMATION_PROFILE=codex node scripts/resetAutomationQueue.js",
+    "loop:start:codex:fresh": "npm run loop:reset:codex && npm run loop:start:codex",
+    "loop:start:codex:fixonly": "BOOKSCANNER_AUTOMATION_PROFILE=codex BOOKSCANNER_AUTOFIX_TRIGGER_MODE=daemon BOOKSCANNER_AUTOFIX_FORCE_FIX=1 BOOKSCANNER_AUTOFIX_DISABLE_FINGERPRINT_DEDUPE=1 BOOKSCANNER_SERVER_DUPLICATE_WINDOW_SEC=45 BOOKSCANNER_AUTOFIX_ALLOWED_FILES='*' node scripts/startAutomationLoop.js",
+    "loop:start:codex:rebuild": "BOOKSCANNER_AUTOMATION_PROFILE=codex BOOKSCANNER_AUTOFIX_TRIGGER_MODE=daemon BOOKSCANNER_AUTOFIX_FORCE_FIX=1 BOOKSCANNER_AUTOFIX_DISABLE_FINGERPRINT_DEDUPE=1 BOOKSCANNER_SERVER_DUPLICATE_WINDOW_SEC=45 BOOKSCANNER_AUTOFIX_ALLOWED_FILES='*' BOOKSCANNER_AUTOFIX_REBUILD_CMD='npm run ios' BOOKSCANNER_AUTOFIX_SIGNAL_RESCAN=1 node scripts/startAutomationLoop.js",
+    "loop:watch": "node scripts/watchRejects.js",
+    "loop:daemon": "node scripts/autoFixDaemon.js",
+    "loop:rescan": "node scripts/signalRescan.js"
   },
   "dependencies": {
     "@react-native-community/netinfo": "^11.4.1",

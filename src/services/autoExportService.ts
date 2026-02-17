@@ -3,7 +3,7 @@
  *
  * Automatically exports rejected books for analysis.
  * 1. Saves locally to Documents folder
- * 2. Uploads to Mac server if configured (for ClawdBot integration)
+ * 2. Uploads to Mac server if configured (for automation/Codex loop)
  */
 
 import RNFS from 'react-native-fs';
@@ -14,7 +14,8 @@ import type { BookCandidate } from '../types';
 const LOCAL_EXPORT_DIR = `${RNFS.DocumentDirectoryPath}/RejectsExports`;
 
 // Storage keys
-const SERVER_URL_KEY = 'clawdbot_server_url';
+const SERVER_URL_KEY = 'automation_server_url';
+const LEGACY_SERVER_URL_KEY = 'clawdbot_server_url';
 const LAST_IMAGE_URI_KEY = 'last_scanned_image_uri';
 const AUTO_RESCAN_ENABLED_KEY = 'auto_rescan_enabled';
 const AUTO_RESCAN_MIGRATED_KEY = 'auto_rescan_migrated_v2';
@@ -22,12 +23,12 @@ const AUTO_RESCAN_MIGRATED_KEY = 'auto_rescan_migrated_v2';
 // MMKV storage instance
 const storage = new MMKV({ id: 'bookscanner-autoexport' });
 
-// Migration: Force auto-retry ON for existing users (runs once)
+// Migration: keep auto-retry OFF by default (runs once)
 try {
   if (!storage.getBoolean(AUTO_RESCAN_MIGRATED_KEY)) {
-    storage.set(AUTO_RESCAN_ENABLED_KEY, true);
+    storage.set(AUTO_RESCAN_ENABLED_KEY, false);
     storage.set(AUTO_RESCAN_MIGRATED_KEY, true);
-    console.log('[AutoExport] Migrated: Auto-retry enabled by default');
+    console.log('[AutoExport] Migrated: Auto-retry disabled by default');
   }
 } catch (e) {
   console.warn('[AutoExport] Migration failed:', e);
@@ -48,7 +49,9 @@ let rescanCallback: ((imageUri: string) => void) | null = null;
  */
 export function getServerUrl(): string | null {
   try {
-    return storage.getString(SERVER_URL_KEY) || null;
+    const value = storage.getString(SERVER_URL_KEY);
+    if (value) return value;
+    return storage.getString(LEGACY_SERVER_URL_KEY) || null;
   } catch {
     return null;
   }
@@ -61,8 +64,11 @@ export function setServerUrl(url: string | null): void {
   try {
     if (url) {
       storage.set(SERVER_URL_KEY, url);
+      // Keep legacy key in sync for backwards compatibility.
+      storage.set(LEGACY_SERVER_URL_KEY, url);
     } else {
       storage.delete(SERVER_URL_KEY);
+      storage.delete(LEGACY_SERVER_URL_KEY);
     }
   } catch (error) {
     console.warn('[AutoExport] Failed to save server URL:', error);
@@ -126,7 +132,7 @@ export async function autoExportRejects(
       otherCount: other.length,
       acceptCount: candidates.filter((c) => c.resolverDecision === 'accept').length,
       suggestedCount: candidates.filter((c) => c.resolverDecision === 'suggested').length,
-      // Send ALL problem books as "rejects" for Telegram analysis
+      // Send ALL problem books as "rejects" for automation analysis
       rejects: problemBooks.map((candidate, idx) => {
         // Determine problem category based on decision
         const decision = candidate.resolverDecision;
@@ -376,13 +382,13 @@ export function clearLastScannedImageUri(): void {
 
 /**
  * Check if auto-rescan is enabled.
- * Default is TRUE - auto-retry is on by default.
+ * Default is FALSE - opt-in for automation sessions.
  */
 export function isAutoRescanEnabled(): boolean {
   try {
-    return storage.getBoolean(AUTO_RESCAN_ENABLED_KEY) ?? true;
+    return storage.getBoolean(AUTO_RESCAN_ENABLED_KEY) ?? false;
   } catch {
-    return true;
+    return false;
   }
 }
 

@@ -60,6 +60,16 @@ import type { ScoredCandidate, ScoringDecision } from './candidateScoring';
 import { shouldAutoPersist, makeDecisionFromScores } from './candidateScoring';
 import { AUTO_BOOST_ENABLED } from '../config/metadataResolutionConfig';
 import { persistResolverAttempts } from './resolverAttemptsService';
+import {
+  hasInformativeSearchSignal,
+  buildSearchSignalKey,
+  buildFocusedSearchTitle,
+  shouldPreferFocusedTitleVariant,
+  hasStrongEvidenceLineSignal,
+  hasStrongEvidenceSignal,
+  hasUsableAuthorNameSignal,
+  isMarketingLine,
+} from './evidenceNormalization';
 
 /**
  * Input for metadata resolution
@@ -91,6 +101,77 @@ export interface MetadataResolutionOutput {
   resolutionState: MetadataResolutionState;
   /** Whether resolution was queued for offline retry */
   queuedForOffline: boolean;
+}
+
+function normalizedCandidateSourceId(candidate: ScoredCandidate): string {
+  return (candidate.book.sourceId ?? '').trim().toLowerCase();
+}
+
+function scoredCandidateTieBreakScore(candidate: ScoredCandidate): number {
+  const matchedAuthorTokenCount = candidate.scoring?.matchedAuthorTokens?.length ?? 0;
+  const overlapCount = candidate.scoring?.overlapCount ?? 0;
+  const authorCount = candidate.book.authors?.length ?? 0;
+  const hasIsbn = candidate.book.isbn13 || candidate.book.isbn10 ? 1 : 0;
+
+  return (
+    matchedAuthorTokenCount * 8 +
+    overlapCount * 4 +
+    authorCount * 2 +
+    hasIsbn
+  );
+}
+
+export function pickPreferredScoredCandidate(
+  existing: ScoredCandidate,
+  incoming: ScoredCandidate
+): ScoredCandidate {
+  const existingScore = existing.scoring?.finalScore ?? existing.scoring?.score ?? 0;
+  const incomingScore = incoming.scoring?.finalScore ?? incoming.scoring?.score ?? 0;
+
+  if (incomingScore > existingScore + 1e-6) {
+    return incoming;
+  }
+
+  if (existingScore > incomingScore + 1e-6) {
+    return existing;
+  }
+
+  return scoredCandidateTieBreakScore(incoming) > scoredCandidateTieBreakScore(existing)
+    ? incoming
+    : existing;
+}
+
+export function mergeScoredCandidatesBySourceId(
+  primary: ScoredCandidate[],
+  secondary: ScoredCandidate[]
+): ScoredCandidate[] {
+  const bySourceId = new Map<string, ScoredCandidate>();
+  const withoutSourceId: ScoredCandidate[] = [];
+
+  const addOrMerge = (candidate: ScoredCandidate) => {
+    const sourceId = normalizedCandidateSourceId(candidate);
+    if (!sourceId) {
+      withoutSourceId.push(candidate);
+      return;
+    }
+
+    const existing = bySourceId.get(sourceId);
+    if (!existing) {
+      bySourceId.set(sourceId, candidate);
+      return;
+    }
+
+    bySourceId.set(sourceId, pickPreferredScoredCandidate(existing, candidate));
+  };
+
+  for (const candidate of primary) {
+    addOrMerge(candidate);
+  }
+  for (const candidate of secondary) {
+    addOrMerge(candidate);
+  }
+
+  return [...bySourceId.values(), ...withoutSourceId];
 }
 
 function logResolverSummary(
@@ -805,6 +886,266 @@ export async function retryMetadataResolution(
 // Evidence-Driven Resolution
 // ============================================================================
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripAuthorFromQuery(query: string, author: string | null | undefined): string {
+  const trimmedQuery = query.trim();
+  if (!trimmedQuery || !author) {
+    return trimmedQuery;
+  }
+
+  const authorTrimmed = author.trim();
+  if (!authorTrimmed) {
+    return trimmedQuery;
+  }
+
+  const authorPattern = new RegExp(
+    `\\b${escapeRegExp(authorTrimmed).replace(/\s+/g, '\\s+')}\\b`,
+    'gi'
+  );
+
+  return trimmedQuery.replace(authorPattern, ' ').replace(/\s+/g, ' ').trim();
+}
+
+type ResolverHintField = 'title' | 'author';
+
+function scoreResolverHintSignal(value: string, field: ResolverHintField): number {
+  const signalTokens = buildSearchSignalKey(value).split(/\s+/).filter(Boolean);
+  if (signalTokens.length === 0) {
+    return 0;
+  }
+
+  const longTokenCount = signalTokens.filter((token) => token.length >= 5).length;
+  const longestTokenLength = signalTokens.reduce(
+    (max, token) => Math.max(max, token.length),
+    0
+  );
+  const uniqueTokenCount = new Set(signalTokens).size;
+  const extraTokenPenalty = Math.max(0, signalTokens.length - 2) * 2;
+
+  if (field === 'author') {
+    return (
+      signalTokens.length * 12 +
+      longTokenCount * 8 +
+      longestTokenLength +
+      uniqueTokenCount * 3
+    );
+  }
+
+  return (
+    longTokenCount * 10 +
+    longestTokenLength * 2 +
+    uniqueTokenCount * 4 -
+    extraTokenPenalty
+  );
+}
+
+export function sanitizeResolverHint(
+  hint: string | null | undefined,
+  field: ResolverHintField
+): string | null {
+  if (!hint) return null;
+  const trimmed = hint.trim();
+  if (trimmed.length === 0) return null;
+
+  if (field === 'title' && isMarketingLine(trimmed.toLowerCase())) {
+    return null;
+  }
+
+  const hasSignal = hasInformativeSearchSignal(trimmed, {
+    minSingleTokenLength: field === 'title' ? 5 : 4,
+    // Title hints are often noisy; require at least one strong token for multi-word hints.
+    requireLongTokenForMultiToken: field === 'title',
+    minLongTokenLength: 5,
+  });
+  if (!hasSignal) {
+    return null;
+  }
+
+  // Author hints are high-impact; reject obvious non-person fragments
+  // like "NEW YORK" or shelf/marketing leftovers.
+  if (field === 'author' && !hasUsableAuthorNameSignal(trimmed)) {
+    return null;
+  }
+
+  if (field === 'title') {
+    const focusedTitle = buildFocusedSearchTitle(trimmed);
+    // Drop title hints that collapse to pure badge/location residue.
+    if (!focusedTitle) {
+      return null;
+    }
+
+    const signalKey = buildSearchSignalKey(trimmed);
+    if (!signalKey) {
+      return null;
+    }
+
+    const focusedKey = buildSearchSignalKey(focusedTitle);
+    const shouldPreferFocusedTitle =
+      focusedKey.length > 0 &&
+      focusedKey !== signalKey &&
+      shouldPreferFocusedTitleVariant(trimmed, focusedTitle) &&
+      hasInformativeSearchSignal(focusedTitle, {
+        minSingleTokenLength: 5,
+        requireLongTokenForMultiToken: true,
+        minLongTokenLength: 5,
+      });
+
+    if (shouldPreferFocusedTitle) {
+      return focusedTitle;
+    }
+
+    // If the raw hint collapses to one normalized token, prefer that token.
+    // Example: "NEW WARANLOS" -> "waranlos".
+    const rawWordCount = trimmed.split(/\s+/).filter(Boolean).length;
+    const signalTokenCount = signalKey.split(/\s+/).filter(Boolean).length;
+    if (signalTokenCount === 1 && rawWordCount > signalTokenCount) {
+      return signalKey;
+    }
+  }
+
+  return trimmed;
+}
+
+export function selectBestResolverHint(
+  hints: Array<string | null | undefined>,
+  field: ResolverHintField
+): string | null {
+  let bestValue: string | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+  const seenKeys = new Set<string>();
+
+  for (const hint of hints) {
+    const sanitized = sanitizeResolverHint(hint, field);
+    if (!sanitized) {
+      continue;
+    }
+
+    const key = buildSearchSignalKey(sanitized);
+    if (!key || seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+
+    const score = scoreResolverHintSignal(sanitized, field);
+    if (
+      score > bestScore ||
+      (score === bestScore &&
+        bestValue !== null &&
+        sanitized.length < bestValue.length)
+    ) {
+      bestScore = score;
+      bestValue = sanitized;
+    } else if (bestValue === null) {
+      bestScore = score;
+      bestValue = sanitized;
+    }
+  }
+
+  return bestValue;
+}
+
+/**
+ * Avoid passing equivalent title/author hints into hypothesis generation.
+ *
+ * OCR occasionally duplicates the same fragment into both fields (for example
+ * "UINT INUIVOLO" as both title and author), which creates low-value echo
+ * queries. Prefer keeping the title hint and dropping the redundant author hint.
+ */
+export function dedupeEquivalentResolverHints(
+  titleHint: string | null | undefined,
+  authorHint: string | null | undefined
+): { title: string | null; author: string | null } {
+  const title = titleHint?.trim() || null;
+  const author = authorHint?.trim() || null;
+
+  if (!title || !author) {
+    return { title, author };
+  }
+
+  const titleSignalKey = buildSearchSignalKey(title);
+  const authorSignalKey = buildSearchSignalKey(author);
+  if (!titleSignalKey || !authorSignalKey) {
+    return { title, author };
+  }
+
+  if (titleSignalKey === authorSignalKey) {
+    return { title, author: null };
+  }
+
+  return { title, author };
+}
+
+export function deriveFallbackTitleFromHypotheses(
+  result: EvidenceSearchResult,
+  effectiveAuthor: string | null | undefined
+): string | null {
+  const rankedTypePriority = new Map<string, number>([
+    ['title_only', 0],
+    ['stripped', 1],
+    ['title_author', 2],
+    ['author_title', 2],
+    ['combined_lines', 3],
+    ['boost_partial', 4],
+    ['boost_combo', 5],
+    ['fallback', 6],
+  ]);
+
+  const hypotheses = [
+    ...result.hypothesisResults.map((entry) => entry.hypothesis),
+    ...result.hypotheses.hypotheses,
+  ]
+    .filter((hypothesis) => hypothesis.type !== 'isbn' && hypothesis.type !== 'author_only')
+    .sort((a, b) => {
+      const typeRankA = rankedTypePriority.get(a.type) ?? 99;
+      const typeRankB = rankedTypePriority.get(b.type) ?? 99;
+      if (typeRankA !== typeRankB) {
+        return typeRankA - typeRankB;
+      }
+      return a.priority - b.priority;
+    });
+
+  const seen = new Set<string>();
+
+  for (const hypothesis of hypotheses) {
+    const strippedQuery = stripAuthorFromQuery(hypothesis.query, effectiveAuthor);
+    if (!strippedQuery) {
+      continue;
+    }
+
+    const focusedTitle = buildFocusedSearchTitle(strippedQuery);
+    const attempts = shouldPreferFocusedTitleVariant(strippedQuery, focusedTitle)
+      ? [focusedTitle, strippedQuery]
+      : [strippedQuery];
+
+    for (const attempt of attempts) {
+      const normalized = attempt.trim();
+      if (!normalized) {
+        continue;
+      }
+
+      const dedupKey = normalized.toLowerCase();
+      if (seen.has(dedupKey)) {
+        continue;
+      }
+      seen.add(dedupKey);
+
+      const hasSignal = hasInformativeSearchSignal(normalized, {
+        minSingleTokenLength: 5,
+        requireLongTokenForMultiToken: true,
+        minLongTokenLength: 5,
+      });
+      if (hasSignal) {
+        return normalized;
+      }
+    }
+  }
+
+  return null;
+}
+
 /**
  * Resolve a single book candidate using evidence-driven search
  *
@@ -863,18 +1204,83 @@ export async function resolveBookCandidateByEvidence(
 
   // Use perFieldHints if available (from advanced extraction in spineEvidenceMerger)
   // These have better quality than raw OCR fields
-  const perFieldHints = evidence.perFieldHints;
-  const hintTitle = perFieldHints?.titleHints?.[0] || null;
-  const hintAuthor = perFieldHints?.authorHints?.[0] || null;
+  // Backward compatibility: some older candidate payloads flatten perFieldHints
+  // at candidate level instead of nesting under evidence.
+  const legacyPerFieldHints = (
+    candidate as BookCandidate & {
+      perFieldHints?: {
+        titleHints?: string[];
+        authorHints?: string[];
+      };
+    }
+  ).perFieldHints;
+  const perFieldHints = evidence.perFieldHints ?? legacyPerFieldHints;
+  const hintTitle = selectBestResolverHint(perFieldHints?.titleHints ?? [], 'title');
+  const hintAuthor = selectBestResolverHint(perFieldHints?.authorHints ?? [], 'author');
+  const fallbackTitle = selectBestResolverHint([ocrTitle], 'title');
+  const fallbackAuthor = selectBestResolverHint([ocrAuthor], 'author');
 
   // Use perFieldHints for better query generation if available
-  const effectiveTitle = hintTitle || ocrTitle;
-  const effectiveAuthor = hintAuthor || ocrAuthor;
+  const dedupedHints = dedupeEquivalentResolverHints(
+    hintTitle || fallbackTitle,
+    hintAuthor || fallbackAuthor
+  );
+  const effectiveTitle = dedupedHints.title;
+  const effectiveAuthor = dedupedHints.author;
+  const evidenceLinesForSearch = [...evidenceLines];
+  const seenEvidenceSignalKeys = new Set<string>();
+  for (const line of evidenceLinesForSearch) {
+    const key = buildSearchSignalKey(line);
+    if (key) {
+      seenEvidenceSignalKeys.add(key);
+    }
+  }
+
+  const addHintLineToEvidence = (hint: string | null | undefined): boolean => {
+    if (!hint || !hasStrongEvidenceLineSignal(hint)) {
+      return false;
+    }
+
+    const key = buildSearchSignalKey(hint);
+    if (!key || seenEvidenceSignalKeys.has(key)) {
+      return false;
+    }
+
+    evidenceLinesForSearch.push(hint);
+    seenEvidenceSignalKeys.add(key);
+    return true;
+  };
+
+  const hasStrongRawEvidenceSignal = hasStrongEvidenceSignal(evidenceLines);
+  const hasUsableRawAuthorSignal = evidenceLines.some((line) =>
+    hasUsableAuthorNameSignal(line)
+  );
+  let injectedHintLineCount = 0;
+
+  // If merged OCR lines are weak, enrich evidence with high-signal hints so
+  // scoring can still evaluate candidates against meaningful text.
+  if (!hasStrongRawEvidenceSignal) {
+    if (addHintLineToEvidence(hintTitle)) injectedHintLineCount += 1;
+    if (addHintLineToEvidence(hintAuthor)) injectedHintLineCount += 1;
+
+    if (injectedHintLineCount === 0) {
+      if (addHintLineToEvidence(fallbackTitle)) injectedHintLineCount += 1;
+      if (addHintLineToEvidence(fallbackAuthor)) injectedHintLineCount += 1;
+    }
+  }
 
   // Log only in verbose mode
   if (verbose) {
-    console.log(`[EvidenceResolver] candidateId="${candidate.id}" evidenceLines=${evidenceLines.length}`);
+    console.log(
+      `[EvidenceResolver] candidateId="${candidate.id}" evidenceLines=${evidenceLines.length} ` +
+        `searchEvidenceLines=${evidenceLinesForSearch.length} strongRawSignal=${hasStrongRawEvidenceSignal}`
+    );
     console.log(`[EvidenceResolver]   effectiveTitle="${effectiveTitle}" effectiveAuthor="${effectiveAuthor}"`);
+    if (injectedHintLineCount > 0) {
+      console.log(
+        `[EvidenceResolver]   injectedHintLines=${injectedHintLineCount} due_to=low_raw_signal`
+      );
+    }
   }
 
   // Get sourceKind from evidence for ISBN policy (default to spine_crop)
@@ -883,7 +1289,7 @@ export async function resolveBookCandidateByEvidence(
   // - back_cover/inside_page: Valid ISBN triggers lookup and scoring boost
   const sourceKind = evidence.sourceKind ?? 'spine_crop';
 
-  console.log(`[EvidenceResolver] Resolving candidate ${candidate.id} with ${evidenceLines.length} evidence lines (sourceKind=${sourceKind})`);
+  console.log(`[EvidenceResolver] Resolving candidate ${candidate.id} with ${evidenceLinesForSearch.length} evidence lines (sourceKind=${sourceKind})`);
 
   try {
     const provider = new OpenLibraryProvider();
@@ -893,7 +1299,7 @@ export async function resolveBookCandidateByEvidence(
     // PASS 1: Initial search with source-aware ISBN policy
     // Use effectiveTitle/Author from perFieldHints (better extraction) over raw OCR
     const pass1Result = await provider.searchByEvidence(
-      evidenceLines,
+      evidenceLinesForSearch,
       effectiveTitle,
       effectiveAuthor,
       1,
@@ -905,10 +1311,17 @@ export async function resolveBookCandidateByEvidence(
 
     let result = pass1Result;
     let boostTriggered = false;
+    const hasBoostEligibleSignal =
+      hasStrongRawEvidenceSignal ||
+      hasUsableRawAuthorSignal ||
+      injectedHintLineCount > 0;
+    const hasPass1Hypotheses =
+      pass1Result.queriesTriedCount > 0 || pass1Result.hypothesisResults.length > 0;
 
     // AUTO-BOOST: If pass 1 decision is not accept_high/accept_medium, run boost pass
     if (
       AUTO_BOOST_ENABLED &&
+      (hasBoostEligibleSignal || hasPass1Hypotheses) &&
       pass1Decision !== 'accept_high' &&
       pass1Decision !== 'accept_medium'
     ) {
@@ -921,7 +1334,7 @@ export async function resolveBookCandidateByEvidence(
       // PASS 2: Boost search with expanded hypotheses (same sourceKind)
       // Use effectiveTitle/Author from perFieldHints (better extraction) over raw OCR
       const pass2Result = await provider.searchByEvidence(
-        evidenceLines,
+        evidenceLinesForSearch,
         effectiveTitle,
         effectiveAuthor,
         2,
@@ -930,14 +1343,12 @@ export async function resolveBookCandidateByEvidence(
         sourceKind
       );
 
-      // Merge candidates: pass2 candidates + pass1 candidates (deduped)
-      const mergedCandidates = [...pass2Result.scoredCandidates];
-      const seenOlids = new Set(mergedCandidates.map((sc) => sc.book.sourceId));
-      for (const sc of pass1Result.scoredCandidates) {
-        if (sc.book.sourceId && !seenOlids.has(sc.book.sourceId)) {
-          mergedCandidates.push(sc);
-        }
-      }
+      // Merge candidates from both passes and keep the strongest variant for
+      // duplicate source IDs (instead of first-wins).
+      const mergedCandidates = mergeScoredCandidatesBySourceId(
+        pass2Result.scoredCandidates,
+        pass1Result.scoredCandidates
+      );
 
       // Re-sort merged candidates by score
       mergedCandidates.sort((a, b) => (b.scoring?.score ?? 0) - (a.scoring?.score ?? 0));
@@ -968,6 +1379,15 @@ export async function resolveBookCandidateByEvidence(
       };
 
       console.log(`[EvidenceResolver] Boost pass 2 merged decision=${result.decision} (pass1=${pass1Decision}, pass2Raw=${pass2Result.decision})`);
+    } else if (
+      AUTO_BOOST_ENABLED &&
+      pass1Decision !== 'accept_high' &&
+      pass1Decision !== 'accept_medium' &&
+      !hasBoostEligibleSignal
+    ) {
+      console.log(
+        `[EvidenceResolver] Skipping boost pass 2 due_to=insufficient_signal candidateId="${candidate.id}"`
+      );
     }
 
     // Map decision to resolver decision
@@ -979,6 +1399,21 @@ export async function resolveBookCandidateByEvidence(
 
     // Check if this is an auto-persist decision (accept_high or accept_medium)
     const autoPersist = shouldAutoPersist(result.decision);
+    const derivedFallbackTitle = deriveFallbackTitleFromHypotheses(result, effectiveAuthor);
+    const fallbackTitleForExternalLookup = selectBestResolverHint(
+      [effectiveTitle, derivedFallbackTitle],
+      'title'
+    );
+
+    if (
+      verbose &&
+      fallbackTitleForExternalLookup &&
+      (!effectiveTitle || fallbackTitleForExternalLookup !== effectiveTitle)
+    ) {
+      console.log(
+        `[EvidenceResolver] Derived fallback title from hypotheses: "${fallbackTitleForExternalLookup}"`
+      );
+    }
 
     switch (result.decision) {
       case 'accept_high':
@@ -1038,36 +1473,62 @@ export async function resolveBookCandidateByEvidence(
       default:
         // Open Library rejected - try Google Books fallback before giving up
         // This helps find books that aren't in Open Library
-        if (effectiveTitle) {
-          console.log(`[EvidenceResolver] Rejected by Open Library - trying Google Books fallback for "${effectiveTitle}"`);
-          try {
-            const googleBooksFallbackResult = await executeTitleMatchFallbackWithGoogleBooks(
-              effectiveTitle,
-              effectiveAuthor
+        if (fallbackTitleForExternalLookup) {
+          const focusedFallbackTitle = buildFocusedSearchTitle(fallbackTitleForExternalLookup);
+          const fallbackTitleAttempts = [
+            focusedFallbackTitle,
+            fallbackTitleForExternalLookup,
+          ]
+            .map((value) => value?.trim())
+            .filter((value): value is string => Boolean(value && value.length > 0))
+            .filter((value, index, arr) => arr.findIndex((v) => v.toLowerCase() === value.toLowerCase()) === index);
+
+          for (const fallbackTitleAttempt of fallbackTitleAttempts) {
+            console.log(
+              `[EvidenceResolver] Rejected by Open Library - trying Google Books fallback for "${fallbackTitleAttempt}"`
             );
+            try {
+              const googleBooksFallbackResult = await executeTitleMatchFallbackWithGoogleBooks(
+                fallbackTitleAttempt,
+                effectiveAuthor
+              );
 
-            if (googleBooksFallbackResult.triggered && googleBooksFallbackResult.decision === 'suggest') {
-              const isGoogleBooks = googleBooksFallbackResult.reason.startsWith('google_books_');
-              const source = isGoogleBooks ? 'googleBooks' : 'openLibrary';
+              if (googleBooksFallbackResult.triggered && googleBooksFallbackResult.decision === 'suggest') {
+                const isGoogleBooks = googleBooksFallbackResult.reason.startsWith('google_books_');
+                const source = isGoogleBooks ? 'googleBooks' : 'openLibrary';
 
-              console.log(`[EvidenceResolver] Google Books fallback SUCCESS (${source}): ` +
-                `title="${googleBooksFallbackResult.suggestedTitle}", author="${googleBooksFallbackResult.suggestedAuthor}"`);
+                console.log(
+                  `[EvidenceResolver] Google Books fallback SUCCESS (${source}): ` +
+                    `title="${googleBooksFallbackResult.suggestedTitle}", author="${googleBooksFallbackResult.suggestedAuthor}"`
+                );
 
-              resolverDecision = 'suggested';
-              resolvedBook = {
-                title: googleBooksFallbackResult.suggestedTitle || effectiveTitle,
-                authors: googleBooksFallbackResult.suggestedAuthor ? [googleBooksFallbackResult.suggestedAuthor] : [],
-                source,
-                sourceId: googleBooksFallbackResult.debug.chosenCandidate?.title || 'fallback',
-              };
-              resolvedConfidence = googleBooksFallbackResult.confidence;
-              resolverDecisionReason = `google_books_fallback: ${googleBooksFallbackResult.reason}`;
-              break;
-            } else {
-              console.log(`[EvidenceResolver] Google Books fallback did not find match: ${googleBooksFallbackResult.reason}`);
+                resolverDecision = 'suggested';
+                resolvedBook = {
+                  title: googleBooksFallbackResult.suggestedTitle || fallbackTitleAttempt,
+                  authors: googleBooksFallbackResult.suggestedAuthor ? [googleBooksFallbackResult.suggestedAuthor] : [],
+                  source,
+                  sourceId: googleBooksFallbackResult.debug.chosenCandidate?.title || 'fallback',
+                };
+                resolvedConfidence = googleBooksFallbackResult.confidence;
+                resolverDecisionReason = `google_books_fallback: ${googleBooksFallbackResult.reason}`;
+                break;
+              }
+
+              console.log(
+                `[EvidenceResolver] Google Books fallback did not find match: ${googleBooksFallbackResult.reason}`
+              );
+            } catch (e: any) {
+              console.warn(`[EvidenceResolver] Google Books fallback error: ${e.message}`);
             }
-          } catch (e: any) {
-            console.warn(`[EvidenceResolver] Google Books fallback error: ${e.message}`);
+
+            // If one fallback attempt worked, skip remaining attempts.
+            if (resolverDecision === 'suggested') {
+              break;
+            }
+          }
+
+          if (resolverDecision === 'suggested') {
+            break;
           }
         }
 

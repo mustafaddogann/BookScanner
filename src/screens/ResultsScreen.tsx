@@ -24,7 +24,7 @@ import {
   NativeSyntheticEvent,
 } from 'react-native';
 import Svg, { Polygon, Circle, Text as SvgText } from 'react-native-svg';
-import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
+import { useNavigation, useRoute, useIsFocused, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo, OCRResult, BookCandidate, ResolvedBook, AcceptanceDecision, VerificationFlag } from '../types';
 import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../utils/letterbox';
@@ -44,8 +44,6 @@ import RNFS from 'react-native-fs';
 import {
   checkRescanStatus,
   getLastScannedImageUri,
-  isAutoRescanEnabled,
-  autoExportRejects,
   getServerUrl,
 } from '../services/autoExportService';
 
@@ -62,6 +60,7 @@ const { width: SCREEN_WIDTH } = Dimensions.get('window');
 export function ResultsScreen(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<ResultsRouteProp>();
+  const isFocused = useIsFocused();
   const { sessionId } = route.params;
 
   const {
@@ -181,7 +180,7 @@ export function ResultsScreen(): React.JSX.Element {
 
   // Auto-retry timer for automated testing
   useEffect(() => {
-    if (!autoRetryEnabled || metadataRetrying) return;
+    if (!isFocused || !autoRetryEnabled || metadataRetrying) return;
 
     const timer = setInterval(() => {
       console.log('[AutoRetry] Triggering automatic retry...');
@@ -208,9 +207,6 @@ export function ResultsScreen(): React.JSX.Element {
             metadataResolution: result.resolutionState,
             bookCandidates: result.resolutionState?.resolvedCandidates,
           });
-          // Export rejects to Telegram for ClawdBot analysis
-          const candidates = result.resolutionState?.resolvedCandidates || [];
-          autoExportRejects(sessionId, candidates);
         }).catch((err) => {
           console.error('[AutoRetry] Retry failed:', err);
         }).finally(() => {
@@ -223,12 +219,12 @@ export function ResultsScreen(): React.JSX.Element {
     }, autoRetryInterval * 1000);
 
     return () => clearInterval(timer);
-  }, [autoRetryEnabled, autoRetryInterval, metadataRetrying, sessionId, setAutoRetryEnabled]);
+  }, [isFocused, autoRetryEnabled, autoRetryInterval, metadataRetrying, sessionId, setAutoRetryEnabled]);
 
   // Auto-rescan polling: Check server for rebuild signals
   // When code changes are deployed, server signals the app to rescan
   useEffect(() => {
-    if (!autoRetryEnabled) return;
+    if (!isFocused || !autoRetryEnabled) return;
 
     const pollForRescan = async () => {
       try {
@@ -266,7 +262,7 @@ export function ResultsScreen(): React.JSX.Element {
       clearInterval(timer);
       clearTimeout(initialCheck);
     };
-  }, [autoRetryEnabled, navigation]);
+  }, [isFocused, autoRetryEnabled, navigation]);
 
   // TASK E: Defensive verification and fallback loader
   // If store has no rectificationResults but crops exist on disk, load them ONCE
@@ -898,10 +894,6 @@ export function ResultsScreen(): React.JSX.Element {
         metadataResolution: result.resolutionState,
         metadataQueuedForOffline: result.queuedForOffline,
       });
-
-      // Export rejects to Telegram for ClawdBot analysis
-      const candidates = result.resolutionState?.resolvedCandidates || [];
-      autoExportRejects(sessionId, candidates);
 
       console.log(`[Results] Metadata retry complete: ${result.decision.action}`);
     } catch (error: any) {

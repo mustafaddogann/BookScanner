@@ -95,17 +95,17 @@ function loadInitialValue(): boolean {
   }
 }
 
-// Load auto-retry initial value - DEFAULT IS TRUE
+// Load auto-retry initial value - DEFAULT IS FALSE
 function loadAutoRetryValue(): boolean {
   try {
     const stored = debugStorage.getBoolean(AUTO_RETRY_KEY);
-    // Default to TRUE if not set
-    const value = stored ?? true;
+    // Default to OFF unless user explicitly enables it.
+    const value = stored ?? false;
     console.log(`[AutoRetry] Loaded from storage: ${value}`);
     return value;
   } catch (error) {
     console.error('[AutoRetry] Failed to load from storage:', error);
-    return true; // Default to true on error
+    return false; // Safe default on error
   }
 }
 
@@ -119,7 +119,7 @@ const initialWriteStats: WriteStats = {
 
 export const useDebugStore = create<DebugState>((set, get) => ({
   diagnosticsEnabled: loadInitialValue(),
-  autoRetryEnabled: loadAutoRetryValue(), // Default TRUE, persisted
+  autoRetryEnabled: loadAutoRetryValue(), // Default FALSE, persisted
   autoRetryInterval: 10, // seconds
   initialized: true,
   writeStats: { ...initialWriteStats },
