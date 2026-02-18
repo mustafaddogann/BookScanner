@@ -22,6 +22,7 @@ import type {
 import { TIER_MULTIPLIERS } from './evidenceQualityService';
 import { generateMergedEvidenceCandidate } from './searchCandidateService';
 import { extractSpineFieldEvidence } from './spineFieldExtractionService';
+import { generateHypotheses as generateResolverHypotheses } from './queryHypotheses';
 import { extractIsbnsFromText } from '../utils/isbnUtils';
 import { isMetadataVerboseDebug, isFieldExtractionEnabled } from '../config/debug';
 
@@ -46,6 +47,32 @@ const TIER_THRESHOLDS = {
     minLines: 1,
   },
 };
+
+/** Keep Supabase resolver query fan-out bounded to avoid request timeouts */
+const MAX_RESOLVER_SEARCH_CANDIDATES = 3;
+
+function toQueryTokens(query: string): string[] {
+  return query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+}
+
+function extractEvidenceLines(evidence: BookEvidence): string[] {
+  if (evidence.mergedLines.length > 0) {
+    return evidence.mergedLines.map((line) => line.text);
+  }
+
+  if (evidence.mergedTextBlock.trim().length > 0) {
+    return evidence.mergedTextBlock
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+  }
+
+  return [];
+}
 
 // ============================================================================
 // Evidence Tier Classification
@@ -188,7 +215,8 @@ export function generateUIGuess(evidence: BookEvidence): UIGuess | null {
 export function buildSearchCandidates(
   evidence: BookEvidence,
   evidenceTier: EvidenceTier,
-  isbnCandidates: string[]
+  isbnCandidates: string[],
+  uiGuess: UIGuess | null = null
 ): SearchCandidate[] {
   const candidates: SearchCandidate[] = [];
 
@@ -211,10 +239,57 @@ export function buildSearchCandidates(
     candidates.push(isbnCandidate);
   }
 
-  // 2. Add merged evidence candidate
-  const mergedCandidate = generateMergedEvidenceCandidate(evidence, evidenceTier);
-  if (mergedCandidate) {
-    candidates.push(mergedCandidate);
+  const perFieldTitleHint = evidence.perFieldHints?.titleHints[0];
+  const perFieldAuthorHint = evidence.perFieldHints?.authorHints[0];
+  const titleHint = perFieldTitleHint ?? uiGuess?.title ?? undefined;
+
+  // Only attach authorHint when it comes from perField extraction.
+  // OCR fallback author guesses frequently trigger false mismatch penalties.
+  const resolverAuthorHint = perFieldAuthorHint ?? undefined;
+  const queryAuthorHint = perFieldAuthorHint ?? uiGuess?.author ?? undefined;
+
+  const evidenceLines = extractEvidenceLines(evidence);
+  const hypothesisResult = generateResolverHypotheses(
+    evidenceLines,
+    titleHint ?? null,
+    queryAuthorHint ?? null
+  );
+
+  for (let i = 0; i < hypothesisResult.hypotheses.length; i++) {
+    if (candidates.length >= MAX_RESOLVER_SEARCH_CANDIDATES) {
+      break;
+    }
+
+    const hypothesis = hypothesisResult.hypotheses[i];
+    candidates.push({
+      query: hypothesis.query,
+      confidence: Math.max(0.55, (0.92 - i * 0.08) * TIER_MULTIPLIERS[evidenceTier]),
+      cropIndex: -1,
+      tier: evidenceTier,
+      tokens: toQueryTokens(hypothesis.query),
+      titleHint,
+      authorHint: resolverAuthorHint,
+    });
+  }
+
+  // 3. Keep merged evidence as a final fallback if hypotheses were sparse
+  if (candidates.length < MAX_RESOLVER_SEARCH_CANDIDATES) {
+    const mergedCandidate = generateMergedEvidenceCandidate(evidence, evidenceTier);
+    if (mergedCandidate) {
+      const duplicate = candidates.some(
+        (candidate) =>
+          candidate.query.trim().toLowerCase() ===
+          mergedCandidate.query.trim().toLowerCase()
+      );
+
+      if (!duplicate) {
+        candidates.push({
+          ...mergedCandidate,
+          titleHint: titleHint ?? mergedCandidate.titleHint,
+          authorHint: resolverAuthorHint,
+        });
+      }
+    }
   }
 
   // Sort by confidence
@@ -270,15 +345,16 @@ export function generateHypothesis(candidate: BookCandidate): HypothesisResult {
     );
   }
 
-  // 4. Build search candidates
+  // 4. Generate UI guess
+  const uiGuess = generateUIGuess(evidence);
+
+  // 5. Build search candidates
   const searchCandidates = buildSearchCandidates(
     evidence,
     evidenceTier,
-    isbnCandidates
+    isbnCandidates,
+    uiGuess
   );
-
-  // 5. Generate UI guess
-  const uiGuess = generateUIGuess(evidence);
 
   if (isMetadataVerboseDebug() && uiGuess) {
     console.log(

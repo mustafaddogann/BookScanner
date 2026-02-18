@@ -136,9 +136,9 @@ export type VerificationFlagType =
 
 export const VERIFICATION_PENALTIES: Record<VerificationFlagType, number> = {
   'isbn-mismatch': 0.40,
-  'author-mismatch': 0.25,
+  'author-mismatch': 0.10,
   'publisher-mismatch': 0.20,
-  'token-coverage-low': 0.20,
+  'token-coverage-low': 0.10,
   'suspicious-edition': 0.15,
   'edition-conflict': 0.15,
   'year-implausible': 0.10,
@@ -186,9 +186,9 @@ export const ACCEPTANCE_THRESHOLDS: Record<
   EvidenceTier,
   { autoAccept: number; suggest: number; ambiguous: number }
 > = {
-  strong: { autoAccept: 0.85, suggest: 0.70, ambiguous: 0.50 },
-  usable: { autoAccept: 0.88, suggest: 0.75, ambiguous: 0.55 },
-  weak: { autoAccept: 0.95, suggest: 0.85, ambiguous: 0.70 },
+  strong: { autoAccept: 0.88, suggest: 0.55, ambiguous: 0.45 },
+  usable: { autoAccept: 0.88, suggest: 0.55, ambiguous: 0.45 },
+  weak: { autoAccept: 0.92, suggest: 0.50, ambiguous: 0.40 },
   unusable: { autoAccept: 1.0, suggest: 1.0, ambiguous: 1.0 },
 };
 
