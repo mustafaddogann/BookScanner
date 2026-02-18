@@ -4,7 +4,7 @@
  *
  * Resolution strategy:
  * 1. Supabase-first (books_catalog + resolver_cache)
- * 2. Open Library fallback only when Supabase cannot resolve confidently
+ * 2. Optional Open Library fallback when Supabase cannot resolve confidently
  * 3. Write-through cache of confident fallback matches into books_catalog
  */
 
@@ -45,6 +45,9 @@ const SEARCH_LIMIT = 5;
 const OPEN_LIBRARY_FALLBACK_TIMEOUT_MS = 3500;
 const MAX_OPEN_LIBRARY_ISBN_FALLBACKS = 2;
 const MAX_OPEN_LIBRARY_SEARCH_FALLBACKS = 2;
+const ENABLE_OPEN_LIBRARY_FALLBACK =
+  (Deno.env.get('ENABLE_OPEN_LIBRARY_FALLBACK') ?? 'false').toLowerCase() ===
+  'true';
 
 const CACHE_MISS_SENTINEL = { __cache_miss: true } as const;
 
@@ -792,6 +795,7 @@ async function resolveCandidate(
   const fallbackBookKeys = new Set<string>();
 
   if (
+    ENABLE_OPEN_LIBRARY_FALLBACK &&
     shouldAttemptOpenLibraryFallback(initialDecision) &&
     (fallbackIsbns.length > 0 || fallbackQueries.length > 0)
   ) {
@@ -832,6 +836,13 @@ async function resolveCandidate(
     const rescored = scoreAndVerifyMatches(request, mergedBooks);
     matches = rescored.matches;
     verificationFlags = rescored.verificationFlags;
+  } else if (
+    !ENABLE_OPEN_LIBRARY_FALLBACK &&
+    (fallbackIsbns.length > 0 || fallbackQueries.length > 0)
+  ) {
+    console.log(
+      `[Resolver] Open Library fallback disabled (candidate=${request.candidateId})`
+    );
   }
 
   metrics.timingsMs.scoringAndDecision = Date.now() - scoringStart;
