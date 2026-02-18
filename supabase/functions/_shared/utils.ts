@@ -60,12 +60,37 @@ export function tokenize(text: string): string[] {
 // Open Library Mapping
 // ============================================================================
 
+function normalizeIsbnValue(isbn: string | null | undefined): string | null {
+  if (!isbn) return null;
+  const normalized = isbn.replace(/[^0-9Xx]/g, '').toUpperCase();
+  if (normalized.length === 10 || normalized.length === 13) {
+    return normalized;
+  }
+  return null;
+}
+
+function firstNormalizedIsbnByLength(
+  isbns: Array<string | null | undefined> | undefined,
+  length: 10 | 13
+): string | null {
+  if (!isbns || isbns.length === 0) {
+    return null;
+  }
+  for (const candidate of isbns) {
+    const normalized = normalizeIsbnValue(candidate);
+    if (normalized && normalized.length === length) {
+      return normalized;
+    }
+  }
+  return null;
+}
+
 /**
  * Map Open Library search doc to ResolvedBook.
  */
 export function mapSearchDocToBook(doc: OpenLibraryDoc): ResolvedBook {
-  const isbn13 = doc.isbn?.find((i) => i.length === 13) ?? null;
-  const isbn10 = doc.isbn?.find((i) => i.length === 10) ?? null;
+  const isbn13 = firstNormalizedIsbnByLength(doc.isbn, 13);
+  const isbn10 = firstNormalizedIsbnByLength(doc.isbn, 10);
 
   return {
     title: doc.title,
@@ -92,10 +117,13 @@ export function mapIsbnResponseToBook(
   response: OpenLibraryIsbnResponse,
   isbn: string
 ): ResolvedBook {
+  const normalizedInputIsbn = normalizeIsbnValue(isbn);
   const isbn13 =
-    response.isbn_13?.[0] ?? (isbn.length === 13 ? isbn : null);
+    firstNormalizedIsbnByLength(response.isbn_13, 13) ??
+    (normalizedInputIsbn?.length === 13 ? normalizedInputIsbn : null);
   const isbn10 =
-    response.isbn_10?.[0] ?? (isbn.length === 10 ? isbn : null);
+    firstNormalizedIsbnByLength(response.isbn_10, 10) ??
+    (normalizedInputIsbn?.length === 10 ? normalizedInputIsbn : null);
 
   // Parse publish year from date string
   let publishYear: number | null = null;
@@ -118,7 +146,7 @@ export function mapIsbnResponseToBook(
       ? `https://covers.openlibrary.org/b/id/${response.covers[0]}-M.jpg`
       : null,
     source: 'openLibrary',
-    sourceId: `/isbn/${isbn}`,
+    sourceId: response.key ?? `/isbn/${normalizedInputIsbn ?? isbn}`,
     pageCount: response.number_of_pages,
     subjects: response.subjects?.slice(0, 5),
   };
@@ -217,7 +245,7 @@ export function authorMatches(
 export function computeMatchSignals(
   book: ResolvedBook,
   query: QueryCandidate,
-  queryIsbn: string | null,
+  queryIsbns: string[],
   resultRank: number
 ): MatchSignals {
   // Title similarity
@@ -234,10 +262,11 @@ export function computeMatchSignals(
 
   // ISBN match (binary)
   let isbnMatch = 0.0;
-  if (queryIsbn) {
-    if (book.isbn13 === queryIsbn || book.isbn10 === queryIsbn) {
-      isbnMatch = 1.0;
-    }
+  if (queryIsbns.length > 0) {
+    const matched = queryIsbns.some((queryIsbn) =>
+      book.isbn13 === queryIsbn || book.isbn10 === queryIsbn
+    );
+    if (matched) isbnMatch = 1.0;
   }
 
   // Word coverage
@@ -316,10 +345,10 @@ export function computeComposite(normalized: NormalizedSignals): number {
 export function computeMatchScore(
   book: ResolvedBook,
   query: QueryCandidate,
-  queryIsbn: string | null,
+  queryIsbns: string[],
   resultRank: number
 ): MatchScore {
-  const signals = computeMatchSignals(book, query, queryIsbn, resultRank);
+  const signals = computeMatchSignals(book, query, queryIsbns, resultRank);
   const normalizedSignals = normalizeSignals(signals);
   const composite = computeComposite(normalizedSignals);
 
@@ -340,17 +369,27 @@ export function computeMatchScore(
 export function verifyMatch(
   book: ResolvedBook,
   query: QueryCandidate,
-  queryIsbn: string | null,
+  queryIsbns: string[],
   evidenceTokens: string[]
 ): VerificationFlag[] {
   const flags: VerificationFlag[] = [];
 
   // ISBN mismatch check
-  if (queryIsbn && book.isbn13 && book.isbn13 !== queryIsbn) {
+  const bookIsbns = [book.isbn13, book.isbn10].filter(
+    (isbn): isbn is string => Boolean(isbn)
+  );
+  const hasQueryIsbns = queryIsbns.length > 0;
+  const hasBookIsbns = bookIsbns.length > 0;
+  const hasIsbnMatch =
+    hasQueryIsbns &&
+    hasBookIsbns &&
+    queryIsbns.some((queryIsbn) => bookIsbns.includes(queryIsbn));
+
+  if (hasQueryIsbns && hasBookIsbns && !hasIsbnMatch) {
     flags.push({
       flag: 'isbn-mismatch',
       severity: 'error',
-      message: `ISBN mismatch: expected ${queryIsbn}, got ${book.isbn13}`,
+      message: `ISBN mismatch: expected one of [${queryIsbns.join(', ')}], got [${bookIsbns.join(', ')}]`,
       penalty: VERIFICATION_PENALTIES['isbn-mismatch'],
     });
   }

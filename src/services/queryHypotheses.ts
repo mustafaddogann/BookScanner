@@ -96,6 +96,33 @@ export const MAX_HYPOTHESES = PASS1_MAX_HYPOTHESES;
 // ============================================================================
 
 /**
+ * Extract surname token from a multi-word author line.
+ * Helps when OCR corrupts first name but surname remains usable.
+ */
+function extractAuthorSurname(authorLine: string | null): string | null {
+  if (!authorLine) return null;
+  const tokens = authorLine.split(/\s+/).map((t) => t.trim()).filter(Boolean);
+  if (tokens.length < 2) return null;
+  const surname = tokens[tokens.length - 1];
+  return surname.length >= 3 ? surname : null;
+}
+
+/**
+ * Extract a strong trailing title token for resilient title+surname queries.
+ * Example: "STRAIGHI INTO DARKNESS" -> "darkness".
+ */
+function extractTitleTailToken(titleLine: string | null): string | null {
+  if (!titleLine) return null;
+  const tokens = normalizeForScoring(titleLine);
+  for (let i = tokens.length - 1; i >= 0; i--) {
+    if (tokens[i].length >= 4) {
+      return tokens[i];
+    }
+  }
+  return null;
+}
+
+/**
  * Generate search hypotheses from evidence lines
  *
  * @param evidenceLines - Raw text lines from merged OCR evidence
@@ -185,6 +212,40 @@ export function generateHypotheses(
       'title_author',
       10,
       `Title "${bestTitle}" + author "${bestAuthor}"`
+    );
+  }
+
+  // 2b) Title + surname fallback (first name OCR is often noisier than surname)
+  const bestAuthorSurname = extractAuthorSurname(bestAuthor);
+  if (bestTitle && bestAuthorSurname) {
+    addHypothesis(
+      `${bestTitle} ${bestAuthorSurname}`,
+      'title_author',
+      12,
+      `Title "${bestTitle}" + author surname "${bestAuthorSurname}"`
+    );
+    addHypothesis(
+      `${bestAuthorSurname} ${bestTitle}`,
+      'author_title',
+      13,
+      `Author surname "${bestAuthorSurname}" + title "${bestTitle}"`
+    );
+  }
+
+  // 2c) Title tail + surname fallback for OCR-corrupted middle title tokens.
+  const bestTitleTailToken = extractTitleTailToken(bestTitle);
+  if (bestTitleTailToken && bestAuthorSurname) {
+    addHypothesis(
+      `${bestTitleTailToken} ${bestAuthorSurname}`,
+      'title_author',
+      14,
+      `Title tail "${bestTitleTailToken}" + author surname "${bestAuthorSurname}"`
+    );
+    addHypothesis(
+      `${bestAuthorSurname} ${bestTitleTailToken}`,
+      'author_title',
+      15,
+      `Author surname "${bestAuthorSurname}" + title tail "${bestTitleTailToken}"`
     );
   }
 
@@ -460,6 +521,22 @@ export function generateBoostHypotheses(
         110,
         `Title "${titleLine}" + author "${authorLine}"`
       );
+
+      const authorSurname = extractAuthorSurname(authorLine);
+      if (authorSurname) {
+        addHypothesis(
+          `${titleLine} ${authorSurname}`,
+          'boost_combo',
+          110.5,
+          `Title "${titleLine}" + author surname "${authorSurname}"`
+        );
+        addHypothesis(
+          `${authorSurname} ${titleLine}`,
+          'boost_combo',
+          110.6,
+          `Author surname "${authorSurname}" + title "${titleLine}"`
+        );
+      }
     }
   }
 
@@ -552,38 +629,31 @@ export function generateBoostHypotheses(
   }
 
   // =========================================================================
-  // Strategy 5k: Character-level corrections for longer words (6+ chars)
+  // Strategy 5k: Conservative terminal I->T correction for longer words
   // =========================================================================
-  // Try single-character substitutions on longer words
+  // OCR often flips a terminal T to I (e.g., STRAIGHI -> STRAIGHT).
   for (const line of sortedByLength.slice(0, 3)) {
     const tokens = line.split(/\s+/).filter(Boolean);
     const correctedTokens: string[] = [];
     let madeChanges = false;
 
     for (const token of tokens) {
-      if (token.length >= 6) {
-        // Try common single-char OCR errors
-        const variations = [
-          token.replace(/F/g, 'E'),  // F→E common in OCR
-          token.replace(/I/g, 'L'),  // I→L confusion
-          token.replace(/N/g, 'M'),  // N→M confusion
-        ];
-        // Use first variation that differs
-        const variant = variations.find(v => v !== token);
-        if (variant) {
-          correctedTokens.push(variant);
-          madeChanges = true;
-        } else {
-          correctedTokens.push(token);
-        }
-      } else {
-        correctedTokens.push(token);
+      if (token.length >= 6 && token.endsWith('I')) {
+        correctedTokens.push(`${token.substring(0, token.length - 1)}T`);
+        madeChanges = true;
+        continue;
       }
+      if (token.length >= 6 && token.endsWith('i')) {
+        correctedTokens.push(`${token.substring(0, token.length - 1)}t`);
+        madeChanges = true;
+        continue;
+      }
+      correctedTokens.push(token);
     }
 
     if (madeChanges) {
       const correctedLine = correctedTokens.join(' ');
-      addHypothesis(correctedLine, 'boost_partial', 139, `Char correction: "${correctedLine}"`);
+      addHypothesis(correctedLine, 'boost_partial', 133, `Terminal I->T correction: "${correctedLine}"`);
     }
   }
 
@@ -789,24 +859,37 @@ export function generateBoostHypotheses(
   // =========================================================================
   // Strategy 5n: Very short OCR text - use wildcard patterns
   // =========================================================================
-  // For 3-4 character OCR fragments, try adding wildcard or common endings
-  const shortFragments = sortedByLength.filter(line => line.length >= 3 && line.length <= 4);
-  for (const frag of shortFragments.slice(0, 3)) {
-    // Try common word endings for truncated text
-    const endings = ['EN', 'VEN', 'P', 'VE', 'PHEN', 'IGHT', 'AVY'];
-    for (const ending of endings) {
-      const extended = frag + ending;
-      if (extended.length >= MIN_QUERY_LENGTH) {
-        addHypothesis(extended, 'boost_partial', 149.5, `Short fragment extended: "${extended}"`);
+  // For 3-4 character OCR fragments, try adding wildcard or common endings.
+  // Keep this conservative: only run when we don't already have a substantive line.
+  const hasSubstantiveLine = sortedByLength.some((line) =>
+    normalizeForScoring(line).some((token) => token.length >= 5)
+  );
+  const genericShortFragments = new Set(['the', 'new', 'big', 'old', 'last', 'first']);
+  const shortFragments = sortedByLength.filter((line) => {
+    if (line.length < 3 || line.length > 4) return false;
+    const normalized = line.toLowerCase().replace(/[^a-z]/g, '');
+    if (!normalized) return false;
+    return !genericShortFragments.has(normalized);
+  });
+
+  if (!hasSubstantiveLine) {
+    for (const frag of shortFragments.slice(0, 3)) {
+      // Try common word endings for truncated text
+      const endings = ['EN', 'VEN', 'P', 'VE', 'PHEN', 'IGHT', 'AVY'];
+      for (const ending of endings) {
+        const extended = frag + ending;
+        if (extended.length >= MIN_QUERY_LENGTH) {
+          addHypothesis(extended, 'boost_partial', 149.5, `Short fragment extended: "${extended}"`);
+        }
       }
-    }
-    
-    // For very short fragments, try common word prefixes (reverse truncation)
-    const prefixes = ['THE ', 'NEW ', 'BIG ', 'OLD ', 'LAST ', 'FIRST '];
-    for (const prefix of prefixes) {
-      const extended = prefix + frag;
-      if (extended.length >= MIN_QUERY_LENGTH) {
-        addHypothesis(extended, 'boost_partial', 149.6, `Short fragment prefixed: "${extended}"`);
+
+      // For very short fragments, try common word prefixes (reverse truncation)
+      const prefixes = ['THE ', 'NEW ', 'BIG ', 'OLD ', 'LAST ', 'FIRST '];
+      for (const prefix of prefixes) {
+        const extended = prefix + frag;
+        if (extended.length >= MIN_QUERY_LENGTH) {
+          addHypothesis(extended, 'boost_partial', 149.6, `Short fragment prefixed: "${extended}"`);
+        }
       }
     }
   }

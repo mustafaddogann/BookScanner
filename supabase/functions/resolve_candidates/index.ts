@@ -2,12 +2,10 @@
  * Edge Function: resolve_candidates
  * Gate 9: Resolver + Scoring + Verification + Acceptance
  *
- * Resolves book candidates by:
- * 1. Checking cache for existing results
- * 2. Calling Open Library API for ISBN and search lookups
- * 3. Scoring and ranking matches
- * 4. Verifying matches against evidence
- * 5. Making acceptance decisions
+ * Resolution strategy:
+ * 1. Supabase-first (books_catalog + resolver_cache)
+ * 2. Open Library fallback only when Supabase cannot resolve confidently
+ * 3. Write-through cache of confident fallback matches into books_catalog
  */
 
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2';
@@ -19,11 +17,12 @@ import {
   ScoredMatch,
   OpenLibrarySearchResponse,
   OpenLibraryIsbnResponse,
-  EvidenceTier,
   VerificationFlag,
   RateLimitState,
   RATE_LIMIT,
   ResolverEvent,
+  AcceptanceDecision,
+  ResolutionMetrics,
 } from '../_shared/types.ts';
 import {
   normalizeQuery,
@@ -43,10 +42,44 @@ import {
 
 const OPEN_LIBRARY_BASE = 'https://openlibrary.org';
 const SEARCH_LIMIT = 5;
-const REQUEST_TIMEOUT_MS = 10000;
+const OPEN_LIBRARY_FALLBACK_TIMEOUT_MS = 3500;
+const MAX_OPEN_LIBRARY_ISBN_FALLBACKS = 2;
+const MAX_OPEN_LIBRARY_SEARCH_FALLBACKS = 2;
+
+const CACHE_MISS_SENTINEL = { __cache_miss: true } as const;
 
 // In-memory rate limiting (best-effort, per-instance)
 const rateLimitMap = new Map<string, RateLimitState>();
+
+// ============================================================================
+// Types
+// ============================================================================
+
+type SupabaseClient = ReturnType<typeof createClient>;
+
+interface CacheLookupResult {
+  hit: boolean;
+  data: unknown | null;
+  knownMiss: boolean;
+}
+
+interface IsbnSupabaseLookupResult {
+  book: ResolvedBook | null;
+  needsOpenLibraryFallback: boolean;
+}
+
+interface SearchSupabaseLookupResult {
+  books: ResolvedBook[];
+  needsOpenLibraryFallback: boolean;
+}
+
+interface ResolveCandidateResult {
+  matches: ScoredMatch[];
+  cacheHit: boolean;
+  verificationFlags: VerificationFlag[];
+  metrics: ResolutionMetrics;
+  fallbackBookKeys: string[];
+}
 
 // ============================================================================
 // CORS Headers
@@ -58,6 +91,135 @@ const corsHeaders = {
     'authorization, x-client-info, apikey, content-type',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+function createEmptyResolutionMetrics(total = 0): ResolutionMetrics {
+  return {
+    cache: {
+      catalogHits: 0,
+      resolverCacheHits: 0,
+      resolverCacheMisses: 0,
+    },
+    fallback: {
+      triggered: false,
+      openLibraryIsbnCalls: 0,
+      openLibrarySearchCalls: 0,
+    },
+    timingsMs: {
+      supabaseLookup: 0,
+      fallbackLookup: 0,
+      scoringAndDecision: 0,
+      total,
+    },
+  };
+}
+
+function normalizeIsbn(isbn: string): string {
+  return isbn.replace(/[^0-9Xx]/g, '').toUpperCase();
+}
+
+function normalizeCatalogIsbn(
+  isbn: string | null | undefined,
+  expectedLength: 10 | 13
+): string | null {
+  if (!isbn) return null;
+  const normalized = normalizeIsbn(isbn);
+  return normalized.length === expectedLength ? normalized : null;
+}
+
+function normalizeRequestIsbns(isbnCandidates: ResolveRequest['isbnCandidates']): string[] {
+  const unique = new Set<string>();
+  for (const candidate of isbnCandidates) {
+    const normalized = normalizeIsbn(candidate.isbn);
+    if (normalized.length === 10 || normalized.length === 13) {
+      unique.add(normalized);
+    }
+  }
+  return Array.from(unique);
+}
+
+function buildBookIdentityKey(book: ResolvedBook): string {
+  return [
+    book.source,
+    book.sourceId ?? '',
+    book.isbn13 ?? '',
+    book.isbn10 ?? '',
+    normalizeQuery(book.title),
+  ].join('|');
+}
+
+function isCacheMissPayload(payload: unknown): boolean {
+  return Boolean(
+    payload &&
+      typeof payload === 'object' &&
+      '__cache_miss' in payload &&
+      (payload as Record<string, unknown>).__cache_miss === true
+  );
+}
+
+function isFallbackDecisionConfident(decision: AcceptanceDecision): boolean {
+  if (decision.type === 'auto-accept') {
+    return true;
+  }
+  if (decision.type === 'suggest') {
+    return decision.confidence >= 0.9;
+  }
+  return false;
+}
+
+function shouldAttemptOpenLibraryFallback(decision: AcceptanceDecision): boolean {
+  return decision.type === 'no-match' || decision.type === 'ambiguous';
+}
+
+function deduplicateBooks(books: ResolvedBook[]): ResolvedBook[] {
+  const seen = new Set<string>();
+  return books.filter((book) => {
+    const key = buildBookIdentityKey(book);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function scoreAndVerifyMatches(
+  request: ResolveRequest,
+  books: ResolvedBook[]
+): { matches: ScoredMatch[]; verificationFlags: VerificationFlag[] } {
+  const primaryQuery = request.queries[0] ?? {
+    query: '',
+    confidence: 0,
+    source: 'ocr' as const,
+  };
+  const allQueryIsbns = normalizeRequestIsbns(request.isbnCandidates);
+
+  const scoredMatches: ScoredMatch[] = books.map((book, index) => ({
+    book,
+    score: computeMatchScore(book, primaryQuery, allQueryIsbns, index),
+  }));
+
+  scoredMatches.sort((a, b) => b.score.composite - a.score.composite);
+
+  const verificationFlags: VerificationFlag[] = [];
+  if (scoredMatches.length > 0) {
+    const evidenceTokens = request.queries.flatMap((q) => tokenize(q.query));
+    verificationFlags.push(
+      ...verifyMatch(
+        scoredMatches[0].book,
+        primaryQuery,
+        allQueryIsbns,
+        evidenceTokens
+      )
+    );
+  }
+
+  return {
+    matches: scoredMatches,
+    verificationFlags,
+  };
+}
 
 // ============================================================================
 // Rate Limiting
@@ -90,14 +252,14 @@ function checkRateLimit(clientId: string): {
 // ============================================================================
 
 async function lookupCache(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   provider: string,
   queryType: string,
   queryHash: string
-): Promise<{ hit: boolean; data: unknown | null }> {
+): Promise<CacheLookupResult> {
   const { data, error } = await supabase
     .from('resolver_cache')
-    .select('response_json, id')
+    .select('response_json, id, hit_count')
     .eq('provider', provider)
     .eq('query_type', queryType)
     .eq('query_hash', queryHash)
@@ -105,34 +267,44 @@ async function lookupCache(
     .single();
 
   if (error || !data) {
-    return { hit: false, data: null };
+    return { hit: false, data: null, knownMiss: false };
   }
 
   // Update hit count (fire-and-forget)
   supabase
     .from('resolver_cache')
-    .update({ hit_count: data.hit_count + 1, last_hit_at: new Date().toISOString() })
+    .update({
+      hit_count: (typeof data.hit_count === 'number' ? data.hit_count : 0) + 1,
+      last_hit_at: new Date().toISOString(),
+    })
     .eq('id', data.id)
     .then(() => {});
 
-  return { hit: true, data: data.response_json };
+  const knownMiss = isCacheMissPayload(data.response_json);
+  return {
+    hit: true,
+    data: knownMiss ? null : data.response_json,
+    knownMiss,
+  };
 }
 
 async function writeCache(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   provider: string,
   queryType: string,
   queryHash: string,
   queryText: string,
   responseJson: unknown
 ): Promise<void> {
+  const payload = responseJson ?? CACHE_MISS_SENTINEL;
+
   const { error } = await supabase.from('resolver_cache').upsert(
     {
       provider,
       query_type: queryType,
       query_hash: queryHash,
       query_text: queryText,
-      response_json: responseJson,
+      response_json: payload,
       expires_at: getDefaultCacheTtl().toISOString(),
     },
     {
@@ -150,7 +322,7 @@ async function writeCache(
 // ============================================================================
 
 async function logEvent(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   event: ResolverEvent
 ): Promise<void> {
   const { error } = await supabase.from('resolver_events').insert({
@@ -173,7 +345,7 @@ async function logEvent(
 }
 
 // ============================================================================
-// Local Catalog Lookup (books_catalog via pg_trgm)
+// Supabase Catalog Lookup (books_catalog + resolver_cache)
 // ============================================================================
 
 function mapCatalogRowToBook(row: {
@@ -186,8 +358,9 @@ function mapCatalogRowToBook(row: {
   publisher: string | null;
   publish_year: string | null;
   cover_url: string | null;
-  resolver_key: string | null;
 }): ResolvedBook {
+  const source = row.provider === 'googleBooks' ? 'googleBooks' : 'openLibrary';
+
   return {
     title: row.title,
     authors: row.authors ?? [],
@@ -197,20 +370,25 @@ function mapCatalogRowToBook(row: {
     publishYear: row.publish_year ? parseInt(row.publish_year, 10) || null : null,
     edition: null,
     coverUrl: row.cover_url,
-    source: 'openLibrary',
-    sourceId: row.resolver_key ?? `${row.provider}:${row.provider_id}`,
+    source,
+    sourceId: row.provider_id,
   };
 }
 
 async function lookupCatalogByIsbn(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   isbn: string
 ): Promise<ResolvedBook | null> {
-  const column = isbn.length === 13 ? 'isbn13' : 'isbn10';
+  const normalizedIsbn = normalizeIsbn(isbn);
+  const column = normalizedIsbn.length === 13 ? 'isbn13' : normalizedIsbn.length === 10 ? 'isbn10' : null;
+  if (!column) {
+    return null;
+  }
+
   const { data, error } = await supabase
     .from('books_catalog')
-    .select('provider, provider_id, isbn13, isbn10, title, authors, publisher, publish_year, cover_url, resolver_key')
-    .eq(column, isbn)
+    .select('provider, provider_id, isbn13, isbn10, title, authors, publisher, publish_year, cover_url')
+    .eq(column, normalizedIsbn)
     .limit(1)
     .single();
 
@@ -219,7 +397,7 @@ async function lookupCatalogByIsbn(
 }
 
 async function searchCatalogFuzzy(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   query: string,
   limit: number = SEARCH_LIMIT
 ): Promise<ResolvedBook[]> {
@@ -231,26 +409,107 @@ async function searchCatalogFuzzy(
 
   if (error || !data || data.length === 0) return [];
 
-  return data.map((row: any) => mapCatalogRowToBook(row));
+  return data.map((row: any) =>
+    mapCatalogRowToBook({
+      provider: row.provider,
+      provider_id: row.provider_id,
+      isbn13: row.isbn13,
+      isbn10: row.isbn10,
+      title: row.title,
+      authors: row.authors,
+      publisher: row.publisher,
+      publish_year: row.publish_year,
+      cover_url: row.cover_url,
+    })
+  );
 }
 
-function deduplicateBooks(books: ResolvedBook[]): ResolvedBook[] {
-  const seen = new Set<string>();
-  return books.filter((book) => {
-    // Deduplicate by sourceId, isbn13, or isbn10
-    const keys = [book.sourceId, book.isbn13, book.isbn10].filter(Boolean);
-    for (const key of keys) {
-      if (seen.has(key!)) return false;
+async function lookupIsbnFromSupabase(
+  supabase: SupabaseClient,
+  isbn: string,
+  metrics: ResolutionMetrics
+): Promise<IsbnSupabaseLookupResult> {
+  const normalizedIsbn = normalizeIsbn(isbn);
+
+  // 1) Catalog hit (fastest path)
+  const catalogBook = await lookupCatalogByIsbn(supabase, normalizedIsbn);
+  if (catalogBook) {
+    metrics.cache.catalogHits += 1;
+    console.log(`[Resolver][Supabase] ISBN catalog hit: ${normalizedIsbn} -> "${catalogBook.title}"`);
+    return { book: catalogBook, needsOpenLibraryFallback: false };
+  }
+
+  // 2) resolver_cache hit
+  const queryHash = await computeHash(normalizedIsbn);
+  const cached = await lookupCache(supabase, 'openLibrary', 'isbn', queryHash);
+  if (cached.hit) {
+    metrics.cache.resolverCacheHits += 1;
+    if (cached.data) {
+      const book = mapIsbnResponseToBook(cached.data as OpenLibraryIsbnResponse, normalizedIsbn);
+      console.log(`[Resolver][Supabase] ISBN resolver_cache hit: ${normalizedIsbn} -> "${book.title}"`);
+      return { book, needsOpenLibraryFallback: false };
     }
-    for (const key of keys) {
-      seen.add(key!);
-    }
-    return true;
-  });
+
+    console.log(`[Resolver][Supabase] ISBN known miss (resolver_cache): ${normalizedIsbn}`);
+    return { book: null, needsOpenLibraryFallback: false };
+  }
+
+  // 3) Cache miss (eligible for Open Library fallback if needed)
+  metrics.cache.resolverCacheMisses += 1;
+  return { book: null, needsOpenLibraryFallback: true };
+}
+
+async function searchBooksFromSupabase(
+  supabase: SupabaseClient,
+  query: string,
+  metrics: ResolutionMetrics
+): Promise<SearchSupabaseLookupResult> {
+  const normalizedQuery = normalizeQuery(query);
+  if (!normalizedQuery) {
+    return { books: [], needsOpenLibraryFallback: false };
+  }
+
+  const catalogBooks = await searchCatalogFuzzy(supabase, normalizedQuery);
+  if (catalogBooks.length > 0) {
+    metrics.cache.catalogHits += 1;
+    console.log(`[Resolver][Supabase] Search catalog hit: "${normalizedQuery}" -> ${catalogBooks.length} results`);
+  }
+
+  const queryHash = await computeHash(normalizedQuery);
+  const cached = await lookupCache(supabase, 'openLibrary', 'search', queryHash);
+
+  if (cached.hit) {
+    metrics.cache.resolverCacheHits += 1;
+
+    const cachedBooks = cached.data
+      ? ((cached.data as OpenLibrarySearchResponse).docs ?? [])
+          .slice(0, SEARCH_LIMIT)
+          .map(mapSearchDocToBook)
+      : [];
+
+    const merged = deduplicateBooks([...catalogBooks, ...cachedBooks]).slice(0, SEARCH_LIMIT);
+
+    console.log(
+      `[Resolver][Supabase] Search resolver_cache hit: "${normalizedQuery}" -> ${merged.length} merged results`
+    );
+
+    return {
+      books: merged,
+      needsOpenLibraryFallback: false,
+    };
+  }
+
+  // No resolver_cache row; fallback may be attempted only if Supabase-only decision is unresolved.
+  metrics.cache.resolverCacheMisses += 1;
+
+  return {
+    books: catalogBooks,
+    needsOpenLibraryFallback: true,
+  };
 }
 
 // ============================================================================
-// Open Library API
+// Open Library Fallback
 // ============================================================================
 
 async function fetchWithTimeout(
@@ -268,97 +527,112 @@ async function fetchWithTimeout(
   }
 }
 
-async function lookupIsbn(
-  supabase: ReturnType<typeof createClient>,
-  isbn: string
-): Promise<{ book: ResolvedBook | null; cacheHit: boolean }> {
-  // 1. Check local catalog first (fastest path)
-  const catalogBook = await lookupCatalogByIsbn(supabase, isbn);
-  if (catalogBook) {
-    console.log(`[Catalog] ISBN hit: ${isbn} → "${catalogBook.title}"`);
-    return { book: catalogBook, cacheHit: true };
-  }
+async function lookupIsbnFromOpenLibrary(
+  supabase: SupabaseClient,
+  isbn: string,
+  metrics: ResolutionMetrics,
+  evidenceTier: ResolveRequest['evidenceTier']
+): Promise<ResolvedBook | null> {
+  const normalizedIsbn = normalizeIsbn(isbn);
+  const queryHash = await computeHash(normalizedIsbn);
+  const callStart = Date.now();
 
-  const queryHash = await computeHash(isbn);
+  metrics.fallback.openLibraryIsbnCalls += 1;
 
-  // 2. Check resolver cache
-  const cached = await lookupCache(supabase, 'openLibrary', 'isbn', queryHash);
-  if (cached.hit && cached.data) {
-    const book = mapIsbnResponseToBook(
-      cached.data as OpenLibraryIsbnResponse,
-      isbn
-    );
-    return { book, cacheHit: true };
-  }
-
-  // 3. Fetch from Open Library (fallback)
   try {
-    const url = `${OPEN_LIBRARY_BASE}/isbn/${isbn}.json`;
-    const response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    const url = `${OPEN_LIBRARY_BASE}/isbn/${normalizedIsbn}.json`;
+    const response = await fetchWithTimeout(url, OPEN_LIBRARY_FALLBACK_TIMEOUT_MS);
 
     if (response.status === 404) {
-      // Cache the miss
-      await writeCache(supabase, 'openLibrary', 'isbn', queryHash, isbn, null);
-      return { book: null, cacheHit: false };
+      await writeCache(supabase, 'openLibrary', 'isbn', queryHash, normalizedIsbn, null);
+      void logEvent(supabase, {
+        eventType: 'provider_call',
+        provider: 'openLibrary',
+        queryType: 'isbn',
+        evidenceTier,
+        durationMs: Date.now() - callStart,
+        matchCount: 0,
+      });
+      return null;
     }
 
     if (!response.ok) {
-      console.error(`[OpenLibrary] ISBN lookup failed: ${response.status}`);
-      return { book: null, cacheHit: false };
+      console.error(`[Resolver][Fallback] Open Library ISBN failed: status=${response.status} isbn=${normalizedIsbn}`);
+      void logEvent(supabase, {
+        eventType: 'provider_error',
+        provider: 'openLibrary',
+        queryType: 'isbn',
+        evidenceTier,
+        durationMs: Date.now() - callStart,
+        errorCode: String(response.status),
+      });
+      return null;
     }
 
     const data: OpenLibraryIsbnResponse = await response.json();
+    await writeCache(supabase, 'openLibrary', 'isbn', queryHash, normalizedIsbn, data);
 
-    // Cache the result
-    await writeCache(supabase, 'openLibrary', 'isbn', queryHash, isbn, data);
-
-    const book = mapIsbnResponseToBook(data, isbn);
-    return { book, cacheHit: false };
+    const book = mapIsbnResponseToBook(data, normalizedIsbn);
+    void logEvent(supabase, {
+      eventType: 'provider_call',
+      provider: 'openLibrary',
+      queryType: 'isbn',
+      evidenceTier,
+      durationMs: Date.now() - callStart,
+      matchCount: 1,
+    });
+    console.log(`[Resolver][Fallback] Open Library ISBN hit: ${normalizedIsbn} -> "${book.title}"`);
+    return book;
   } catch (error) {
-    console.error('[OpenLibrary] ISBN lookup error:', error);
-    return { book: null, cacheHit: false };
+    const message = error instanceof Error ? error.message : 'unknown';
+    console.error('[Resolver][Fallback] Open Library ISBN error:', message);
+    void logEvent(supabase, {
+      eventType: 'provider_error',
+      provider: 'openLibrary',
+      queryType: 'isbn',
+      evidenceTier,
+      durationMs: Date.now() - callStart,
+      errorCode: message,
+    });
+    return null;
   }
 }
 
-async function searchBooks(
-  supabase: ReturnType<typeof createClient>,
-  query: string
-): Promise<{ books: ResolvedBook[]; cacheHit: boolean }> {
+async function searchBooksFromOpenLibrary(
+  supabase: SupabaseClient,
+  query: string,
+  metrics: ResolutionMetrics,
+  evidenceTier: ResolveRequest['evidenceTier']
+): Promise<ResolvedBook[]> {
   const normalizedQuery = normalizeQuery(query);
-
-  // 1. Check local catalog first (fuzzy trigram search)
-  const catalogBooks = await searchCatalogFuzzy(supabase, normalizedQuery);
-  if (catalogBooks.length >= SEARCH_LIMIT) {
-    console.log(`[Catalog] Search hit: "${normalizedQuery}" → ${catalogBooks.length} results`);
-    return { books: catalogBooks, cacheHit: true };
+  if (!normalizedQuery) {
+    return [];
   }
 
   const queryHash = await computeHash(normalizedQuery);
+  const callStart = Date.now();
 
-  // 2. Check resolver cache
-  const cached = await lookupCache(supabase, 'openLibrary', 'search', queryHash);
-  if (cached.hit && cached.data) {
-    const response = cached.data as OpenLibrarySearchResponse;
-    const books = response.docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
-    // Merge catalog results with cached results (catalog first, deduplicated)
-    const merged = deduplicateBooks([...catalogBooks, ...books]).slice(0, SEARCH_LIMIT);
-    return { books: merged, cacheHit: true };
-  }
+  metrics.fallback.openLibrarySearchCalls += 1;
 
-  // 3. Fetch from Open Library (fallback)
   try {
     const encodedQuery = encodeURIComponent(normalizedQuery);
     const url = `${OPEN_LIBRARY_BASE}/search.json?q=${encodedQuery}&limit=${SEARCH_LIMIT}`;
-    const response = await fetchWithTimeout(url, REQUEST_TIMEOUT_MS);
+    const response = await fetchWithTimeout(url, OPEN_LIBRARY_FALLBACK_TIMEOUT_MS);
 
     if (!response.ok) {
-      console.error(`[OpenLibrary] Search failed: ${response.status}`);
-      return { books: [], cacheHit: false };
+      console.error(`[Resolver][Fallback] Open Library search failed: status=${response.status} query="${normalizedQuery}"`);
+      void logEvent(supabase, {
+        eventType: 'provider_error',
+        provider: 'openLibrary',
+        queryType: 'search',
+        evidenceTier,
+        durationMs: Date.now() - callStart,
+        errorCode: String(response.status),
+      });
+      return [];
     }
 
     const data: OpenLibrarySearchResponse = await response.json();
-
-    // Cache the result
     await writeCache(
       supabase,
       'openLibrary',
@@ -368,19 +642,92 @@ async function searchBooks(
       data
     );
 
-    const olBooks = data.docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
-    // Merge any partial catalog results with OL results
-    const books = deduplicateBooks([...catalogBooks, ...olBooks]).slice(0, SEARCH_LIMIT);
-    return { books, cacheHit: false };
+    const docs = Array.isArray(data.docs) ? data.docs : [];
+    const books = docs.slice(0, SEARCH_LIMIT).map(mapSearchDocToBook);
+
+    void logEvent(supabase, {
+      eventType: 'provider_call',
+      provider: 'openLibrary',
+      queryType: 'search',
+      evidenceTier,
+      durationMs: Date.now() - callStart,
+      matchCount: books.length,
+    });
+
+    console.log(`[Resolver][Fallback] Open Library search: "${normalizedQuery}" -> ${books.length} results`);
+    return books;
   } catch (error) {
-    console.error('[OpenLibrary] Search error:', error);
-    // Return catalog results even if OL fails
-    if (catalogBooks.length > 0) {
-      console.log(`[Catalog] Returning ${catalogBooks.length} catalog results (OL failed)`);
-      return { books: catalogBooks, cacheHit: false };
-    }
-    return { books: [], cacheHit: false };
+    const message = error instanceof Error ? error.message : 'unknown';
+    console.error('[Resolver][Fallback] Open Library search error:', message);
+    void logEvent(supabase, {
+      eventType: 'provider_error',
+      provider: 'openLibrary',
+      queryType: 'search',
+      evidenceTier,
+      durationMs: Date.now() - callStart,
+      errorCode: message,
+    });
+    return [];
   }
+}
+
+async function persistConfidentFallbackBook(
+  supabase: SupabaseClient,
+  book: ResolvedBook,
+  confidence: number
+): Promise<void> {
+  if (book.source !== 'openLibrary' && book.source !== 'googleBooks') {
+    return;
+  }
+
+  const providerId = book.sourceId ?? book.isbn13 ?? book.isbn10;
+  if (!providerId) {
+    return;
+  }
+
+  const payload = {
+    provider: book.source,
+    provider_id: providerId,
+    title: book.title,
+    authors: book.authors ?? [],
+    isbn13: normalizeCatalogIsbn(book.isbn13, 13),
+    isbn10: normalizeCatalogIsbn(book.isbn10, 10),
+    publisher: book.publisher ?? null,
+    publish_year: book.publishYear != null ? String(book.publishYear) : null,
+    cover_url: book.coverUrl ?? null,
+    source_confidence: confidence,
+  } as const;
+
+  const { error } = await supabase
+    .from('books_catalog')
+    .upsert(payload, { onConflict: 'provider,provider_id' });
+
+  if (!error) {
+    console.log(
+      `[Resolver][CacheWriteThrough] books_catalog upsert ok provider=${book.source} provider_id="${providerId}" confidence=${confidence.toFixed(3)}`
+    );
+    return;
+  }
+
+  // Compatibility fallback for deployments that do not yet have source_confidence
+  if ((error.message ?? '').includes('source_confidence')) {
+    const { source_confidence: _ignored, ...compatPayload } = payload;
+    const { error: compatError } = await supabase
+      .from('books_catalog')
+      .upsert(compatPayload, { onConflict: 'provider,provider_id' });
+
+    if (!compatError) {
+      console.log(
+        `[Resolver][CacheWriteThrough] books_catalog upsert ok (compat mode) provider=${book.source} provider_id="${providerId}"`
+      );
+      return;
+    }
+
+    console.error('[Resolver][CacheWriteThrough] books_catalog compat upsert failed:', compatError);
+    return;
+  }
+
+  console.error('[Resolver][CacheWriteThrough] books_catalog upsert failed:', error);
 }
 
 // ============================================================================
@@ -388,73 +735,120 @@ async function searchBooks(
 // ============================================================================
 
 async function resolveCandidate(
-  supabase: ReturnType<typeof createClient>,
+  supabase: SupabaseClient,
   request: ResolveRequest
-): Promise<{
-  matches: ScoredMatch[];
-  cacheHit: boolean;
-  verificationFlags: VerificationFlag[];
-}> {
-  const allBooks: ResolvedBook[] = [];
-  let anyCacheHit = false;
+): Promise<ResolveCandidateResult> {
+  const metrics = createEmptyResolutionMetrics();
+  const supabaseBooks: ResolvedBook[] = [];
 
-  // 1. Try ISBN lookups first (highest confidence)
-  for (const isbnCandidate of request.isbnCandidates) {
-    const { book, cacheHit } = await lookupIsbn(supabase, isbnCandidate.isbn);
-    if (cacheHit) anyCacheHit = true;
-    if (book) {
-      allBooks.push(book);
+  const fallbackIsbns: string[] = [];
+  const fallbackQueries: string[] = [];
+
+  const uniqueIsbns = normalizeRequestIsbns(request.isbnCandidates);
+  const uniqueQueries = Array.from(
+    new Set(request.queries.map((q) => normalizeQuery(q.query)).filter(Boolean))
+  );
+
+  // Phase 1: Supabase-only lookups
+  const supabaseLookupStart = Date.now();
+
+  for (const isbn of uniqueIsbns) {
+    const result = await lookupIsbnFromSupabase(supabase, isbn, metrics);
+    if (result.book) {
+      supabaseBooks.push(result.book);
+    }
+    if (result.needsOpenLibraryFallback) {
+      fallbackIsbns.push(isbn);
     }
   }
 
-  // 2. Try search queries
-  for (const query of request.queries) {
-    const { books, cacheHit } = await searchBooks(supabase, query.query);
-    if (cacheHit) anyCacheHit = true;
-    allBooks.push(...books);
+  for (const query of uniqueQueries) {
+    const result = await searchBooksFromSupabase(supabase, query, metrics);
+    if (result.books.length > 0) {
+      supabaseBooks.push(...result.books);
+    }
+    if (result.needsOpenLibraryFallback) {
+      fallbackQueries.push(query);
+    }
   }
 
-  // 3. Deduplicate by sourceId
-  const seen = new Set<string>();
-  const uniqueBooks = allBooks.filter((book) => {
-    if (seen.has(book.sourceId)) return false;
-    seen.add(book.sourceId);
-    return true;
-  });
+  metrics.timingsMs.supabaseLookup = Date.now() - supabaseLookupStart;
 
-  // 4. Score each book
-  const primaryQuery = request.queries[0] ?? {
-    query: '',
-    confidence: 0,
-    source: 'ocr' as const,
-  };
-  const primaryIsbn = request.isbnCandidates[0]?.isbn ?? null;
+  const dedupedSupabaseBooks = deduplicateBooks(supabaseBooks);
 
-  const scoredMatches: ScoredMatch[] = uniqueBooks.map((book, index) => ({
-    book,
-    score: computeMatchScore(book, primaryQuery, primaryIsbn, index),
-  }));
+  const scoringStart = Date.now();
+  let { matches, verificationFlags } = scoreAndVerifyMatches(
+    request,
+    dedupedSupabaseBooks
+  );
 
-  // 5. Sort by composite score
-  scoredMatches.sort((a, b) => b.score.composite - a.score.composite);
+  // Phase 2: Conditional Open Library fallback
+  const initialDecision = makeAcceptanceDecision(
+    matches,
+    request.evidenceTier,
+    verificationFlags
+  );
 
-  // 6. Verify top match
-  const verificationFlags: VerificationFlag[] = [];
-  if (scoredMatches.length > 0) {
-    const evidenceTokens = request.queries.flatMap((q) => tokenize(q.query));
-    const topFlags = verifyMatch(
-      scoredMatches[0].book,
-      primaryQuery,
-      primaryIsbn,
-      evidenceTokens
-    );
-    verificationFlags.push(...topFlags);
+  const fallbackBookKeys = new Set<string>();
+
+  if (
+    shouldAttemptOpenLibraryFallback(initialDecision) &&
+    (fallbackIsbns.length > 0 || fallbackQueries.length > 0)
+  ) {
+    metrics.fallback.triggered = true;
+
+    const fallbackLookupStart = Date.now();
+    const fallbackBooks: ResolvedBook[] = [];
+
+    for (const isbn of fallbackIsbns.slice(0, MAX_OPEN_LIBRARY_ISBN_FALLBACKS)) {
+      const book = await lookupIsbnFromOpenLibrary(
+        supabase,
+        isbn,
+        metrics,
+        request.evidenceTier
+      );
+      if (book) {
+        fallbackBooks.push(book);
+        fallbackBookKeys.add(buildBookIdentityKey(book));
+      }
+    }
+
+    for (const query of fallbackQueries.slice(0, MAX_OPEN_LIBRARY_SEARCH_FALLBACKS)) {
+      const books = await searchBooksFromOpenLibrary(
+        supabase,
+        query,
+        metrics,
+        request.evidenceTier
+      );
+      for (const book of books) {
+        fallbackBooks.push(book);
+        fallbackBookKeys.add(buildBookIdentityKey(book));
+      }
+    }
+
+    metrics.timingsMs.fallbackLookup = Date.now() - fallbackLookupStart;
+
+    const mergedBooks = deduplicateBooks([...dedupedSupabaseBooks, ...fallbackBooks]);
+    const rescored = scoreAndVerifyMatches(request, mergedBooks);
+    matches = rescored.matches;
+    verificationFlags = rescored.verificationFlags;
   }
+
+  metrics.timingsMs.scoringAndDecision = Date.now() - scoringStart;
+  metrics.timingsMs.total =
+    metrics.timingsMs.supabaseLookup +
+    metrics.timingsMs.fallbackLookup +
+    metrics.timingsMs.scoringAndDecision;
+
+  const cacheHit =
+    metrics.cache.catalogHits > 0 || metrics.cache.resolverCacheHits > 0;
 
   return {
-    matches: scoredMatches,
-    cacheHit: anyCacheHit,
+    matches,
+    cacheHit,
     verificationFlags,
+    metrics,
+    fallbackBookKeys: Array.from(fallbackBookKeys),
   };
 }
 
@@ -502,6 +896,7 @@ Deno.serve(async (req: Request) => {
           canonicalBook: null,
           verificationFlags: [],
           processingTimeMs: Date.now() - startTime,
+          resolutionMetrics: createEmptyResolutionMetrics(Date.now() - startTime),
         } satisfies ResolveResponse),
         {
           status: 429,
@@ -551,6 +946,7 @@ Deno.serve(async (req: Request) => {
         canonicalBook: null,
         verificationFlags: [],
         processingTimeMs: Date.now() - startTime,
+        resolutionMetrics: createEmptyResolutionMetrics(Date.now() - startTime),
       };
 
       return new Response(JSON.stringify(response), {
@@ -559,10 +955,13 @@ Deno.serve(async (req: Request) => {
     }
 
     // Resolve candidate
-    const { matches, cacheHit, verificationFlags } = await resolveCandidate(
-      supabase,
-      request
-    );
+    const {
+      matches,
+      cacheHit,
+      verificationFlags,
+      metrics,
+      fallbackBookKeys,
+    } = await resolveCandidate(supabase, request);
 
     // Log cache event
     await logEvent(supabase, {
@@ -598,6 +997,20 @@ Deno.serve(async (req: Request) => {
         break;
     }
 
+    // Write-through cache: persist confident fallback matches into books_catalog
+    if (
+      canonicalBook &&
+      isFallbackDecisionConfident(acceptanceDecision) &&
+      fallbackBookKeys.includes(buildBookIdentityKey(canonicalBook))
+    ) {
+      const confidence =
+        acceptanceDecision.type === 'no-match' || acceptanceDecision.type === 'ambiguous'
+          ? 0
+          : acceptanceDecision.confidence;
+
+      await persistConfidentFallbackBook(supabase, canonicalBook, confidence);
+    }
+
     // Log decision event
     const topScore = matches[0]?.score.composite ?? 0;
     const secondScore = matches[1]?.score.composite ?? 0;
@@ -611,6 +1024,20 @@ Deno.serve(async (req: Request) => {
       durationMs: Date.now() - startTime,
     });
 
+    console.log(
+      '[ResolverMetrics] ' +
+        `session=${request.sessionId} candidate=${request.candidateId} ` +
+        `cache_hits=${metrics.cache.catalogHits + metrics.cache.resolverCacheHits} ` +
+        `cache_misses=${metrics.cache.resolverCacheMisses} ` +
+        `fallback_triggered=${metrics.fallback.triggered} ` +
+        `fallback_isbn_calls=${metrics.fallback.openLibraryIsbnCalls} ` +
+        `fallback_search_calls=${metrics.fallback.openLibrarySearchCalls} ` +
+        `phase_ms.supabase=${metrics.timingsMs.supabaseLookup} ` +
+        `phase_ms.fallback=${metrics.timingsMs.fallbackLookup} ` +
+        `phase_ms.decision=${metrics.timingsMs.scoringAndDecision} ` +
+        `phase_ms.total=${metrics.timingsMs.total}`
+    );
+
     const response: ResolveResponse = {
       status,
       cacheHit,
@@ -620,6 +1047,13 @@ Deno.serve(async (req: Request) => {
       canonicalBook,
       verificationFlags,
       processingTimeMs: Date.now() - startTime,
+      resolutionMetrics: {
+        ...metrics,
+        timingsMs: {
+          ...metrics.timingsMs,
+          total: Date.now() - startTime,
+        },
+      },
     };
 
     return new Response(JSON.stringify(response), {
@@ -641,6 +1075,7 @@ Deno.serve(async (req: Request) => {
       canonicalBook: null,
       verificationFlags: [],
       processingTimeMs: Date.now() - startTime,
+      resolutionMetrics: createEmptyResolutionMetrics(Date.now() - startTime),
     };
 
     return new Response(JSON.stringify(response), {

@@ -512,11 +512,14 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
  * Extract title and author candidates from OCR lines
  */
 + (NSDictionary *)extractTitleAuthorFromLines:(NSArray<NSDictionary *> *)lines {
-  NSString *titleCandidate = [NSNull null];
-  NSString *authorCandidate = [NSNull null];
+  NSString * _Nullable titleCandidate = nil;
+  NSString * _Nullable authorCandidate = nil;
 
   if (lines.count == 0) {
-    return @{@"titleCandidate": titleCandidate, @"authorCandidate": authorCandidate};
+    return @{
+      @"titleCandidate": titleCandidate ?: [NSNull null],
+      @"authorCandidate": authorCandidate ?: [NSNull null]
+    };
   }
 
   // Build list of clean lines (not high symbol density)
@@ -535,7 +538,10 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
   }
 
   if (cleanLines.count == 0) {
-    return @{@"titleCandidate": titleCandidate, @"authorCandidate": authorCandidate};
+    return @{
+      @"titleCandidate": titleCandidate ?: [NSNull null],
+      @"authorCandidate": authorCandidate ?: [NSNull null]
+    };
   }
 
   // Look for author patterns first
@@ -598,7 +604,7 @@ RCT_EXPORT_METHOD(isTextRecognitionAvailable:(RCTPromiseResolveBlock)resolve
   }
 
   // If no author found but we have multiple clean lines, use second-best as author
-  if ([authorCandidate isEqual:[NSNull null]] && titleCandidates.count > 1) {
+  if (authorCandidate == nil && titleCandidates.count > 1) {
     authorCandidate = titleCandidates[1][@"text"];
   }
 

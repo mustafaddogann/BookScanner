@@ -297,14 +297,23 @@ export async function runMetadataResolution(
 
   // SUPABASE RESOLVER PATH: If Supabase is configured and enabled,
   // use the Edge Function resolver instead of local provider
-  if (isSupabaseConfigured() && !isSupabaseResolverEnabled() && verbose) {
+  const supabaseConfigured = isSupabaseConfigured();
+  const supabaseResolverEnabled = isSupabaseResolverEnabled();
+  const hasBookCandidates = !!bookCandidates && bookCandidates.length > 0;
+
+  console.log(
+    `[MetadataOrchestrator] Resolver path: supabaseConfigured=${supabaseConfigured} ` +
+      `supabaseResolverEnabled=${supabaseResolverEnabled} ` +
+      `bookCandidates=${bookCandidates?.length ?? 0}`
+  );
+
+  if (supabaseConfigured && !supabaseResolverEnabled && verbose) {
     console.log('[MetadataOrchestrator] Supabase resolver disabled; using local evidence-driven resolver');
   }
   if (
-    isSupabaseConfigured() &&
-    isSupabaseResolverEnabled() &&
-    bookCandidates &&
-    bookCandidates.length > 0
+    supabaseConfigured &&
+    supabaseResolverEnabled &&
+    hasBookCandidates
   ) {
     if (verbose) {
       console.log('[MetadataOrchestrator] Using Supabase Edge Function resolver');

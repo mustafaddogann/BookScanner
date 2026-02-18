@@ -59,6 +59,24 @@ export interface ResolveResponse {
   canonicalBook: ResolvedBook | null;
   verificationFlags: VerificationFlag[];
   processingTimeMs: number;
+  resolutionMetrics?: {
+    cache: {
+      catalogHits: number;
+      resolverCacheHits: number;
+      resolverCacheMisses: number;
+    };
+    fallback: {
+      triggered: boolean;
+      openLibraryIsbnCalls: number;
+      openLibrarySearchCalls: number;
+    };
+    timingsMs: {
+      supabaseLookup: number;
+      fallbackLookup: number;
+      scoringAndDecision: number;
+      total: number;
+    };
+  };
 }
 
 export interface ScoredMatchResponse {
@@ -529,6 +547,27 @@ export async function resolveCandidate(
         offline: result.offline,
         timeout: result.timeout,
       });
+    }
+  }
+
+  if (result.success && result.response) {
+    const metrics = result.response.resolutionMetrics;
+    if (metrics) {
+      console.log(
+        `[ResolverClient] Metrics candidate=${candidate.id} ` +
+          `cacheHits=${metrics.cache.catalogHits + metrics.cache.resolverCacheHits} ` +
+          `cacheMisses=${metrics.cache.resolverCacheMisses} ` +
+          `fallback=${metrics.fallback.triggered} ` +
+          `olIsbnCalls=${metrics.fallback.openLibraryIsbnCalls} ` +
+          `olSearchCalls=${metrics.fallback.openLibrarySearchCalls} ` +
+          `ms.total=${metrics.timingsMs.total} ` +
+          `ms.supabase=${metrics.timingsMs.supabaseLookup} ` +
+          `ms.fallback=${metrics.timingsMs.fallbackLookup}`
+      );
+    } else {
+      console.warn(
+        `[ResolverClient] No resolutionMetrics in response for candidate=${candidate.id} (edge function may be outdated)`
+      );
     }
   }
 

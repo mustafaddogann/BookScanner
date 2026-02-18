@@ -40,6 +40,7 @@ export interface ResolveResponse {
   canonicalBook: ResolvedBook | null;
   verificationFlags: VerificationFlag[];
   processingTimeMs: number;
+  resolutionMetrics?: ResolutionMetrics;
 }
 
 export type ResolveStatus =
@@ -226,6 +227,7 @@ export interface OpenLibraryDoc {
 }
 
 export interface OpenLibraryIsbnResponse {
+  key?: string;
   title: string;
   authors?: Array<{ key: string }>;
   publishers?: string[];
@@ -279,4 +281,23 @@ export interface ResolverEvent {
   dominanceGap?: number;
   errorCode?: string;
   quotaRemaining?: number;
+}
+
+export interface ResolutionMetrics {
+  cache: {
+    catalogHits: number;
+    resolverCacheHits: number;
+    resolverCacheMisses: number;
+  };
+  fallback: {
+    triggered: boolean;
+    openLibraryIsbnCalls: number;
+    openLibrarySearchCalls: number;
+  };
+  timingsMs: {
+    supabaseLookup: number;
+    fallbackLookup: number;
+    scoringAndDecision: number;
+    total: number;
+  };
 }

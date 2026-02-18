@@ -194,11 +194,50 @@ const MIN_OVERLAP_COUNT = CONFIG_MIN_OVERLAP_COUNT;
 /** Maximum score when overlap is below minimum */
 const MIN_SIGNAL_SCORE_CAP = CONFIG_MIN_SIGNAL_CAP;
 
+/**
+ * Additional cap for low-signal fuzzy-only matches.
+ * Keeps weak one-token fuzzy overlaps from looking as strong as exact matches.
+ */
+const FUZZY_ONLY_SIGNAL_CAP = Math.min(MIN_SIGNAL_SCORE_CAP, MIN_SIGNAL_SCORE_CAP / 2);
+
 let hasLoggedScoringDebug = false;
 
 // ============================================================================
 // Scoring Functions
 // ============================================================================
+
+/**
+ * OCR often fuses short joiners into neighboring words (e.g., "knotsand").
+ * Expose split variants to improve overlap matching without lowering thresholds.
+ */
+const OCR_FUSED_JOINERS = ['and', 'into', 'with', 'from', 'the'];
+
+function expandMergedTokenVariants(token: string): string[] {
+  const lower = token.toLowerCase();
+  const variants = new Set<string>();
+
+  for (const joiner of OCR_FUSED_JOINERS) {
+    if (lower.length <= joiner.length + 3) continue;
+
+    if (lower.endsWith(joiner)) {
+      const base = lower.slice(0, -joiner.length);
+      if (base.length >= 3) {
+        variants.add(base);
+        variants.add(joiner);
+      }
+    }
+
+    if (lower.startsWith(joiner)) {
+      const base = lower.slice(joiner.length);
+      if (base.length >= 3) {
+        variants.add(base);
+        variants.add(joiner);
+      }
+    }
+  }
+
+  return Array.from(variants);
+}
 
 /**
  * Calculate overlap between candidate tokens and evidence tokens
@@ -224,6 +263,10 @@ function calculateTokenOverlap(
   const matchedSet = new Set<string>();
   const usedEvidenceTokens = new Set<string>();
   const evidenceTokens = Array.from(evidenceTokenSet);
+  const evidenceTokenVariants = new Map<string, string[]>();
+  for (const token of evidenceTokens) {
+    evidenceTokenVariants.set(token, [token, ...expandMergedTokenVariants(token)]);
+  }
   const matchedPairs: Array<{ candidate: string; evidence: string; similarity: number }> = [];
 
   // For each candidate token, find best matching evidence token
@@ -235,18 +278,28 @@ function calculateTokenOverlap(
       // Skip already-used evidence tokens (1:1 matching)
       if (usedEvidenceTokens.has(evidenceToken)) continue;
 
-      // Quick exact match check
-      if (candidateToken === evidenceToken) {
-        bestMatch = evidenceToken;
-        bestSimilarity = 1.0;
-        break;
+      const variants = evidenceTokenVariants.get(evidenceToken) ?? [evidenceToken];
+      let localBest = 0;
+      for (const evidenceVariant of variants) {
+        // Quick exact match check
+        if (candidateToken === evidenceVariant) {
+          localBest = 1.0;
+          break;
+        }
+
+        // Fuzzy Levenshtein match
+        const similarity = levenshteinSimilarity(candidateToken, evidenceVariant);
+        if (similarity > localBest) {
+          localBest = similarity;
+        }
       }
 
-      // Fuzzy Levenshtein match
-      const similarity = levenshteinSimilarity(candidateToken, evidenceToken);
-      if (similarity > bestSimilarity) {
-        bestSimilarity = similarity;
+      if (localBest > bestSimilarity) {
+        bestSimilarity = localBest;
         bestMatch = evidenceToken;
+        if (bestSimilarity >= 1.0) {
+          break;
+        }
       }
     }
 
@@ -419,7 +472,13 @@ export function scoreCandidate(
   // Without adjustment: titlePrecision = 3/6 = 0.50 (penalized by CAVE, KELLERMAN, ISIO)
   // With adjustment: titlePrecision = 3/5 = 0.60 (KELLERMAN excluded as author match)
   const authorMatchedEvidenceCount = authorOnlyResult.matchedPairs.length;
-  const adjustedEvidenceCountForTitle = Math.max(1, evidenceTokenCount - authorMatchedEvidenceCount);
+  const nonLexicalEvidenceCount = Array.from(evidenceTokens.tokensSet).filter(
+    (token) => !/[a-z]/i.test(token)
+  ).length;
+  const adjustedEvidenceCountForTitle = Math.max(
+    1,
+    evidenceTokenCount - authorMatchedEvidenceCount - nonLexicalEvidenceCount
+  );
   const titleTokenCount = titleTokenSet.size;
   const titlePrecision =
     adjustedEvidenceCountForTitle > 0 ? titleOnlyResult.overlapCount / adjustedEvidenceCountForTitle : 0;
@@ -515,13 +574,21 @@ export function scoreCandidate(
     score -= penalty.amount;
   }
 
-  // Minimum signal check: if overlap < 2, cap score at 0.10
+  const hasExactOverlap = overlapResult.matchedPairs.some((pair) => pair.similarity >= 0.999);
+
+  // Minimum signal check: if overlap < 2, cap score.
+  // Fuzzy-only single overlaps are capped lower than exact low-signal matches.
   let minSignalCapped = false;
   if (overlapResult.overlapCount < MIN_OVERLAP_COUNT) {
-    if (score > MIN_SIGNAL_SCORE_CAP) {
+    const lowSignalCap =
+      overlapResult.overlapCount > 0 && !hasExactOverlap
+        ? FUZZY_ONLY_SIGNAL_CAP
+        : MIN_SIGNAL_SCORE_CAP;
+
+    if (score > lowSignalCap) {
       minSignalCapped = true;
     }
-    score = Math.min(score, MIN_SIGNAL_SCORE_CAP);
+    score = Math.min(score, lowSignalCap);
   }
 
   // Clamp to [0, 1]
