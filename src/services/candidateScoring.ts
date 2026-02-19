@@ -664,8 +664,20 @@ export function scoreAndRankCandidates(
     scoring: scoreCandidate(book, evidenceTokens, options),
   }));
 
-  // Sort by score descending
-  scored.sort((a, b) => b.scoring.score - a.scoring.score);
+  // Sort by final score first, then by stronger underlying signal.
+  // This keeps low-signal capped ties from depending on incidental fetch order.
+  scored.sort((a, b) => {
+    if (b.scoring.score !== a.scoring.score) {
+      return b.scoring.score - a.scoring.score;
+    }
+    if (b.scoring.rawScore !== a.scoring.rawScore) {
+      return b.scoring.rawScore - a.scoring.rawScore;
+    }
+    if (b.scoring.overlapCount !== a.scoring.overlapCount) {
+      return b.scoring.overlapCount - a.scoring.overlapCount;
+    }
+    return b.scoring.titleScore - a.scoring.titleScore;
+  });
 
   return scored;
 }

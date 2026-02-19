@@ -123,6 +123,25 @@ function extractTitleTailToken(titleLine: string | null): string | null {
 }
 
 /**
+ * Compare phrases using scoring normalization first (falls back to lowercase text).
+ * Prevents self-echo hypotheses like "X Y X Y" when title/author collapse to same line.
+ */
+function areEquivalentHypothesisPhrases(
+  left: string | null | undefined,
+  right: string | null | undefined
+): boolean {
+  if (!left || !right) return false;
+
+  const normalizedLeft = normalizeForScoring(left).join(' ');
+  const normalizedRight = normalizeForScoring(right).join(' ');
+  if (normalizedLeft.length > 0 && normalizedRight.length > 0) {
+    return normalizedLeft === normalizedRight;
+  }
+
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
+}
+
+/**
  * Generate search hypotheses from evidence lines
  *
  * @param evidenceLines - Raw text lines from merged OCR evidence
@@ -197,6 +216,12 @@ export function generateHypotheses(
 
   if (evidence.personNameLines.length > 0) {
     bestAuthor = evidence.personNameLines[0];
+  }
+
+  // OCR sometimes classifies one line as both title and author ("NEW VARANESS").
+  // Avoid self-echo combinations that crowd out useful hypotheses.
+  if (bestTitle && bestAuthor && areEquivalentHypothesisPhrases(bestTitle, bestAuthor)) {
+    bestAuthor = null;
   }
 
   // 1) ISBN
@@ -515,6 +540,10 @@ export function generateBoostHypotheses(
   // Try all combinations of title-like and person-name lines
   for (const titleLine of evidence.titleLikeLines.slice(0, 2)) {
     for (const authorLine of evidence.personNameLines.slice(0, 2)) {
+      if (areEquivalentHypothesisPhrases(titleLine, authorLine)) {
+        continue;
+      }
+
       addHypothesis(
         `${titleLine} ${authorLine}`,
         'boost_combo',
