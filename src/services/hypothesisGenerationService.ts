@@ -29,7 +29,6 @@ import {
 } from './queryHypotheses';
 import {
   PASS1_MAX_HYPOTHESES,
-  PASS2_MAX_HYPOTHESES,
 } from '../config/metadataResolutionConfig';
 import { extractIsbnsFromText } from '../utils/isbnUtils';
 import { isMetadataVerboseDebug, isFieldExtractionEnabled } from '../config/debug';
@@ -57,11 +56,19 @@ const TIER_THRESHOLDS = {
 };
 
 /**
- * Keep Supabase resolver fan-out aligned with local resolver behavior:
- * pass1 (5) + boost pass (25) + merged fallback (1).
+ * Cap resolver fan-out to keep end-to-end scan latency acceptable on device.
+ * Includes pass1, optional boost, and merged fallback.
  */
-const MAX_RESOLVER_SEARCH_CANDIDATES =
-  PASS1_MAX_HYPOTHESES + PASS2_MAX_HYPOTHESES + 1;
+const MAX_RESOLVER_SEARCH_CANDIDATES_BY_TIER: Record<EvidenceTier, number> = {
+  strong: PASS1_MAX_HYPOTHESES + 4, // 9
+  usable: PASS1_MAX_HYPOTHESES + 2, // 7
+  weak: PASS1_MAX_HYPOTHESES,       // 5
+  unusable: 0,
+};
+
+function getMaxResolverSearchCandidates(evidenceTier: EvidenceTier): number {
+  return MAX_RESOLVER_SEARCH_CANDIDATES_BY_TIER[evidenceTier] ?? PASS1_MAX_HYPOTHESES;
+}
 
 function toQueryTokens(query: string): string[] {
   return query
@@ -231,6 +238,7 @@ export function buildSearchCandidates(
   uiGuess: UIGuess | null = null
 ): SearchCandidate[] {
   const candidates: SearchCandidate[] = [];
+  const maxResolverSearchCandidates = getMaxResolverSearchCandidates(evidenceTier);
 
   // Skip for unusable evidence
   if (evidenceTier === 'unusable') {
@@ -270,7 +278,7 @@ export function buildSearchCandidates(
   let combinedHypotheses = [...pass1Hypotheses];
 
   // Add boost hypotheses for additional recall when pass1 is sparse.
-  if (combinedHypotheses.length < MAX_RESOLVER_SEARCH_CANDIDATES) {
+  if (combinedHypotheses.length < maxResolverSearchCandidates) {
     const pass1QuerySet = getQuerySet(pass1Hypotheses);
     const boostResult = generateBoostHypotheses(
       evidenceLines,
@@ -285,7 +293,7 @@ export function buildSearchCandidates(
   }
 
   for (let i = 0; i < combinedHypotheses.length; i++) {
-    if (candidates.length >= MAX_RESOLVER_SEARCH_CANDIDATES) {
+    if (candidates.length >= maxResolverSearchCandidates) {
       break;
     }
 
@@ -302,7 +310,7 @@ export function buildSearchCandidates(
   }
 
   // 3. Keep merged evidence as a final fallback if hypotheses were sparse
-  if (candidates.length < MAX_RESOLVER_SEARCH_CANDIDATES) {
+  if (candidates.length < maxResolverSearchCandidates) {
     const mergedCandidate = generateMergedEvidenceCandidate(evidence, evidenceTier);
     if (mergedCandidate) {
       const duplicate = candidates.some(
