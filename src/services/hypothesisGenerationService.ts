@@ -27,6 +27,10 @@ import {
   generateBoostHypotheses,
   getQuerySet,
 } from './queryHypotheses';
+import {
+  PASS1_MAX_HYPOTHESES,
+  PASS2_MAX_HYPOTHESES,
+} from '../config/metadataResolutionConfig';
 import { extractIsbnsFromText } from '../utils/isbnUtils';
 import { isMetadataVerboseDebug, isFieldExtractionEnabled } from '../config/debug';
 
@@ -52,8 +56,12 @@ const TIER_THRESHOLDS = {
   },
 };
 
-/** Keep Supabase resolver query fan-out bounded to avoid request timeouts */
-const MAX_RESOLVER_SEARCH_CANDIDATES = 8;
+/**
+ * Keep Supabase resolver fan-out aligned with local resolver behavior:
+ * pass1 (5) + boost pass (25) + merged fallback (1).
+ */
+const MAX_RESOLVER_SEARCH_CANDIDATES =
+  PASS1_MAX_HYPOTHESES + PASS2_MAX_HYPOTHESES + 1;
 
 function toQueryTokens(query: string): string[] {
   return query
