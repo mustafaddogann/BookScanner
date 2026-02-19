@@ -22,7 +22,11 @@ import type {
 import { TIER_MULTIPLIERS } from './evidenceQualityService';
 import { generateMergedEvidenceCandidate } from './searchCandidateService';
 import { extractSpineFieldEvidence } from './spineFieldExtractionService';
-import { generateHypotheses as generateResolverHypotheses } from './queryHypotheses';
+import {
+  generateHypotheses as generateResolverHypotheses,
+  generateBoostHypotheses,
+  getQuerySet,
+} from './queryHypotheses';
 import { extractIsbnsFromText } from '../utils/isbnUtils';
 import { isMetadataVerboseDebug, isFieldExtractionEnabled } from '../config/debug';
 
@@ -49,7 +53,7 @@ const TIER_THRESHOLDS = {
 };
 
 /** Keep Supabase resolver query fan-out bounded to avoid request timeouts */
-const MAX_RESOLVER_SEARCH_CANDIDATES = 3;
+const MAX_RESOLVER_SEARCH_CANDIDATES = 8;
 
 function toQueryTokens(query: string): string[] {
   return query
@@ -243,32 +247,49 @@ export function buildSearchCandidates(
   const perFieldAuthorHint = evidence.perFieldHints?.authorHints[0];
   const titleHint = perFieldTitleHint ?? uiGuess?.title ?? undefined;
 
-  // Only attach authorHint when it comes from perField extraction.
-  // OCR fallback author guesses frequently trigger false mismatch penalties.
-  const resolverAuthorHint = perFieldAuthorHint ?? undefined;
+  // Use best available author hint for resolver scoring.
+  // Penalties are tuned to avoid over-punishing noisy OCR hints.
   const queryAuthorHint = perFieldAuthorHint ?? uiGuess?.author ?? undefined;
 
   const evidenceLines = extractEvidenceLines(evidence);
-  const hypothesisResult = generateResolverHypotheses(
+  const pass1HypothesisResult = generateResolverHypotheses(
     evidenceLines,
     titleHint ?? null,
     queryAuthorHint ?? null
   );
 
-  for (let i = 0; i < hypothesisResult.hypotheses.length; i++) {
+  const pass1Hypotheses = pass1HypothesisResult.hypotheses;
+  let combinedHypotheses = [...pass1Hypotheses];
+
+  // Add boost hypotheses for additional recall when pass1 is sparse.
+  if (combinedHypotheses.length < MAX_RESOLVER_SEARCH_CANDIDATES) {
+    const pass1QuerySet = getQuerySet(pass1Hypotheses);
+    const boostResult = generateBoostHypotheses(
+      evidenceLines,
+      pass1QuerySet,
+      titleHint ?? null,
+      queryAuthorHint ?? null
+    );
+    combinedHypotheses = [
+      ...combinedHypotheses,
+      ...boostResult.hypotheses,
+    ];
+  }
+
+  for (let i = 0; i < combinedHypotheses.length; i++) {
     if (candidates.length >= MAX_RESOLVER_SEARCH_CANDIDATES) {
       break;
     }
 
-    const hypothesis = hypothesisResult.hypotheses[i];
+    const hypothesis = combinedHypotheses[i];
     candidates.push({
       query: hypothesis.query,
-      confidence: Math.max(0.55, (0.92 - i * 0.08) * TIER_MULTIPLIERS[evidenceTier]),
+      confidence: Math.max(0.45, (0.95 - i * 0.06) * TIER_MULTIPLIERS[evidenceTier]),
       cropIndex: -1,
       tier: evidenceTier,
       tokens: toQueryTokens(hypothesis.query),
       titleHint,
-      authorHint: resolverAuthorHint,
+      authorHint: queryAuthorHint,
     });
   }
 
@@ -286,7 +307,7 @@ export function buildSearchCandidates(
         candidates.push({
           ...mergedCandidate,
           titleHint: titleHint ?? mergedCandidate.titleHint,
-          authorHint: resolverAuthorHint,
+          authorHint: queryAuthorHint,
         });
       }
     }
