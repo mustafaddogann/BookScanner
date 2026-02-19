@@ -10,10 +10,9 @@
 
 import { getSupabaseClient, isSupabaseConfigured } from '../config/supabase';
 import type { ResolvedBook, BookCandidate } from '../types';
-import { isMetadataVerboseDebug } from '../config/debug';
 import { useDebugStore } from '../store/useDebugStore';
 import { buildResolverKey } from './openLibraryProvider';
-import { getCapabilities, supportsResolverKey as checkResolverKeySupport } from './supabaseCapabilities';
+import { getCapabilities } from './supabaseCapabilities';
 
 /**
  * Check if verbose diagnostics logging should be enabled.
@@ -115,7 +114,7 @@ export async function upsertResolvedBook(
 
   // Determine conflict target based on capabilities
   const conflictTarget = useResolverKey ? 'resolver_key' : 'provider,provider_id';
-  const upsertMode = useResolverKey ? 'resolver_key' : 'legacy';
+  let upsertMode = useResolverKey ? 'resolver_key' : 'legacy';
 
   // ALWAYS-ON: Log upsert attempt with mode
   console.log(`[BooksCatalog] UPSERT_ATTEMPT mode=${upsertMode} resolver_key="${resolverKey}" title="${resolved.title}"`);
@@ -129,15 +128,53 @@ export async function upsertResolvedBook(
   }
 
   try {
-    // Use upsert with appropriate conflict target
-    const { data, error, status, statusText } = await client
+    const runUpsert = async (target: string) => client
       .from('books_catalog')
       .upsert(payload, {
-        onConflict: conflictTarget,
+        onConflict: target,
         ignoreDuplicates: false,
       })
       .select('id')
       .single();
+
+    // Primary write path
+    let { data, error, status, statusText } = await runUpsert(conflictTarget);
+
+    // Backward-compat fallback:
+    // Some deployments contain mixed resolver_key casing. If resolver_key upsert
+    // hits provider uniqueness, retry by provider key to update the existing row.
+    if (
+      error &&
+      useResolverKey &&
+      error.code === '23505' &&
+      error.message?.includes('books_catalog_provider_unique')
+    ) {
+      console.warn(`[BooksCatalog] UPSERT_RETRY mode=${upsertMode} -> provider_key resolver_key="${resolverKey}"`);
+      upsertMode = 'resolver_key_fallback_provider';
+      ({ data, error, status, statusText } = await runUpsert('provider,provider_id'));
+    }
+
+    // Final duplicate recovery:
+    // If a duplicate still occurs, return existing row id instead of surfacing
+    // a hard failure to the UI.
+    if (error && error.code === '23505') {
+      const { data: existing, error: existingErr } = await client
+        .from('books_catalog')
+        .select('id')
+        .eq('provider', basePayload.provider)
+        .eq('provider_id', basePayload.provider_id)
+        .single();
+
+      if (!existingErr && existing?.id) {
+        const existingId = existing.id as string;
+        console.warn(`[BooksCatalog] UPSERT_DUPLICATE_RECOVERED mode=${upsertMode} resolver_key="${resolverKey}" id=${existingId}`);
+        useDebugStore.getState().recordWriteSuccess();
+        return {
+          success: true,
+          bookId: existingId,
+        };
+      }
+    }
 
     // Log result when diagnostics enabled
     if (shouldLogVerbose()) {

@@ -11,7 +11,8 @@ const mockSelectAfterUpsert = jest.fn(() => ({ single: mockSingle }));
 const mockUpsert = jest.fn(() => ({ select: mockSelectAfterUpsert }));
 
 // For read operations: from().select().eq().single()
-const mockEq = jest.fn();
+const mockReadSingle = jest.fn();
+const mockEq = jest.fn(() => ({ eq: mockEq, single: mockReadSingle }));
 const mockSelectForRead = jest.fn(() => ({ eq: mockEq }));
 const mockFrom = jest.fn((table: string) => {
   // Return different chains based on operation
@@ -32,6 +33,14 @@ jest.mock('../../config/debug', () => ({
   isMetadataVerboseDebug: jest.fn(() => false),
 }));
 
+jest.mock('../supabaseCapabilities', () => ({
+  getCapabilities: jest.fn(async () => ({
+    supportsResolverKey: true,
+    probedAt: Date.now(),
+  })),
+  supportsResolverKey: jest.fn(() => true),
+}));
+
 import {
   upsertResolvedBook,
   getBookById,
@@ -40,6 +49,7 @@ import {
   applyUserSelectionToCandidate,
 } from '../booksCatalogService';
 import { isSupabaseConfigured } from '../../config/supabase';
+import { getCapabilities } from '../supabaseCapabilities';
 
 // ============================================================================
 // Test Utilities
@@ -90,14 +100,19 @@ function createMockCandidate(id: string = 'test-candidate'): BookCandidate {
 beforeEach(() => {
   jest.clearAllMocks();
 
+  (getCapabilities as jest.Mock).mockResolvedValue({
+    supportsResolverKey: true,
+    probedAt: Date.now(),
+  });
+
   // Setup default mock chain for upsert: from().upsert().select().single()
   mockSingle.mockResolvedValue({ data: null, error: null, status: 200, statusText: 'OK' });
   mockSelectAfterUpsert.mockReturnValue({ single: mockSingle });
   mockUpsert.mockReturnValue({ select: mockSelectAfterUpsert });
 
   // Setup default mock chain for read: from().select().eq().single()
-  const mockReadSingle = jest.fn().mockResolvedValue({ data: null, error: null });
-  mockEq.mockReturnValue({ single: mockReadSingle });
+  mockReadSingle.mockResolvedValue({ data: null, error: null });
+  mockEq.mockReturnValue({ eq: mockEq, single: mockReadSingle });
   mockSelectForRead.mockReturnValue({ eq: mockEq });
 });
 
@@ -248,6 +263,93 @@ describe('upsertResolvedBook', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toBe('Database error');
+  });
+
+  it('retries with provider key when resolver_key upsert hits provider unique', async () => {
+    mockSingle
+      .mockResolvedValueOnce({
+        data: null,
+        error: {
+          message: 'duplicate key value violates unique constraint "books_catalog_provider_unique"',
+          code: '23505',
+          details: null,
+          hint: null,
+        },
+        status: 409,
+        statusText: 'Conflict',
+      })
+      .mockResolvedValueOnce({
+        data: { id: 'uuid-fallback' },
+        error: null,
+        status: 200,
+        statusText: 'OK',
+      });
+
+    const book = createMockResolvedBook();
+    const result = await upsertResolvedBook(book);
+
+    expect(mockUpsert).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ resolver_key: 'openlibrary:OL12345W' }),
+      expect.objectContaining({ onConflict: 'resolver_key' })
+    );
+    expect(mockUpsert).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ resolver_key: 'openlibrary:OL12345W' }),
+      expect.objectContaining({ onConflict: 'provider,provider_id' })
+    );
+    expect(result.success).toBe(true);
+    expect(result.bookId).toBe('uuid-fallback');
+  });
+
+  it('returns existing id when duplicate persists after fallback', async () => {
+    mockSingle
+      .mockResolvedValueOnce({
+        data: null,
+        error: {
+          message: 'duplicate key value violates unique constraint "books_catalog_provider_unique"',
+          code: '23505',
+          details: null,
+          hint: null,
+        },
+        status: 409,
+        statusText: 'Conflict',
+      })
+      .mockResolvedValueOnce({
+        data: null,
+        error: {
+          message: 'duplicate key value violates unique constraint "books_catalog_provider_unique"',
+          code: '23505',
+          details: null,
+          hint: null,
+        },
+        status: 409,
+        statusText: 'Conflict',
+      });
+
+    mockReadSingle.mockResolvedValueOnce({
+      data: { id: 'uuid-existing' },
+      error: null,
+    });
+
+    const book = createMockResolvedBook();
+    const result = await upsertResolvedBook(book);
+
+    expect(mockUpsert).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ resolver_key: 'openlibrary:OL12345W' }),
+      expect.objectContaining({ onConflict: 'resolver_key' })
+    );
+    expect(mockUpsert).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ resolver_key: 'openlibrary:OL12345W' }),
+      expect.objectContaining({ onConflict: 'provider,provider_id' })
+    );
+    expect(mockSelectForRead).toHaveBeenCalledWith('id');
+    expect(mockEq).toHaveBeenCalledWith('provider', 'openLibrary');
+    expect(mockEq).toHaveBeenCalledWith('provider_id', 'OL12345W');
+    expect(result.success).toBe(true);
+    expect(result.bookId).toBe('uuid-existing');
   });
 
   it('handles null values for optional fields', async () => {

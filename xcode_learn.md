@@ -72,6 +72,41 @@ npx react-native run-ios
 npm run loop:start:codex
 ```
 
+## Codex vs Claude Labels (Telegram/Watches)
+
+The message label in Telegram comes from your watcher/bot profile, not from Xcode.
+If the bot still says "Claude", that usually means the automation profile or script path is still pointing to Claude tooling.
+
+Quick checks:
+
+```bash
+rg -n "claude|codex|auto-fix.py|loop:start" scripts package.json .claude .codex 2>/dev/null
+```
+
+Make sure active loop commands use the Codex profile/paths you expect.
+
+## Missing auto-fix.py Error
+
+If you see:
+
+```text
+Missing script: /Users/<you>/.claude/codex-bookscanner-loop/auto-fix.py
+```
+
+it means the watcher started, but the referenced script file does not exist at that absolute path.
+
+Fix options:
+
+1. Restore/copy `auto-fix.py` to that exact path.
+2. Update the watcher config to the real script location.
+3. Disable auto-fix loop temporarily while doing manual build/debug.
+
+Verification:
+
+```bash
+ls -la /Users/<you>/.claude/codex-bookscanner-loop/auto-fix.py
+```
+
 ## Build Speed Tips
 
 1. Keep a single target device/destination stable.
@@ -107,3 +142,12 @@ Look for:
 3. Only escalate to medium/hard clean when necessary.
 4. Capture timing summary if a build regresses.
 
+## Command Pitfall to Avoid
+
+Use:
+
+```bash
+rm -rf ~/Library/Developer/Xcode/DerivedData/BookScanner-*/Build/Intermediates.noindex/XCBuildData
+```
+
+Avoid accidental variants like `XCBuildData(N)`; that typo may leave the real cache untouched and create confusing results.
