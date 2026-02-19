@@ -582,50 +582,55 @@ export async function resolveCandidates(
   sessionId: string,
   candidates: BookCandidate[]
 ): Promise<Map<string, ResolverResult>> {
-  const results = new Map<string, ResolverResult>();
-
-  for (const candidate of candidates) {
-    // Skip candidates without hypothesis
-    if (!candidate.hypothesis) {
-      results.set(candidate.id, {
-        success: false,
-        error: 'No hypothesis available',
-      });
-      continue;
-    }
-
-    // Skip unusable evidence
-    if (candidate.hypothesis.evidenceTier === 'unusable') {
-      results.set(candidate.id, {
-        success: true,
-        response: {
-          status: 'no-match',
-          cacheHit: false,
-          quotaRemaining: -1,
-          matches: [],
-          acceptanceDecision: {
-            type: 'no-match',
-            reason: 'Evidence tier is unusable',
-            fallbackToOcr: true,
+  const entries = await Promise.all(
+    candidates.map(async (candidate): Promise<[string, ResolverResult]> => {
+      // Skip candidates without hypothesis
+      if (!candidate.hypothesis) {
+        return [
+          candidate.id,
+          {
+            success: false,
+            error: 'No hypothesis available',
           },
-          canonicalBook: null,
-          verificationFlags: [],
-          processingTimeMs: 0,
-        },
-      });
-      continue;
-    }
+        ];
+      }
 
-    const result = await resolveCandidate(sessionId, candidate);
-    results.set(candidate.id, result);
+      // Skip unusable evidence
+      if (candidate.hypothesis.evidenceTier === 'unusable') {
+        return [
+          candidate.id,
+          {
+            success: true,
+            response: {
+              status: 'no-match',
+              cacheHit: false,
+              quotaRemaining: -1,
+              matches: [],
+              acceptanceDecision: {
+                type: 'no-match',
+                reason: 'Evidence tier is unusable',
+                fallbackToOcr: true,
+              },
+              canonicalBook: null,
+              verificationFlags: [],
+              processingTimeMs: 0,
+            },
+          },
+        ];
+      }
 
-    // Log rate limit/offline but continue so every candidate gets a result entry
-    if (result.response?.status === 'rate-limited' || result.offline) {
-      console.warn('[ResolverClient] Rate limited or offline - continuing batch to capture all candidates');
-    }
-  }
+      const result = await resolveCandidate(sessionId, candidate);
 
-  return results;
+      // Log rate limit/offline but continue so every candidate gets a result entry
+      if (result.response?.status === 'rate-limited' || result.offline) {
+        console.warn('[ResolverClient] Rate limited or offline - continuing batch to capture all candidates');
+      }
+
+      return [candidate.id, result];
+    })
+  );
+
+  return new Map(entries);
 }
 
 /**
