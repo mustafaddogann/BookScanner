@@ -15,6 +15,7 @@ import {
   TouchableOpacity,
   Alert,
   ActivityIndicator,
+  Image,
   Platform,
 } from 'react-native';
 import {
@@ -49,6 +50,7 @@ export function ScannerScreen(): React.JSX.Element {
   const route = useRoute<ScannerRouteProp>();
   const camera = useRef<Camera>(null);
   const [isCapturing, setIsCapturing] = useState(false);
+  const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<'shelf' | 'single'>('shelf');
   const [railExpanded, setRailExpanded] = useState(false);
   const [qualityMode, setQualityMode] = useState<'speed' | 'accuracy'>('accuracy');
@@ -139,8 +141,11 @@ export function ScannerScreen(): React.JSX.Element {
       console.log(`[Scanner] Photo captured: ${photo.path}`);
       console.log(`[Scanner] Dimensions: ${photo.width}x${photo.height}`);
 
-      // Run pipeline
+      // Show captured photo and stop camera
       const imageUri = `file://${photo.path}`;
+      setCapturedImageUri(imageUri);
+
+      // Run pipeline
       const result = await runPipelineOnCapture(imageUri);
 
       console.log(`[Scanner] Pipeline complete. ${result.detections.length} detections`);
@@ -150,11 +155,14 @@ export function ScannerScreen(): React.JSX.Element {
 
       // Navigate to results
       navigation.navigate('Results', { sessionId: result.session.sessionId });
-    } catch (err: any) {
+    } catch (err: unknown) {
       console.error('[Scanner] Capture error:', err);
-      Alert.alert('Capture Error', err.message);
+      setCapturedImageUri(null);
+      const message = err instanceof Error ? err.message : String(err);
+      Alert.alert('Capture Error', message);
     } finally {
       setIsCapturing(false);
+      setCapturedImageUri(null);
     }
   }, [isCapturing, isProcessing, navigation, setError, uiOrientation]);
 
@@ -173,16 +181,20 @@ export function ScannerScreen(): React.JSX.Element {
         const normalizedUri = importUri.startsWith('content://')
           ? importUri
           : normalizeFileUri(importUri);
+        setCapturedImageUri(normalizedUri);
         const result = await runPipelineOnCapture(normalizedUri);
 
         // Store image URI for auto-rescan
         setLastScannedImageUri(normalizedUri);
 
         navigation.navigate('Results', { sessionId: result.session.sessionId });
-      } catch (err: any) {
-        setError(err.message || 'Import failed');
+      } catch (err: unknown) {
+        setCapturedImageUri(null);
+        const message = err instanceof Error ? err.message : String(err);
+        setError(message || 'Import failed');
       } finally {
         setIsCapturing(false);
+        setCapturedImageUri(null);
       }
     };
 
@@ -260,24 +272,30 @@ export function ScannerScreen(): React.JSX.Element {
     );
   }
 
-  // Camera stability: Keep camera ALWAYS active to avoid AVFoundation reconfiguration errors
-  // Toggling isActive causes FigXPCUtilities err=-17281 and session restart issues
-  // The processing overlay handles UI blocking - camera session should remain stable
-  const isCameraActive = true;
-
   return (
     <View style={styles.container}>
-      {!importUri && device && (
-        <Camera
-          ref={camera}
-          style={StyleSheet.absoluteFill}
-          device={device}
-          isActive={isCameraActive}
-          photo={true}
-          enableZoomGesture={!isCapturing}
-          outputOrientation="preview"
-          onOutputOrientationChanged={handleOrientationChange}
+      {capturedImageUri ? (
+        <Image
+          source={{ uri: capturedImageUri }}
+          style={[StyleSheet.absoluteFill, { resizeMode: 'contain' }]}
+          onError={() => {
+            console.error('[Scanner] Failed to load captured image');
+            setCapturedImageUri(null);
+          }}
         />
+      ) : (
+        !importUri && device && (
+          <Camera
+            ref={camera}
+            style={StyleSheet.absoluteFill}
+            device={device}
+            isActive={true}
+            photo={true}
+            enableZoomGesture={!isCapturing}
+            outputOrientation="preview"
+            onOutputOrientationChanged={handleOrientationChange}
+          />
+        )
       )}
 
       {gridEnabled && (
