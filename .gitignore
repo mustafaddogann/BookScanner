@@ -17,3 +17,10 @@ venv/
 # Editors
 .vscode/
 .idea/
+
+# Xcode user state
+*.xcuserstate
+
+# Auto-fix runtime state
+scripts/.autofix_daemon_state.json
+scripts/.autofix_state.json

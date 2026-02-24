@@ -313,30 +313,128 @@ def git_diff_fingerprint() -> str:
         return ""
 
 
+def _classify_reject(item: dict[str, Any]) -> dict[str, Any]:
+    """Classify a single reject as fixable or unfixable with specific guidance."""
+    merged = sanitize_text(item.get("mergedText"))
+    reason = normalize_reason(item.get("resolverDecisionReason"))
+    evidence = item.get("evidenceSearchDebug") or {}
+    top_scores = evidence.get("topScores") or []
+    best_score = float((top_scores[0] or {}).get("score", 0)) if top_scores else 0.0
+    best_title = str((top_scores[0] or {}).get("title", ""))[:60] if top_scores else ""
+
+    alnum = alnum_count(merged)
+    word_count = len(merged.split())
+
+    # Garbage OCR: too short or no real words
+    if alnum < 6 or word_count < 2:
+        return {"fixable": False, "reason": "garbage_ocr", "detail": f"Only {alnum} alphanumeric chars"}
+
+    # Has a near-match but scored too low — threshold/scoring fix
+    if best_score >= 0.25:
+        return {
+            "fixable": True,
+            "reason": "score_too_low",
+            "detail": f"Best candidate '{best_title}' scored {best_score:.2f} but was rejected",
+            "suggestion": "Lower acceptance threshold or improve token overlap scoring",
+        }
+
+    # Has recognizable author/title patterns but no candidates found
+    has_author_pattern = bool(re.search(r"[A-Z]{2,}\s+[A-Z]{2,}", merged))
+    has_title_words = word_count >= 3
+
+    if has_author_pattern and has_title_words:
+        return {
+            "fixable": True,
+            "reason": "query_generation",
+            "detail": f"OCR text has author+title pattern but queries failed",
+            "suggestion": "Improve OCR typo correction in hypothesis generation (e.g. FAVE->FAYE, ACAID->NGAIO)",
+        }
+
+    if has_title_words and "no candidates" in reason:
+        return {
+            "fixable": True,
+            "reason": "no_candidates",
+            "detail": f"Text looks searchable but API returned nothing",
+            "suggestion": "Try broader/fuzzy queries, strip noise words before searching",
+        }
+
+    return {"fixable": False, "reason": "unclear_ocr", "detail": f"Text '{merged[:40]}' doesn't have clear structure"}
+
+
 def build_prompt(rejects_file: Path, payload: dict[str, Any]) -> str:
     session_id = payload.get("sessionId", "unknown")
     reject_count = payload.get("rejectCount", len(payload.get("rejects", [])) or 0)
     total_books = payload.get("totalBooks", "?")
-    return f"""You are fixing BookScanner metadata resolution quality.
+    rejects = payload.get("rejects") or []
 
-Rejects JSON: {rejects_file}
+    # Classify each reject
+    fixable_items: list[str] = []
+    unfixable_items: list[str] = []
+    for item in rejects:
+        merged = sanitize_text(item.get("mergedText"))
+        book_id = str(item.get("id", "?"))
+        classification = _classify_reject(item)
+        line = f"  - {book_id}: OCR='{merged[:60]}' | {classification['detail']}"
+        if classification.get("suggestion"):
+            line += f" | Fix: {classification['suggestion']}"
+        if classification["fixable"]:
+            fixable_items.append(line)
+        else:
+            unfixable_items.append(line)
+
+    fixable_section = "\n".join(fixable_items) if fixable_items else "  (none)"
+    unfixable_section = "\n".join(unfixable_items) if unfixable_items else "  (none)"
+
+    return f"""You are fixing BookScanner's book metadata resolution. The app scans book spines via OCR and matches them against the Open Library API.
+
+Rejects file: {rejects_file}
+Session: {session_id}
 Rejected: {reject_count}/{total_books}
 
-Steps:
-1. Read the rejects JSON. There are {reject_count} rejected books.
-2. For each reject, look at mergedText and resolverDecisionReason.
-3. Apply minimal, generic fixes to the codebase - focus on src/services/queryHypotheses.ts and src/services/candidateScoring.ts
-4. Do NOT commit. Do NOT run tests.
-5. Return a short summary of what you changed.
+FIXABLE rejects (improve code to handle these):
+{fixable_section}
 
-Keep changes minimal and safe.
+UNFIXABLE rejects (garbage OCR, skip these):
+{unfixable_section}
+
+Common OCR error patterns to handle:
+- Letter substitutions: F→F (FAVE→FAYE), C→G (ACAID→NGAIO), I→L, O→0
+- Missing spaces: "STRAIGHIINTO" → "STRAIGHT INTO"
+- Noise words mixed in: "MYSTERY", "BESTSELLING", "JOVE", price tags ($2.25)
+
+Files to modify:
+- src/services/queryHypotheses.ts — hypothesis generation from OCR text
+- src/services/candidateScoring.ts — scoring/matching candidates
+
+Instructions:
+1. Read the rejects JSON file for full evidence data
+2. Focus ONLY on fixable rejects listed above
+3. Add OCR normalization rules (common letter swaps, noise filtering)
+4. Improve fuzzy matching so near-misses score higher
+5. Do NOT lower thresholds below 0.3 — instead improve query quality
+6. Do NOT commit or run tests
+7. Return a short summary of changes
 """
+
+
+def _ensure_local_bin_in_path() -> None:
+    """Ensure ~/.local/bin is in PATH for subprocess resolution.
+
+    When spawned from Node.js (detached, no shell), ~/.local/bin is often
+    missing from PATH even though the user installed binaries there.
+    """
+    local_bin = str(Path.home() / ".local" / "bin")
+    current_path = os.environ.get("PATH", "")
+    if local_bin not in current_path.split(os.pathsep):
+        os.environ["PATH"] = local_bin + os.pathsep + current_path
 
 
 def resolve_agent_bin() -> tuple[str, str]:
     """Resolve agent binary and type. Returns (binary_path, agent_type).
     agent_type is 'claude' or 'codex'.
     """
+    _ensure_local_bin_in_path()
+
     agent_type = os.environ.get("BOOKSCANNER_AGENT_TYPE", "").strip().lower()
     explicit_bin = os.environ.get("BOOKSCANNER_CODEX_BIN", "").strip()
 
@@ -482,6 +580,24 @@ def run_fix(rejects_file: Path) -> int:
             )
             return 0
 
+        # Skip if no rejects are code-fixable (e.g. all garbage OCR)
+        rejects = payload.get("rejects") or []
+        fixable_count = sum(1 for r in rejects if _classify_reject(r).get("fixable"))
+        if fixable_count == 0:
+            print(f"[auto-fix] 0/{len(rejects)} rejects are fixable; skipping")
+            # Still update state so debounce kicks in for subsequent identical uploads
+            state.update({
+                "lastRunAt": now_iso(),
+                "lastRunEpochSec": time.time(),
+                "lastSessionId": session_id,
+                "lastRejectCount": reject_count,
+                "lastRejectsFile": str(rejects_file),
+                "lastFingerprint": fingerprint_rejects(payload),
+                "lastExitCode": 0,
+            })
+            save_state(state)
+            return 0
+
         dry_run = os.environ.get("BOOKSCANNER_AUTOFIX_DRY_RUN", "0") == "1"
         start_msg = (
             f"🛠️ *Codex Auto-Fix Started*\n"
@@ -530,6 +646,53 @@ def run_fix(rejects_file: Path) -> int:
                 summary_lines.append(f"\n`{tail}`")
 
         send_telegram("\n".join(summary_lines))
+
+        # Rebuild app and signal rescan if code changed
+        if exit_code == 0 and diff_changed:
+            rebuild_cmd = os.environ.get("BOOKSCANNER_AUTOFIX_REBUILD_CMD", "").strip()
+            signal_rescan = os.environ.get("BOOKSCANNER_AUTOFIX_SIGNAL_RESCAN", "0") == "1"
+
+            if rebuild_cmd:
+                print(f"[auto-fix] rebuilding app: {rebuild_cmd}")
+                send_telegram("🔨 *Rebuilding app with new fixes...*")
+                try:
+                    rebuild_result = subprocess.run(
+                        rebuild_cmd,
+                        shell=True,
+                        cwd=str(REPO_ROOT),
+                        capture_output=True,
+                        text=True,
+                        timeout=600,
+                    )
+                    if rebuild_result.returncode == 0:
+                        print("[auto-fix] rebuild succeeded")
+                        send_telegram("✅ *Rebuild complete!*")
+                    else:
+                        print(f"[auto-fix] rebuild failed (exit={rebuild_result.returncode})")
+                        err_tail = (rebuild_result.stderr or "")[-300:]
+                        send_telegram(f"❌ *Rebuild failed:* `{err_tail}`")
+                except subprocess.TimeoutExpired:
+                    print("[auto-fix] rebuild timed out (10 min)")
+                    send_telegram("❌ *Rebuild timed out*")
+                except Exception as e:
+                    print(f"[auto-fix] rebuild error: {e}")
+                    send_telegram(f"❌ *Rebuild error:* {e}")
+
+            if signal_rescan:
+                rescan_file = AUTOMATION_HOME / "rescan_signal.json"
+                signal = {
+                    "rescan": True,
+                    "timestamp": now_iso(),
+                    "reason": "auto_fix_complete",
+                    "session_id": session_id,
+                    "auto_retry": True,
+                }
+                try:
+                    rescan_file.write_text(json.dumps(signal), encoding="utf-8")
+                    print(f"[auto-fix] rescan signal written to {rescan_file}")
+                    send_telegram("📡 *Rescan signal sent — app will rescan automatically*")
+                except Exception as e:
+                    print(f"[auto-fix] failed to write rescan signal: {e}")
 
         state.update(
             {

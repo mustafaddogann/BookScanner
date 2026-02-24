@@ -2,41 +2,43 @@
 /**
  * Auto-Fix Daemon
  *
- * Fully automated reject fixing loop:
- * 1. Watches for new rejects from the app
- * 2. Analyzes issues
- * 3. Writes fix instructions for Claude Code
- * 4. Triggers rebuild after fixes
- * 5. Notifies via Telegram
+ * Watches for new rejects and delegates to auto-fix.py (which calls codex/claude).
+ * Deduplicates by session+rejectCount so the same payload doesn't trigger
+ * multiple fix cycles. Stops retrying after MAX_ATTEMPTS_PER_SESSION.
  *
  * Usage: node scripts/autoFixDaemon.js
  */
 
 const fs = require('fs');
 const path = require('path');
-const { execSync, spawn } = require('child_process');
 const os = require('os');
+const crypto = require('crypto');
 
-// Configuration
-const DOCUMENTS_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/documents');
-const INSTRUCTIONS_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/instructions.md');
-const TELEGRAM_SEND = path.join(os.homedir(), '.claude/clawdbot-instructions/telegram-bot/send.py');
-const STATE_FILE = path.join(__dirname, '.autofix_state.json');
-const ANALYZE_SCRIPT = path.join(__dirname, 'analyzeRejects.js');
+// Profile-aware paths
+const AUTOMATION_PROFILE = (process.env.BOOKSCANNER_AUTOMATION_PROFILE || 'codex').toLowerCase();
+const AUTOMATION_HOME = process.env.BOOKSCANNER_AUTOMATION_HOME ||
+  path.join(os.homedir(), AUTOMATION_PROFILE === 'legacy'
+    ? '.claude/clawdbot-instructions'
+    : '.claude/codex-bookscanner-loop');
 
-const CHECK_INTERVAL_MS = 5000; // Check every 5 seconds
+const DOCUMENTS_DIR = path.join(AUTOMATION_HOME, 'documents');
+const STATE_FILE = path.join(__dirname, '.autofix_daemon_state.json');
 
-// State
+const CHECK_INTERVAL_MS = 15000; // Check every 15 seconds (was 5 — too fast)
+const MAX_ATTEMPTS_PER_SESSION = 3; // Stop after 3 fix attempts for same session+rejects
+const COOLDOWN_AFTER_FIX_MS = 120000; // Wait 2 min after spawning auto-fix before checking again
+
+// State tracks which sessions we've already processed
 let state = {
-  lastProcessedFile: null,
-  lastProcessedTime: null,
-  fixCycle: 0,
-  totalRejectsFixed: 0,
+  processedHashes: {}, // hash -> { count, lastTime, sessionId, rejectCount }
+  lastSpawnTime: 0,
 };
 
 function loadState() {
   if (fs.existsSync(STATE_FILE)) {
-    state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    try {
+      state = JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+    } catch { /* start fresh */ }
   }
 }
 
@@ -44,17 +46,10 @@ function saveState() {
   fs.writeFileSync(STATE_FILE, JSON.stringify(state, null, 2));
 }
 
-function sendTelegram(message) {
-  try {
-    execSync(`python3 "${TELEGRAM_SEND}" "${message.replace(/"/g, '\\"')}"`, {
-      encoding: 'utf8',
-      timeout: 10000,
-    });
-    return true;
-  } catch (err) {
-    console.error('Telegram send failed:', err.message);
-    return false;
-  }
+function hashPayload(data) {
+  const rejects = (data.rejects || []).map(r => `${r.id || ''}|${r.resolverDecisionReason || ''}|${(r.mergedText || '').substring(0, 100)}`);
+  rejects.sort();
+  return crypto.createHash('sha1').update(rejects.join('\n')).digest('hex').substring(0, 12);
 }
 
 function findLatestRejectsFile() {
@@ -62,171 +57,92 @@ function findLatestRejectsFile() {
 
   const files = fs.readdirSync(DOCUMENTS_DIR)
     .filter(f => f.startsWith('rejects_') && f.endsWith('.json'))
-    .map(f => ({
-      name: f,
-      path: path.join(DOCUMENTS_DIR, f),
-      mtime: fs.statSync(path.join(DOCUMENTS_DIR, f)).mtime.getTime(),
-    }))
+    .map(f => {
+      const fullPath = path.join(DOCUMENTS_DIR, f);
+      return {
+        name: f,
+        path: fullPath,
+        mtime: fs.statSync(fullPath).mtime.getTime(),
+      };
+    })
     .sort((a, b) => b.mtime - a.mtime);
 
   return files[0] || null;
 }
 
-function analyzeRejectsFile(filepath) {
-  const data = JSON.parse(fs.readFileSync(filepath, 'utf8'));
-
-  const analysis = {
-    sessionId: data.sessionId,
-    totalBooks: data.totalBooks || 0,
-    rejectCount: data.rejectCount || data.rejects?.length || 0,
-    acceptCount: data.acceptCount || 0,
-    suggestedCount: data.suggestedCount || 0,
-    issues: [],
-    rejects: data.rejects || [],
-  };
-
-  // Analyze each reject
-  for (const reject of analysis.rejects) {
-    const issues = [];
-    const mergedText = reject.mergedText || '';
-    const reason = reject.resolverDecisionReason || '';
-    const debug = reject.evidenceSearchDebug || {};
-
-    // Check for specific issues
-    if (debug.overlapCount === 0 && debug.candidatesFound > 0) {
-      issues.push({
-        type: 'SCORE_ZERO_BUG',
-        detail: 'Candidates found but all scored 0 - likely token mismatch',
-      });
-    }
-
-    if (reason === 'no_evidence' || !mergedText) {
-      issues.push({
-        type: 'NO_EVIDENCE',
-        detail: 'No OCR text captured',
-      });
-    }
-
-    if (reason === 'No candidates found') {
-      issues.push({
-        type: 'NO_CANDIDATES',
-        detail: 'API search returned no results',
-      });
-    }
-
-    if (reason === 'low_title_confidence') {
-      issues.push({
-        type: 'LOW_CONFIDENCE',
-        detail: `Score too low: ${debug.topScores?.[0]?.score || 0}`,
-      });
-    }
-
-    // Check for unfiltered noise
-    const noisePatterns = [
-      { pattern: /\bZEBBA\b/i, noise: 'ZEBBA' },
-      { pattern: /\bFORK\b/i, noise: 'FORK' },
-      { pattern: /\bBESTSELENG\b/i, noise: 'BESTSELENG' },
-    ];
-    for (const { pattern, noise } of noisePatterns) {
-      if (pattern.test(mergedText)) {
-        issues.push({
-          type: 'UNFILTERED_NOISE',
-          detail: `"${noise}" should be filtered`,
-        });
-      }
-    }
-
-    analysis.issues.push({
-      bookId: reject.id,
-      mergedText: mergedText.substring(0, 100),
-      reason,
-      issues,
-    });
-  }
-
-  return analysis;
-}
-
-function writeClaudeInstructions(analysis) {
-  const timestamp = new Date().toISOString();
-  const instruction = `
----
-**[${timestamp}]** AUTO-FIX DAEMON
-
-**Cycle ${state.fixCycle + 1}** - ${analysis.rejectCount} rejects to fix
-
-**Issues Found:**
-${analysis.issues.map(r => `- ${r.bookId}: ${r.issues.map(i => i.type).join(', ') || 'Unknown'}`).join('\n')}
-
-**Action Required:**
-Analyze the rejects in ${DOCUMENTS_DIR} and fix the scoring/hypothesis code.
-After fixing, rebuild the app with: npx react-native run-ios
-
-**Rejects Summary:**
-${JSON.stringify(analysis.issues.slice(0, 5), null, 2)}
-`;
-
-  fs.appendFileSync(INSTRUCTIONS_FILE, instruction);
-}
-
-function processNewRejects(file) {
-  console.log(`\n${'='.repeat(60)}`);
-  console.log(`PROCESSING: ${file.name}`);
-  console.log(`Cycle: ${state.fixCycle + 1}`);
-  console.log('='.repeat(60));
-
-  const analysis = analyzeRejectsFile(file.path);
-
-  console.log(`Total: ${analysis.totalBooks}, Rejects: ${analysis.rejectCount}`);
-  console.log(`Accept: ${analysis.acceptCount}, Suggested: ${analysis.suggestedCount}`);
-
-  if (analysis.rejectCount === 0) {
-    console.log('\n🎉 NO REJECTS! All books resolved successfully!');
-    sendTelegram(`🎉 *Success!* All ${analysis.totalBooks} books resolved!\n\nNo more rejects. The pipeline is working correctly.`);
+function spawnAutoFix(filepath) {
+  const autoFixScript = path.join(__dirname, 'auto-fix.py');
+  if (!fs.existsSync(autoFixScript)) {
+    console.log('[daemon] auto-fix.py not found, skipping');
     return;
   }
 
-  // Log issues
-  console.log('\nIssues found:');
-  for (const reject of analysis.issues) {
-    console.log(`  ${reject.bookId}: ${reject.issues.map(i => i.type).join(', ') || 'Unknown'}`);
-  }
+  // Ensure ~/.local/bin is in PATH
+  const localBin = path.join(os.homedir(), '.local/bin');
+  const envPath = process.env.PATH || '';
+  const childEnv = {
+    ...process.env,
+    PATH: envPath.includes(localBin) ? envPath : `${localBin}:${envPath}`,
+    BOOKSCANNER_AUTOMATION_PROFILE: AUTOMATION_PROFILE,
+    BOOKSCANNER_AUTOMATION_HOME: AUTOMATION_HOME,
+  };
 
-  // Write instructions for Claude Code
-  writeClaudeInstructions(analysis);
-
-  // Send Telegram notification
-  const issuesSummary = analysis.issues
-    .slice(0, 3)
-    .map(r => `• ${r.mergedText.substring(0, 30)}... → ${r.issues[0]?.type || r.reason}`)
-    .join('\n');
-
-  sendTelegram(`🔄 *Auto-Fix Cycle ${state.fixCycle + 1}*
-
-${analysis.rejectCount}/${analysis.totalBooks} books rejected
-
-*Top Issues:*
-${issuesSummary}
-
-Fixing automatically...`);
-
-  // Update state
-  state.lastProcessedFile = file.name;
-  state.lastProcessedTime = new Date().toISOString();
-  state.fixCycle++;
-  saveState();
+  const { spawn } = require('child_process');
+  const proc = spawn('python3', [autoFixScript, filepath], {
+    detached: true,
+    stdio: 'ignore',
+    env: childEnv,
+  });
+  proc.unref();
+  console.log(`[daemon] auto-fix.py spawned for ${path.basename(filepath)}`);
 }
 
 function checkForNewRejects() {
-  const latestFile = findLatestRejectsFile();
+  // Don't check if we recently spawned a fix (give codex time to work)
+  const timeSinceLastSpawn = Date.now() - (state.lastSpawnTime || 0);
+  if (timeSinceLastSpawn < COOLDOWN_AFTER_FIX_MS) {
+    return; // silently wait
+  }
 
+  const latestFile = findLatestRejectsFile();
   if (!latestFile) return;
 
-  // Check if this is a new file we haven't processed
-  if (latestFile.name !== state.lastProcessedFile ||
-      latestFile.mtime > new Date(state.lastProcessedTime || 0).getTime()) {
-    processNewRejects(latestFile);
+  let data;
+  try {
+    data = JSON.parse(fs.readFileSync(latestFile.path, 'utf8'));
+  } catch {
+    return;
   }
+
+  const rejectCount = data.rejectCount || (data.rejects || []).length || 0;
+  if (rejectCount === 0) return;
+
+  const hash = hashPayload(data);
+  const sessionId = data.sessionId || 'unknown';
+  const existing = state.processedHashes[hash];
+
+  if (existing) {
+    if (existing.count >= MAX_ATTEMPTS_PER_SESSION) {
+      // Already tried enough times — don't spam
+      return;
+    }
+  }
+
+  // New or retry-worthy payload — process it
+  console.log(`\n[daemon] New rejects: ${rejectCount} from session ${sessionId} (hash=${hash}, attempt=${(existing?.count || 0) + 1}/${MAX_ATTEMPTS_PER_SESSION})`);
+
+  state.processedHashes[hash] = {
+    count: (existing?.count || 0) + 1,
+    lastTime: new Date().toISOString(),
+    sessionId,
+    rejectCount,
+    file: latestFile.name,
+  };
+  state.lastSpawnTime = Date.now();
+  saveState();
+
+  // Spawn auto-fix.py (which handles codex/claude invocation, rebuild, rescan)
+  spawnAutoFix(latestFile.path);
 }
 
 function main() {
@@ -234,8 +150,10 @@ function main() {
   console.log('║            BookScanner Auto-Fix Daemon                     ║');
   console.log('╚════════════════════════════════════════════════════════════╝');
   console.log('');
-  console.log('Watching for rejects and fixing automatically...');
-  console.log(`Documents: ${DOCUMENTS_DIR}`);
+  console.log(`Profile:    ${AUTOMATION_PROFILE}`);
+  console.log(`Documents:  ${DOCUMENTS_DIR}`);
+  console.log(`Max tries:  ${MAX_ATTEMPTS_PER_SESSION} per unique payload`);
+  console.log(`Cooldown:   ${COOLDOWN_AFTER_FIX_MS / 1000}s after each fix`);
   console.log('');
   console.log('Press Ctrl+C to stop\n');
 

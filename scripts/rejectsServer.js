@@ -16,14 +16,39 @@ const path = require('path');
 const { execSync } = require('child_process');
 const os = require('os');
 
-const PORT = 8765;
-const EXPORTS_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/documents');
-const SCAN_IMAGES_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/scan-images');
-const INSTRUCTIONS_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/instructions.md');
+const PORT = parseInt(process.env.BOOKSCANNER_SERVER_PORT || '8765', 10);
+
+// Profile-aware paths: codex profile uses codex-bookscanner-loop, legacy uses clawdbot-instructions
+const AUTOMATION_PROFILE = (process.env.BOOKSCANNER_AUTOMATION_PROFILE || 'codex').toLowerCase();
+const AUTOMATION_HOME = process.env.BOOKSCANNER_AUTOMATION_HOME ||
+  path.join(os.homedir(), AUTOMATION_PROFILE === 'legacy'
+    ? '.claude/clawdbot-instructions'
+    : '.claude/codex-bookscanner-loop');
+
+const EXPORTS_DIR = path.join(AUTOMATION_HOME, 'documents');
+const SCAN_IMAGES_DIR = path.join(AUTOMATION_HOME, 'scan-images');
+const INSTRUCTIONS_FILE = path.join(AUTOMATION_HOME, 'instructions.md');
 const ANALYZE_SCRIPT = path.join(__dirname, 'analyzeRejects.js');
-const TELEGRAM_SEND = path.join(os.homedir(), '.claude/clawdbot-instructions/telegram-bot/send.py');
-const AUTO_FIX_SCRIPT = path.join(os.homedir(), '.claude/clawdbot-instructions/auto-fix.py');
-const RESCAN_SIGNAL_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/rescan_signal.json');
+const TELEGRAM_SEND = path.join(AUTOMATION_HOME, 'telegram-bot/send.py');
+const AUTO_FIX_SCRIPT = path.join(__dirname, 'auto-fix.py');
+const AUTO_FIX_LOG = path.join(AUTOMATION_HOME, 'auto-fix.log');
+const RESCAN_SIGNAL_FILE = path.join(AUTOMATION_HOME, 'rescan_signal.json');
+
+// Dedup: track what we've already written/spawned
+const DEDUP_WINDOW_SEC = parseInt(process.env.BOOKSCANNER_SERVER_DUPLICATE_WINDOW_SEC || '45', 10);
+let lastFixRequestHash = null;
+let lastFixRequestTime = 0;
+let lastAutoFixHash = null;
+let lastAutoFixTime = 0;
+
+function rejectPayloadHash(data) {
+  const crypto = require('crypto');
+  const rejects = (data.rejects || []).map(r =>
+    `${r.id || ''}|${r.resolverDecisionReason || ''}|${(r.mergedText || '').substring(0, 80)}`
+  );
+  rejects.sort();
+  return crypto.createHash('sha1').update(rejects.join('\n')).digest('hex').substring(0, 12);
+}
 
 // Track latest analysis result
 let latestAnalysis = {
@@ -124,7 +149,16 @@ function sendToTelegram(message) {
   }
 }
 
-function writeFixRequest(filepath, summary, sessionId) {
+function writeFixRequest(filepath, summary, sessionId, payloadHash) {
+  // Dedup: skip if same payload hash within window
+  const now = Date.now();
+  if (payloadHash === lastFixRequestHash && (now - lastFixRequestTime) < DEDUP_WINDOW_SEC * 1000) {
+    console.log(`FIX_REQUEST skipped (duplicate within ${DEDUP_WINDOW_SEC}s)`);
+    return false;
+  }
+  lastFixRequestHash = payloadHash;
+  lastFixRequestTime = now;
+
   const timestamp = new Date().toISOString().replace('T', ' ').substring(0, 19);
   const issues = summary.issues.slice(0, 3).join('; ') || 'Unknown issues';
 
@@ -150,22 +184,45 @@ From: auto-rejects-server
   }
 }
 
-function runAutoFix(filepath) {
+function runAutoFix(filepath, payloadHash) {
   if (!fs.existsSync(AUTO_FIX_SCRIPT)) {
     console.log('Auto-fix script not available');
     return;
   }
 
-  console.log('Running auto-fix analysis...');
+  // Dedup: don't spawn auto-fix for same payload within cooldown
+  const now = Date.now();
+  const AUTO_FIX_COOLDOWN_MS = 120000; // 2 min — give codex time to work
+  if (payloadHash === lastAutoFixHash && (now - lastAutoFixTime) < AUTO_FIX_COOLDOWN_MS) {
+    console.log(`Auto-fix skipped (same payload, cooldown ${AUTO_FIX_COOLDOWN_MS / 1000}s)`);
+    return;
+  }
+  lastAutoFixHash = payloadHash;
+  lastAutoFixTime = now;
+
+  console.log(`Running auto-fix (profile=${AUTOMATION_PROFILE}, hash=${payloadHash})...`);
   try {
-    // Run async - don't block the response
     const { spawn } = require('child_process');
+    const localBin = path.join(os.homedir(), '.local/bin');
+    const envPath = process.env.PATH || '';
+    const childEnv = {
+      ...process.env,
+      PATH: envPath.includes(localBin) ? envPath : `${localBin}:${envPath}`,
+      BOOKSCANNER_AUTOMATION_PROFILE: AUTOMATION_PROFILE,
+      BOOKSCANNER_AUTOMATION_HOME: AUTOMATION_HOME,
+    };
+    // Log output to file instead of discarding
+    const logFd = fs.openSync(AUTO_FIX_LOG, 'a');
+    fs.writeSync(logFd, `\n--- auto-fix spawned at ${new Date().toISOString()} for ${path.basename(filepath)} ---\n`);
     const proc = spawn('python3', [AUTO_FIX_SCRIPT, filepath], {
       detached: true,
-      stdio: 'ignore'
+      stdio: ['ignore', logFd, logFd],
+      env: childEnv,
     });
     proc.unref();
-    console.log('Auto-fix analysis started in background');
+    // Close fd in parent after spawn
+    fs.closeSync(logFd);
+    console.log(`Auto-fix started (log: ${AUTO_FIX_LOG})`);
   } catch (err) {
     console.error('Auto-fix failed:', err.message);
   }
@@ -244,8 +301,9 @@ const server = http.createServer((req, res) => {
 
         // Auto-trigger analysis
         if (summary.rejectCount > 0) {
-          writeFixRequest(filepath, summary, sessionId);
-          runAutoFix(filepath);
+          const hash = rejectPayloadHash(data);
+          writeFixRequest(filepath, summary, sessionId, hash);
+          runAutoFix(filepath, hash);
         } else {
           // All books accepted!
           sendToTelegram(`🎉 *Tüm kitaplar kabul edildi!* (${summary.totalBooks}/${summary.totalBooks})`);
@@ -386,6 +444,9 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on:`);
   console.log(`  Local:   http://localhost:${PORT}`);
   console.log(`  Network: http://${localIP}:${PORT}`);
+  console.log('');
+  console.log(`Profile: ${AUTOMATION_PROFILE}`);
+  console.log(`Home:    ${AUTOMATION_HOME}`);
   console.log('');
   console.log('Configure your iOS app with this URL:');
   console.log(`  http://${localIP}:${PORT}/upload`);
