@@ -185,14 +185,14 @@ function App(): React.JSX.Element {
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
-        <StatusBar barStyle="light-content" backgroundColor="#000" />
+        <StatusBar barStyle="light-content" backgroundColor="#0C0A09" />
         <NavigationContainer ref={navigationRef} onReady={handleNavigationReady}>
           <Stack.Navigator
             initialRouteName="Home"
             screenOptions={{
               headerShown: false,
               animation: 'slide_from_right',
-              contentStyle: { backgroundColor: '#000' },
+              contentStyle: { backgroundColor: '#0C0A09' },
             }}
           >
             <Stack.Screen name="Home" component={TabsScreen} />
@@ -217,7 +217,7 @@ function App(): React.JSX.Element {
                     hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
                     style={{ paddingHorizontal: 12, paddingVertical: 8 }}
                   >
-                    <Text style={{ color: '#fff', fontSize: 16, fontWeight: '600' }}>Close</Text>
+                    <Text style={{ color: '#F5F0E8', fontSize: 16, fontWeight: '600' }}>Close</Text>
                   </TouchableOpacity>
                 ),
               })}

@@ -9,6 +9,7 @@ import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import type { BookCandidate, EvidenceTier } from '../types';
 import { useDebugStore } from '../store/useDebugStore';
+import { colors, radii } from '../theme';
 
 interface BookCandidateDiagnosticsRowProps {
   candidate: BookCandidate;
@@ -18,28 +19,28 @@ interface BookCandidateDiagnosticsRowProps {
 function getTierColor(tier: EvidenceTier | undefined): string {
   switch (tier) {
     case 'strong':
-      return '#30D158';
+      return colors.verified;
     case 'usable':
-      return '#007AFF';
+      return colors.accent;
     case 'weak':
-      return '#FF9F0A';
+      return colors.suggested;
     case 'unusable':
-      return '#FF453A';
+      return colors.rejected;
     default:
-      return '#8e8e93';
+      return colors.textSecondary;
   }
 }
 
 function getDecisionColor(decision: string | undefined): string {
   switch (decision) {
     case 'accept':
-      return '#30D158';
+      return colors.verified;
     case 'suggested':
-      return '#FF9F0A';
+      return colors.suggested;
     case 'reject':
-      return '#FF453A';
+      return colors.rejected;
     default:
-      return '#8e8e93';
+      return colors.textSecondary;
   }
 }
 
@@ -117,7 +118,7 @@ const styles = StyleSheet.create({
     marginTop: 8,
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: '#2c2c2e',
+    borderTopColor: colors.separator,
   },
   row: {
     flexDirection: 'row',
@@ -125,21 +126,21 @@ const styles = StyleSheet.create({
     gap: 6,
   },
   badge: {
-    backgroundColor: '#2c2c2e',
+    backgroundColor: colors.bgNested,
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: radii.sm,
   },
   badgeText: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 10,
     fontFamily: 'Menlo',
   },
   autoAcceptedBadge: {
-    backgroundColor: '#30D158',
+    backgroundColor: colors.verified,
   },
   autoAcceptedText: {
-    color: '#000',
+    color: colors.bgDeep,
     fontSize: 10,
     fontWeight: '600',
     fontFamily: 'Menlo',

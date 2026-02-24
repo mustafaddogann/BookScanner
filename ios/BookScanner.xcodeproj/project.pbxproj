@@ -7,7 +7,9 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0C1E2C915BD64F1081CBD009 /* PlayfairDisplay-Regular.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */; };
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
+		598731444EC245BA9FEFA703 /* PlayfairDisplay-Bold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 6590D86F12304352B03ADF41 /* PlayfairDisplay-Bold.ttf */; };
 		5DB985202F18EA11000B11F1 /* ModelPathResolver.m in Sources */ = {isa = PBXBuildFile; fileRef = 5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */; };
 		5DB985212F18EA11000B11F1 /* yolov8_obb.tflite in Resources */ = {isa = PBXBuildFile; fileRef = 5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */; };
 		5DB985232F1ABE6E000B11F1 /* ImagePreprocessor.m in Sources */ = {isa = PBXBuildFile; fileRef = 5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */; };
@@ -19,6 +21,7 @@
 		A1B2C3D42F20AAAA00SHELF1 /* shelf_001.jpg in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D52F20AAAA00SHELF1 /* shelf_001.jpg */; };
 		A1B2C3D62F20AAAA00SHELF2 /* shelf_002.jpg in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D72F20AAAA00SHELF2 /* shelf_002.jpg */; };
 		E81043FC45F0DB7D2DB852ED /* libPods-BookScanner.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 2D1573D2E85263DE734D38DB /* libPods-BookScanner.a */; };
+		F88A0FE452EC421EA8BF72A4 /* PlayfairDisplay-SemiBold.ttf in Resources */ = {isa = PBXBuildFile; fileRef = 3B6F31440D1842449395B2B4 /* PlayfairDisplay-SemiBold.ttf */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,12 +29,15 @@
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = BookScanner/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = BookScanner/Info.plist; sourceTree = "<group>"; };
 		13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = PrivacyInfo.xcprivacy; path = BookScanner/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Regular.ttf"; path = "../assets/fonts/PlayfairDisplay-Regular.ttf"; sourceTree = "<group>"; };
 		2D1573D2E85263DE734D38DB /* libPods-BookScanner.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-BookScanner.a"; sourceTree = BUILT_PRODUCTS_DIR; };
+		3B6F31440D1842449395B2B4 /* PlayfairDisplay-SemiBold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-SemiBold.ttf"; path = "../assets/fonts/PlayfairDisplay-SemiBold.ttf"; sourceTree = "<group>"; };
 		58C2049831933FBD8F86CF5E /* Pods-BookScanner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-BookScanner.debug.xcconfig"; path = "Target Support Files/Pods-BookScanner/Pods-BookScanner.debug.xcconfig"; sourceTree = "<group>"; };
 		5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ModelPathResolver.m; sourceTree = "<group>"; };
 		5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */ = {isa = PBXFileReference; lastKnownFileType = file; path = yolov8_obb.tflite; sourceTree = "<group>"; };
 		5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ImagePreprocessor.m; sourceTree = "<group>"; };
 		5DB985242F1ABE70000B11F2 /* TextRecognizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TextRecognizer.m; sourceTree = "<group>"; };
+		6590D86F12304352B03ADF41 /* PlayfairDisplay-Bold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Bold.ttf"; path = "../assets/fonts/PlayfairDisplay-Bold.ttf"; sourceTree = "<group>"; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = BookScanner/AppDelegate.swift; sourceTree = "<group>"; };
 		761780EE2CA45675006654F0 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = BookScanner/SceneDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = BookScanner/LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -95,6 +101,7 @@
 				83CBBA001A601CBA00E9B192 /* Products */,
 				2D16E6871FA4F8E400B85C8A /* Frameworks */,
 				BBD78D7AC51CEA395F1C20DB /* Pods */,
+				DA655637E9B84E79902E8BDF /* Resources */,
 			);
 			indentWidth = 2;
 			sourceTree = "<group>";
@@ -126,6 +133,17 @@
 				8D2630672457DFBB10A68236 /* Pods-BookScanner.release.xcconfig */,
 			);
 			path = Pods;
+			sourceTree = "<group>";
+		};
+		DA655637E9B84E79902E8BDF /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				6590D86F12304352B03ADF41 /* PlayfairDisplay-Bold.ttf */,
+				3B6F31440D1842449395B2B4 /* PlayfairDisplay-SemiBold.ttf */,
+				1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */,
+			);
+			name = Resources;
+			path = "";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -194,6 +212,9 @@
 				7E34C907730A22F397EDC1D6 /* PrivacyInfo.xcprivacy in Resources */,
 				A1B2C3D42F20AAAA00SHELF1 /* shelf_001.jpg in Resources */,
 				A1B2C3D62F20AAAA00SHELF2 /* shelf_002.jpg in Resources */,
+				598731444EC245BA9FEFA703 /* PlayfairDisplay-Bold.ttf in Resources */,
+				F88A0FE452EC421EA8BF72A4 /* PlayfairDisplay-SemiBold.ttf in Resources */,
+				0C1E2C915BD64F1081CBD009 /* PlayfairDisplay-Regular.ttf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -224,13 +245,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-resources-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Copy Pods Resources";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-resources-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
@@ -267,13 +284,9 @@
 			inputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-frameworks-${CONFIGURATION}-input-files.xcfilelist",
 			);
-			inputPaths = (
-			);
 			name = "[CP] Embed Pods Frameworks";
 			outputFileListPaths = (
 				"${PODS_ROOT}/Target Support Files/Pods-BookScanner/Pods-BookScanner-frameworks-${CONFIGURATION}-output-files.xcfilelist",
-			);
-			outputPaths = (
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;

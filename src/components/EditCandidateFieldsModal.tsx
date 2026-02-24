@@ -1,3 +1,12 @@
+/**
+ * EditCandidateFieldsModal - Bottom sheet for editing book info
+ *
+ * UX: Slide-up sheet with focused input fields.
+ * The sheet stays compact — no unnecessary padding or chrome.
+ * Save button disables when nothing changed.
+ * Revert is destructive and styled accordingly.
+ */
+
 import React from 'react';
 import {
   Modal,
@@ -9,6 +18,7 @@ import {
   Platform,
   StyleSheet,
 } from 'react-native';
+import { colors, fonts, spacing, radii, shadows } from '../theme';
 
 interface EditCandidateFieldsModalProps {
   visible: boolean;
@@ -44,52 +54,71 @@ export function EditCandidateFieldsModal({
     >
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.modalOverlay}
+        style={styles.overlay}
       >
-        <View style={styles.modalContent}>
-          <View style={styles.modalHeader}>
-            <Text style={styles.modalTitle}>Edit Book Info</Text>
-            <TouchableOpacity onPress={onCancel} style={styles.modalCloseButton}>
-              <Text style={styles.modalCloseText}>Cancel</Text>
+        <TouchableOpacity
+          style={styles.backdrop}
+          activeOpacity={1}
+          onPress={onCancel}
+        />
+        <View style={styles.sheet}>
+          {/* Handle */}
+          <View style={styles.handleRow}>
+            <View style={styles.handle} />
+          </View>
+
+          {/* Header */}
+          <View style={styles.header}>
+            <Text style={styles.headerTitle}>Edit Book Info</Text>
+            <TouchableOpacity onPress={onCancel} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Text style={styles.cancelText}>Cancel</Text>
             </TouchableOpacity>
           </View>
 
-          <View style={styles.modalInputContainer}>
-            <Text style={styles.modalInputLabel}>Title</Text>
+          {/* Fields */}
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Title</Text>
             <TextInput
-              style={styles.modalInput}
+              style={styles.input}
               value={title}
               onChangeText={onChangeTitle}
               placeholder="Enter book title"
-              placeholderTextColor="#636366"
+              placeholderTextColor={colors.textMuted}
               autoCapitalize="words"
               autoCorrect={false}
+              returnKeyType="next"
             />
           </View>
 
-          <View style={styles.modalInputContainer}>
-            <Text style={styles.modalInputLabel}>Author</Text>
+          <View style={styles.fieldGroup}>
+            <Text style={styles.fieldLabel}>Author</Text>
             <TextInput
-              style={styles.modalInput}
+              style={styles.input}
               value={author}
               onChangeText={onChangeAuthor}
               placeholder="Enter author name"
-              placeholderTextColor="#636366"
+              placeholderTextColor={colors.textMuted}
               autoCapitalize="words"
               autoCorrect={false}
+              returnKeyType="done"
+              onSubmitEditing={canSave ? onSave : undefined}
             />
           </View>
 
+          {/* Actions */}
           <TouchableOpacity
-            style={[styles.modalSaveButton, !canSave && styles.modalSaveButtonDisabled]}
+            style={[styles.saveButton, !canSave && styles.saveButtonDisabled]}
             onPress={onSave}
             disabled={!canSave}
+            activeOpacity={0.8}
           >
-            <Text style={styles.modalSaveButtonText}>Save</Text>
+            <Text style={[styles.saveButtonText, !canSave && styles.saveButtonTextDisabled]}>
+              Save Changes
+            </Text>
           </TouchableOpacity>
 
           {canRevert && onRevert && (
-            <TouchableOpacity style={styles.revertButton} onPress={onRevert}>
+            <TouchableOpacity style={styles.revertButton} onPress={onRevert} activeOpacity={0.7}>
               <Text style={styles.revertButtonText}>Revert to Auto-Detected</Text>
             </TouchableOpacity>
           )}
@@ -100,78 +129,101 @@ export function EditCandidateFieldsModal({
 }
 
 const styles = StyleSheet.create({
-  modalOverlay: {
+  overlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
-  modalContent: {
-    backgroundColor: '#1c1c1e',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+  backdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(12, 10, 9, 0.5)',
   },
-  modalHeader: {
+  sheet: {
+    backgroundColor: colors.bgElevated,
+    borderTopLeftRadius: radii.xxl,
+    borderTopRightRadius: radii.xxl,
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: Platform.OS === 'ios' ? 40 : 24,
+    borderTopWidth: 1,
+    borderTopColor: colors.glassBorder,
+  },
+  handleRow: {
+    alignItems: 'center',
+    paddingTop: spacing.md,
+    paddingBottom: spacing.lg,
+  },
+  handle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.bgOverlay,
+  },
+  header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: spacing.xxl,
   },
-  modalTitle: {
-    color: '#fff',
+  headerTitle: {
+    color: colors.textPrimary,
     fontSize: 18,
+    fontFamily: fonts.display.semiBold,
+  },
+  cancelText: {
+    color: colors.textSecondary,
+    fontSize: 15,
+  },
+  fieldGroup: {
+    marginBottom: spacing.xl,
+  },
+  fieldLabel: {
+    color: colors.textTertiary,
+    fontSize: 12,
     fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
   },
-  modalCloseButton: {
-    padding: 8,
-  },
-  modalCloseText: {
-    color: '#007AFF',
+  input: {
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    color: colors.textPrimary,
     fontSize: 16,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
-  modalInputContainer: {
-    marginBottom: 16,
-  },
-  modalInputLabel: {
-    color: '#8e8e93',
-    fontSize: 13,
-    marginBottom: 8,
-  },
-  modalInput: {
-    backgroundColor: '#38383a',
-    borderRadius: 8,
-    padding: 12,
-    color: '#fff',
-    fontSize: 16,
-  },
-  modalSaveButton: {
-    backgroundColor: '#007AFF',
-    borderRadius: 8,
-    padding: 14,
+  saveButton: {
+    backgroundColor: colors.primary,
+    borderRadius: radii.lg,
+    paddingVertical: 15,
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: spacing.sm,
+    ...shadows.glowSubtle,
   },
-  modalSaveButtonDisabled: {
-    backgroundColor: '#38383a',
+  saveButtonDisabled: {
+    backgroundColor: colors.bgNested,
+    shadowOpacity: 0,
   },
-  modalSaveButtonText: {
-    color: '#fff',
+  saveButtonText: {
+    color: colors.bgDeep,
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
+  },
+  saveButtonTextDisabled: {
+    color: colors.textMuted,
   },
   revertButton: {
     backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: '#FF3B30',
-    borderRadius: 8,
-    padding: 14,
+    borderWidth: 1.5,
+    borderColor: 'rgba(199, 92, 92, 0.4)',
+    borderRadius: radii.lg,
+    paddingVertical: 14,
     alignItems: 'center',
-    marginTop: 12,
+    marginTop: spacing.md,
   },
   revertButtonText: {
-    color: '#FF3B30',
-    fontSize: 16,
+    color: colors.rejected,
+    fontSize: 15,
     fontWeight: '600',
   },
 });

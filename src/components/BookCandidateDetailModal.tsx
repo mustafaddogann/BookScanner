@@ -1,3 +1,18 @@
+/**
+ * BookCandidateDetailModal - Full-screen book detail view
+ *
+ * UX Flow:
+ * 1. Opens with book name as hero element
+ * 2. Crop images horizontally scrollable at top for visual context
+ * 3. Resolved book info prominent with clear accept/edit actions
+ * 4. Debug/evidence info collapsed by default (expandable for power users)
+ *
+ * Key decisions:
+ * - Accept button is full-width and visually dominant — this is the primary action
+ * - Evidence text is de-emphasized (most users don't need it)
+ * - Suggestions are easy to compare with clear "Select" affordance
+ */
+
 import React, { useMemo, useState, useEffect, useCallback } from 'react';
 import {
   Modal,
@@ -14,6 +29,7 @@ import type { BookCandidate } from '../types';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 import { useAppStore } from '../store/useAppStore';
 import { ensureFileUri } from '../utils/fileUri';
+import { colors, fonts, spacing, radii, shadows } from '../theme';
 
 interface BookCandidateDetailModalProps {
   visible: boolean;
@@ -24,11 +40,8 @@ interface BookCandidateDetailModalProps {
   isEdited?: boolean;
   onRevert?: () => void;
   canRevert?: boolean;
-  /** Called when user accepts a suggested book match */
   onAccept?: () => void;
-  /** Called when user selects a specific candidate from suggestions */
   onSelectCandidate?: (candidateIndex: number) => void;
-  /** Whether accept is currently running */
   isAccepting?: boolean;
 }
 
@@ -71,12 +84,8 @@ type ExtractedFieldsSnapshot = {
 
 function formatConfidence(value?: number | null): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
-  if (value >= 0 && value <= 1) {
-    return `${Math.round(value * 100)}%`;
-  }
-  if (value > 1 && value <= 100) {
-    return `${Math.round(value)}%`;
-  }
+  if (value >= 0 && value <= 1) return `${Math.round(value * 100)}%`;
+  if (value > 1 && value <= 100) return `${Math.round(value)}%`;
   return null;
 }
 
@@ -96,6 +105,7 @@ export function BookCandidateDetailModal({
   const sessionMeta = useAppStore((state) => state.sessionMeta);
   const rectificationResults = sessionMeta?.rectificationResults ?? [];
   const [showAlternatives, setShowAlternatives] = useState(false);
+  const [showDebug, setShowDebug] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
   const candidateId = (candidate as { candidateId?: string })?.candidateId ?? candidate?.id ?? 'unknown';
@@ -110,6 +120,7 @@ export function BookCandidateDetailModal({
   useEffect(() => {
     if (!visible) {
       setShowAlternatives(false);
+      setShowDebug(false);
       setPreviewUri(null);
     }
   }, [visible, candidateId]);
@@ -139,15 +150,7 @@ export function BookCandidateDetailModal({
   const resolveCropUri = useCallback((cropIndex: number): string | null => {
     const info = rectificationResults[cropIndex] as unknown as Record<string, unknown> | undefined;
     if (!info) return null;
-    const candidates = [
-      info.cropUri,
-      info.rectifiedPath,
-      info.outputPath,
-      info.cropPath,
-      info.uprightPath,
-      info.imagePath,
-      info.uri,
-    ];
+    const candidates = [info.cropUri, info.rectifiedPath, info.outputPath, info.cropPath, info.uprightPath, info.imagePath, info.uri];
     for (const entry of candidates) {
       if (typeof entry !== 'string' || entry.length === 0) continue;
       if (entry.startsWith('content://')) return entry;
@@ -172,60 +175,19 @@ export function BookCandidateDetailModal({
     };
   }, [extractedFields]);
 
-  const renderFieldRow = (labelText: string, value?: string | null) => {
-    if (!value) return null;
-    return (
-      <View style={styles.fieldRow}>
-        <Text style={styles.fieldLabel}>{labelText}</Text>
-        <Text style={styles.fieldValue}>{value}</Text>
-      </View>
-    );
-  };
-
-  const renderCandidateList = (
-    labelText: string,
-    list?: Array<{ value?: string; confidence?: number }>
-  ) => {
-    if (!list || list.length === 0) return null;
-    const top = list.slice(0, 3);
-    return (
-      <View style={styles.altGroup}>
-        <Text style={styles.altLabel}>{labelText}</Text>
-        {top.map((item, idx) => {
-          const confidence = formatConfidence(item.confidence);
-          return (
-            <Text key={idx} style={styles.altItem} numberOfLines={1}>
-              {item.value || '—'}{confidence ? ` (${confidence})` : ''}
-            </Text>
-          );
-        })}
-      </View>
-    );
-  };
-
   if (!candidate) {
     return (
-      <Modal
-        visible={visible}
-        animationType="slide"
-        transparent={false}
-        onRequestClose={onClose}
-      >
+      <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onClose}>
         <View style={styles.container}>
           <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>Book</Text>
-              <Text style={styles.subtitle}>ID: unknown</Text>
-            </View>
-            <View style={styles.headerActions}>
-              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-                <Text style={styles.closeText}>Close</Text>
-              </TouchableOpacity>
-            </View>
+            <Text style={styles.headerTitle}>Book</Text>
+            <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+              <Text style={styles.closeBtnText}>Close</Text>
+            </TouchableOpacity>
           </View>
-          <ScrollView contentContainerStyle={styles.content}>
+          <View style={styles.emptyContainer}>
             <Text style={styles.emptyText}>No book candidate selected.</Text>
-          </ScrollView>
+          </View>
         </View>
       </Modal>
     );
@@ -233,183 +195,127 @@ export function BookCandidateDetailModal({
 
   return (
     <>
-      <Modal
-        visible={visible}
-        animationType="slide"
-        transparent={false}
-        onRequestClose={onClose}
-      >
+      <Modal visible={visible} animationType="slide" transparent={false} onRequestClose={onClose}>
         <View style={styles.container}>
+          {/* Header */}
           <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>{label}</Text>
-              <Text style={styles.subtitle}>ID: {candidateId}</Text>
-              {(isAutoApplied || isEdited) && (
-                <View style={styles.badgesRow}>
-                  {isAutoApplied && (
-                    <View style={styles.autoBadge}>
-                      <Text style={styles.autoBadgeText}>Auto</Text>
-                    </View>
-                  )}
-                  {isEdited && (
-                    <View style={styles.editedBadge}>
-                      <Text style={styles.editedBadgeText}>Edited</Text>
-                    </View>
-                  )}
-                </View>
-              )}
+            <View style={styles.headerLeft}>
+              <Text style={styles.headerTitle}>{label}</Text>
+              <View style={styles.headerBadges}>
+                {resolverDecision === 'accept' && (
+                  <View style={[styles.headerBadge, { backgroundColor: 'rgba(126, 200, 126, 0.12)' }]}>
+                    <Text style={[styles.headerBadgeText, { color: colors.verified }]}>Verified</Text>
+                  </View>
+                )}
+                {resolverDecision === 'suggested' && (
+                  <View style={[styles.headerBadge, { backgroundColor: colors.primaryMuted }]}>
+                    <Text style={[styles.headerBadgeText, { color: colors.primary }]}>Suggested</Text>
+                  </View>
+                )}
+                {resolverDecision === 'reject' && (
+                  <View style={[styles.headerBadge, { backgroundColor: 'rgba(199, 92, 92, 0.12)' }]}>
+                    <Text style={[styles.headerBadgeText, { color: colors.rejected }]}>No match</Text>
+                  </View>
+                )}
+                {isAutoApplied && (
+                  <View style={[styles.headerBadge, { backgroundColor: colors.bgNested }]}>
+                    <Text style={[styles.headerBadgeText, { color: colors.verified }]}>Auto</Text>
+                  </View>
+                )}
+                {isEdited && (
+                  <View style={[styles.headerBadge, { backgroundColor: colors.bgNested }]}>
+                    <Text style={[styles.headerBadgeText, { color: colors.accent }]}>Edited</Text>
+                  </View>
+                )}
+              </View>
             </View>
             <View style={styles.headerActions}>
               {onEdit && (
-                <TouchableOpacity
-                  onPress={onEdit}
-                  style={styles.editButton}
-                  disabled={!canEdit}
-                >
-                  <Text style={[styles.editText, !canEdit && styles.editTextDisabled]}>
-                    Edit
-                  </Text>
+                <TouchableOpacity onPress={onEdit} style={styles.headerActionBtn} disabled={!canEdit}>
+                  <Text style={[styles.headerActionText, !canEdit && styles.headerActionDisabled]}>Edit</Text>
                 </TouchableOpacity>
               )}
-              <TouchableOpacity onPress={onClose} style={styles.closeButton}>
-                <Text style={styles.closeText}>Close</Text>
+              <TouchableOpacity onPress={onClose} style={styles.closeBtn}>
+                <Text style={styles.closeBtnText}>Close</Text>
               </TouchableOpacity>
             </View>
           </View>
 
-          <ScrollView contentContainerStyle={styles.content}>
-            <Text style={styles.sectionTitle}>Crops</Text>
-            {cropIndices.length > 0 ? (
-              <FlatList
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                data={cropIndices}
-                contentContainerStyle={styles.cropStrip}
-                keyExtractor={(cropIndex) => `${candidateId}_${cropIndex}`}
-                renderItem={({ item: cropIndex }) => {
-                  const uri = resolveCropUri(cropIndex);
-                  if (!uri) {
+          <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+            {/* Crops strip */}
+            {cropIndices.length > 0 && (
+              <View style={styles.cropsSection}>
+                <Text style={styles.sectionLabel}>CROPS</Text>
+                <FlatList
+                  horizontal
+                  showsHorizontalScrollIndicator={false}
+                  data={cropIndices}
+                  contentContainerStyle={styles.cropStrip}
+                  keyExtractor={(cropIndex) => `${candidateId}_${cropIndex}`}
+                  renderItem={({ item: cropIndex }) => {
+                    const uri = resolveCropUri(cropIndex);
+                    if (!uri) {
+                      return (
+                        <View style={styles.cropPlaceholder}>
+                          <Text style={styles.cropPlaceholderText}>Crop {cropIndex + 1}</Text>
+                        </View>
+                      );
+                    }
                     return (
-                      <View style={styles.cropThumbPlaceholder}>
-                        <Text style={styles.cropThumbLabel}>Crop {cropIndex + 1}</Text>
-                        <Text style={styles.cropThumbSubtext}>Unavailable</Text>
-                      </View>
+                      <Pressable style={styles.cropThumb} onPress={() => setPreviewUri(uri)} hitSlop={8}>
+                        <Image source={{ uri }} style={styles.cropImage} resizeMode="cover" />
+                      </Pressable>
                     );
-                  }
-                  return (
-                    <Pressable
-                      style={styles.cropThumb}
-                      onPress={() => setPreviewUri(uri)}
-                      hitSlop={10}
-                    >
-                      <Image
-                        source={{ uri }}
-                        style={styles.cropThumbImage}
-                        resizeMode="cover"
-                      />
-                    </Pressable>
-                  );
-                }}
-              />
-            ) : (
-              <Text style={styles.emptyText}>No contributing crops</Text>
-            )}
-
-            <Text style={styles.sectionTitle}>Merged Text</Text>
-            <Text style={styles.bodyText}>
-              {mergedText.length > 0 ? mergedText : 'No merged text available.'}
-            </Text>
-
-            {extractedFields && chosenFields && (
-              <View style={styles.fieldsSection}>
-                <Text style={styles.sectionTitle}>Fields</Text>
-                {renderFieldRow('Title', chosenFields.title)}
-                {renderFieldRow('Author', chosenFields.author)}
-                {renderFieldRow('ISBN', chosenFields.isbn)}
-                {renderFieldRow('Publisher', chosenFields.publisher)}
-                {renderFieldRow('Edition', chosenFields.edition)}
-
-                <TouchableOpacity
-                  onPress={() => setShowAlternatives((prev) => !prev)}
-                  style={styles.altToggle}
-                >
-                  <Text style={styles.altToggleText}>
-                    {showAlternatives ? 'Hide alternatives' : 'Show alternatives'}
-                  </Text>
-                </TouchableOpacity>
-
-                {showAlternatives && (
-                  <View style={styles.altContainer}>
-                    {renderCandidateList('Title candidates', extractedFields.titleCandidates)}
-                    {renderCandidateList('Author candidates', extractedFields.authorCandidates)}
-                    {renderCandidateList('Publisher candidates', extractedFields.publisherCandidates)}
-                    {renderCandidateList('Edition candidates', extractedFields.editionCandidates)}
-                  </View>
-                )}
+                  }}
+                />
               </View>
             )}
 
-            {/* Resolver Status - Always show decision + reason */}
-            {candidate && (
-              <View style={styles.resolvedSection}>
-                <Text style={styles.sectionTitle}>Resolver Status</Text>
-                <View style={styles.resolvedCard}>
-                  <Text style={[
-                    styles.resolvedStatusText,
-                    resolverDecision === 'accept' && styles.statusAccepted,
-                    resolverDecision === 'suggested' && styles.statusReview,
-                    resolverDecision === 'reject' && styles.statusRejected,
-                  ]}>
-                    Status: {resolverDecision}
-                  </Text>
-                  <Text style={styles.resolvedReasonText}>
-                    Reason: {resolverReason || '—'}
-                  </Text>
-                </View>
-              </View>
-            )}
-
-            {/* Resolved Book Section - Show match and Accept button */}
+            {/* Matched Book — hero section */}
             {candidate.resolvedBook && (
-              <View style={styles.resolvedSection}>
-                <Text style={styles.sectionTitle}>Matched Book</Text>
-                <View style={styles.resolvedCard}>
-                  <Text style={styles.resolvedTitle} numberOfLines={2}>
+              <View style={styles.matchedSection}>
+                <Text style={styles.sectionLabel}>MATCHED BOOK</Text>
+                <View style={styles.matchedCard}>
+                  <Text style={styles.matchedTitle} numberOfLines={3}>
                     {candidate.resolvedBook.title}
                   </Text>
                   {candidate.resolvedBook.authors && candidate.resolvedBook.authors.length > 0 && (
-                    <Text style={styles.resolvedAuthors} numberOfLines={1}>
-                      {candidate.resolvedBook.authors.join(', ')}
+                    <Text style={styles.matchedAuthors} numberOfLines={1}>
+                      by {candidate.resolvedBook.authors.join(', ')}
                     </Text>
                   )}
-                  <View style={styles.resolvedMeta}>
+                  <View style={styles.matchedMeta}>
                     {candidate.resolvedBook.isbn13 && (
-                      <Text style={styles.resolvedIsbn}>ISBN: {candidate.resolvedBook.isbn13}</Text>
+                      <Text style={styles.matchedMetaText}>ISBN {candidate.resolvedBook.isbn13}</Text>
                     )}
                     {candidate.resolvedBook.source && (
-                      <Text style={styles.resolvedSource}>Source: {candidate.resolvedBook.source}</Text>
+                      <Text style={styles.matchedMetaText}>via {candidate.resolvedBook.source}</Text>
                     )}
                   </View>
-                  <View style={styles.resolvedStatus}>
+
+                  {/* Status */}
+                  <View style={styles.statusRow}>
                     <Text style={[
-                      styles.resolvedStatusText,
-                      candidate.resolverDecision === 'accept' && styles.statusAccepted,
-                      candidate.resolverDecision === 'suggested' && styles.statusReview,
-                      candidate.resolverDecision === 'reject' && styles.statusRejected,
+                      styles.statusText,
+                      resolverDecision === 'accept' && { color: colors.verified },
+                      resolverDecision === 'suggested' && { color: colors.primary },
+                      resolverDecision === 'reject' && { color: colors.rejected },
                     ]}>
-                      Status: {candidate.resolverDecision || 'pending'}
+                      {resolverDecision}
                     </Text>
-                    <Text style={styles.resolvedReasonText}>
-                      Reason: {resolverReason || '—'}
-                    </Text>
+                    {resolverReason && (
+                      <Text style={styles.reasonText} numberOfLines={2}>{resolverReason}</Text>
+                    )}
                   </View>
                 </View>
-                {/* Accept button - show when not already accepted */}
+
+                {/* Accept button — primary action */}
                 {onAccept && candidate.resolverDecision !== 'accept' && (
                   <TouchableOpacity
                     style={[styles.acceptButton, isAccepting && styles.acceptButtonDisabled]}
                     onPress={onAccept}
                     disabled={isAccepting}
+                    activeOpacity={0.8}
                   >
                     <Text style={styles.acceptButtonText}>
                       {isAccepting ? 'Accepting...' : 'Accept Match'}
@@ -417,21 +323,22 @@ export function BookCandidateDetailModal({
                   </TouchableOpacity>
                 )}
                 {candidate.resolverDecision === 'accept' && (
-                  <View style={styles.acceptedBadge}>
-                    <Text style={styles.acceptedBadgeText}>✓ Accepted & Cataloged</Text>
+                  <View style={styles.acceptedBanner}>
+                    <Text style={styles.acceptedBannerIcon}>{'\u2713'}</Text>
+                    <Text style={styles.acceptedBannerText}>Accepted & Cataloged</Text>
                   </View>
                 )}
               </View>
             )}
 
-            {/* Manual Review Candidates Section - Show alternative matches */}
+            {/* Alternative suggestions */}
             {candidate.resolverDecision === 'suggested' &&
               candidate.resolverSuggestions &&
               candidate.resolverSuggestions.length > 0 && (
               <View style={styles.suggestionsSection}>
-                <Text style={styles.sectionTitle}>Alternative Matches</Text>
+                <Text style={styles.sectionLabel}>ALTERNATIVES</Text>
                 <Text style={styles.suggestionsHint}>
-                  Select a match below or accept the top match above
+                  Not the right match? Try one of these:
                 </Text>
                 {candidate.resolverSuggestions.slice(0, 3).map((suggestion, idx) => (
                   <TouchableOpacity
@@ -439,8 +346,9 @@ export function BookCandidateDetailModal({
                     style={styles.suggestionCard}
                     onPress={() => onSelectCandidate?.(idx)}
                     disabled={isAccepting}
+                    activeOpacity={0.7}
                   >
-                    <View style={styles.suggestionContent}>
+                    <View style={styles.suggestionInfo}>
                       <Text style={styles.suggestionTitle} numberOfLines={2}>
                         {suggestion.title}
                       </Text>
@@ -451,45 +359,121 @@ export function BookCandidateDetailModal({
                       )}
                       <View style={styles.suggestionMeta}>
                         {suggestion.isbn13 && (
-                          <Text style={styles.suggestionIsbn}>ISBN: {suggestion.isbn13}</Text>
+                          <Text style={styles.suggestionMetaText}>ISBN {suggestion.isbn13}</Text>
                         )}
                         {suggestion.publishYear && (
-                          <Text style={styles.suggestionYear}>{suggestion.publishYear}</Text>
+                          <Text style={styles.suggestionMetaText}>{suggestion.publishYear}</Text>
                         )}
                       </View>
                     </View>
-                    <View style={styles.suggestionAction}>
-                      <Text style={styles.suggestionActionText}>Select</Text>
+                    <View style={styles.selectButton}>
+                      <Text style={styles.selectButtonText}>Select</Text>
                     </View>
                   </TouchableOpacity>
                 ))}
               </View>
             )}
 
-            {/* Evidence Search Debug - Show hypotheses and scores */}
-            {DEBUG_ARTIFACTS_ENABLED && candidate.evidenceSearchDebug && (
+            {/* Extracted fields */}
+            {extractedFields && chosenFields && (
+              <View style={styles.fieldsSection}>
+                <Text style={styles.sectionLabel}>EXTRACTED FIELDS</Text>
+                <View style={styles.fieldsCard}>
+                  {chosenFields.title && (
+                    <View style={styles.fieldRow}>
+                      <Text style={styles.fieldLabel}>Title</Text>
+                      <Text style={styles.fieldValue}>{chosenFields.title}</Text>
+                    </View>
+                  )}
+                  {chosenFields.author && (
+                    <View style={styles.fieldRow}>
+                      <Text style={styles.fieldLabel}>Author</Text>
+                      <Text style={styles.fieldValue}>{chosenFields.author}</Text>
+                    </View>
+                  )}
+                  {chosenFields.isbn && (
+                    <View style={styles.fieldRow}>
+                      <Text style={styles.fieldLabel}>ISBN</Text>
+                      <Text style={styles.fieldValue}>{chosenFields.isbn}</Text>
+                    </View>
+                  )}
+                  {chosenFields.publisher && (
+                    <View style={styles.fieldRow}>
+                      <Text style={styles.fieldLabel}>Publisher</Text>
+                      <Text style={styles.fieldValue}>{chosenFields.publisher}</Text>
+                    </View>
+                  )}
+
+                  {extractedFields.titleCandidates && extractedFields.titleCandidates.length > 1 && (
+                    <TouchableOpacity
+                      onPress={() => setShowAlternatives((prev) => !prev)}
+                      style={styles.altToggle}
+                    >
+                      <Text style={styles.altToggleText}>
+                        {showAlternatives ? 'Hide alternatives' : 'Show alternatives'}
+                      </Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {showAlternatives && (
+                    <View style={styles.altContainer}>
+                      {extractedFields.titleCandidates && extractedFields.titleCandidates.length > 0 && (
+                        <View style={styles.altGroup}>
+                          <Text style={styles.altGroupLabel}>Title candidates</Text>
+                          {extractedFields.titleCandidates.slice(0, 3).map((item, idx) => (
+                            <Text key={idx} style={styles.altItem} numberOfLines={1}>
+                              {item.value || '\u2014'}{item.confidence ? ` (${formatConfidence(item.confidence)})` : ''}
+                            </Text>
+                          ))}
+                        </View>
+                      )}
+                      {extractedFields.authorCandidates && extractedFields.authorCandidates.length > 0 && (
+                        <View style={styles.altGroup}>
+                          <Text style={styles.altGroupLabel}>Author candidates</Text>
+                          {extractedFields.authorCandidates.slice(0, 3).map((item, idx) => (
+                            <Text key={idx} style={styles.altItem} numberOfLines={1}>
+                              {item.value || '\u2014'}{item.confidence ? ` (${formatConfidence(item.confidence)})` : ''}
+                            </Text>
+                          ))}
+                        </View>
+                      )}
+                    </View>
+                  )}
+                </View>
+              </View>
+            )}
+
+            {/* OCR evidence (collapsed by default) */}
+            {mergedText.length > 0 && (
+              <View style={styles.evidenceSection}>
+                <TouchableOpacity
+                  onPress={() => setShowDebug((prev) => !prev)}
+                  style={styles.evidenceToggle}
+                >
+                  <Text style={styles.sectionLabel}>OCR EVIDENCE</Text>
+                  <Text style={styles.evidenceChevron}>{showDebug ? '\u25B4' : '\u25BE'}</Text>
+                </TouchableOpacity>
+                {showDebug && (
+                  <View style={styles.evidenceCard}>
+                    <Text style={styles.evidenceText}>{mergedText}</Text>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {/* Debug sections (only in debug builds) */}
+            {DEBUG_ARTIFACTS_ENABLED && showDebug && candidate.evidenceSearchDebug && (
               <View style={styles.debugSection}>
-                <Text style={styles.sectionTitle}>Evidence Search Debug</Text>
+                <Text style={styles.sectionLabel}>SEARCH DEBUG</Text>
                 <View style={styles.debugCard}>
                   <Text style={styles.debugLabel}>Hypotheses: {candidate.evidenceSearchDebug.hypothesesCount}</Text>
-                  <Text style={styles.debugLabel}>Candidates Found: {candidate.evidenceSearchDebug.candidatesFound}</Text>
-                  <Text style={styles.debugLabel}>Search Time: {candidate.evidenceSearchDebug.searchTimeMs}ms</Text>
+                  <Text style={styles.debugLabel}>Candidates: {candidate.evidenceSearchDebug.candidatesFound}</Text>
+                  <Text style={styles.debugLabel}>Search: {candidate.evidenceSearchDebug.searchTimeMs}ms</Text>
                   {candidate.evidenceSearchDebug.topScores && candidate.evidenceSearchDebug.topScores.length > 0 && (
-                    <View style={styles.topScoresSection}>
-                      <Text style={styles.debugLabel}>Top Scores:</Text>
+                    <View style={{ marginTop: 6 }}>
                       {candidate.evidenceSearchDebug.topScores.slice(0, 3).map((s, i) => (
                         <Text key={i} style={styles.debugScore}>
                           {Math.round(s.score * 100)}% - {s.title}
-                        </Text>
-                      ))}
-                    </View>
-                  )}
-                  {candidate.evidenceSearchDebug.queriesTried && (
-                    <View style={styles.queriesSection}>
-                      <Text style={styles.debugLabel}>Queries Tried:</Text>
-                      {candidate.evidenceSearchDebug.queriesTried.slice(0, 5).map((q, i) => (
-                        <Text key={i} style={styles.debugQuery} numberOfLines={1}>
-                          {i + 1}. {q}
                         </Text>
                       ))}
                     </View>
@@ -498,67 +482,43 @@ export function BookCandidateDetailModal({
               </View>
             )}
 
+            {/* Revert */}
             <View style={styles.revertSection}>
               <TouchableOpacity
                 style={[styles.revertButton, !allowRevert && styles.revertButtonDisabled]}
                 onPress={onRevert}
                 disabled={!allowRevert}
               >
-                <Text style={styles.revertButtonText}>Revert to auto</Text>
+                <Text style={[styles.revertButtonText, !allowRevert && styles.revertButtonTextDisabled]}>
+                  Revert to auto-detected
+                </Text>
               </TouchableOpacity>
-              {!allowRevert && (
-                <Text style={styles.revertHelperText}>Not available yet</Text>
-              )}
             </View>
 
-            {DEBUG_ARTIFACTS_ENABLED && (
+            {/* Evidence lines debug */}
+            {DEBUG_ARTIFACTS_ENABLED && showDebug && evidenceLines.length > 0 && (
               <View style={styles.debugSection}>
-                <Text style={styles.sectionTitle}>Evidence Lines (Debug)</Text>
-                {evidenceLines.length === 0 ? (
-                  <Text style={styles.emptyText}>No evidence lines available</Text>
-                ) : (
-                  evidenceLines.map((line, idx) => {
-                    const confidenceLabel = formatConfidence(line.confidence) ?? '—';
-                    const cropLabel = Number.isFinite(line.sourceCropIndex)
-                      ? `Crop ${Number(line.sourceCropIndex) + 1}`
-                      : '—';
-                    const rotationLabel = Number.isFinite(line.sourceRotation)
-                      ? `${line.sourceRotation}°`
-                      : '—';
-
-                    return (
-                      <View key={idx} style={styles.lineRow}>
-                        <Text style={styles.lineText} numberOfLines={2}>
-                          {line.text || '—'}
-                        </Text>
-                        <View style={styles.lineMetaRow}>
-                          <Text style={styles.lineMeta}>Conf {confidenceLabel}</Text>
-                          <Text style={styles.lineMeta}>{cropLabel}</Text>
-                          <Text style={styles.lineMeta}>Rot {rotationLabel}</Text>
-                        </View>
-                      </View>
-                    );
-                  })
-                )}
+                <Text style={styles.sectionLabel}>EVIDENCE LINES</Text>
+                {evidenceLines.map((line, idx) => {
+                  const confLabel = formatConfidence(line.confidence) ?? '\u2014';
+                  return (
+                    <View key={idx} style={styles.lineRow}>
+                      <Text style={styles.lineText} numberOfLines={2}>{line.text || '\u2014'}</Text>
+                      <Text style={styles.lineMeta}>Conf {confLabel}</Text>
+                    </View>
+                  );
+                })}
               </View>
             )}
           </ScrollView>
+
+          {/* Full-screen preview */}
           {previewUri && (
             <View style={styles.previewOverlay} pointerEvents="box-none">
-              <Pressable
-                style={styles.previewBackdrop}
-                onPress={() => setPreviewUri(null)}
-              />
+              <Pressable style={styles.previewBackdrop} onPress={() => setPreviewUri(null)} />
               <View style={styles.previewContent} pointerEvents="auto">
-                <Image
-                  source={{ uri: previewUri }}
-                  style={styles.previewImage}
-                  resizeMode="contain"
-                />
-                <Pressable
-                  style={styles.previewClose}
-                  onPress={() => setPreviewUri(null)}
-                >
+                <Image source={{ uri: previewUri }} style={styles.previewImage} resizeMode="contain" />
+                <Pressable style={styles.previewClose} onPress={() => setPreviewUri(null)}>
                   <Text style={styles.previewCloseText}>Close</Text>
                 </Pressable>
               </View>
@@ -573,425 +533,455 @@ export function BookCandidateDetailModal({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
-    position: 'relative',
+    backgroundColor: colors.bgDeep,
   },
+
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.xxl,
     paddingTop: 60,
-    paddingBottom: 16,
-    backgroundColor: '#1c1c1e',
+    paddingBottom: spacing.lg,
+    backgroundColor: colors.bgElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.separator,
   },
-  title: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
+  headerLeft: {
+    flex: 1,
   },
-  subtitle: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginTop: 4,
+  headerTitle: {
+    color: colors.textPrimary,
+    fontSize: 20,
+    fontFamily: fonts.display.semiBold,
   },
-  badgesRow: {
+  headerBadges: {
     flexDirection: 'row',
+    gap: 6,
     marginTop: 6,
   },
-  autoBadge: {
-    backgroundColor: '#2c2c2e',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginRight: 6,
+  headerBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
   },
-  autoBadgeText: {
-    color: '#30D158',
+  headerBadgeText: {
     fontSize: 10,
-    fontWeight: '600',
-  },
-  editedBadge: {
-    backgroundColor: '#2c2c2e',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  editedBadgeText: {
-    color: '#FF9F0A',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  closeButton: {
-    padding: 8,
-  },
-  closeText: {
-    color: '#007AFF',
-    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
   headerActions: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 4,
   },
-  editButton: {
-    padding: 8,
-    marginRight: 6,
+  headerActionBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
   },
-  editText: {
-    color: '#007AFF',
-    fontSize: 16,
-  },
-  editTextDisabled: {
-    color: '#636366',
-  },
-  content: {
-    padding: 16,
-  },
-  sectionTitle: {
-    color: '#8e8e93',
-    fontSize: 13,
+  headerActionText: {
+    color: colors.primary,
+    fontSize: 15,
     fontWeight: '600',
-    marginBottom: 8,
-    marginTop: 12,
+  },
+  headerActionDisabled: {
+    color: colors.textMuted,
+  },
+  closeBtn: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+  },
+  closeBtnText: {
+    color: colors.textSecondary,
+    fontSize: 15,
+  },
+
+  // Content
+  content: {
+    padding: spacing.xxl,
+    paddingBottom: spacing.xxxxl,
+  },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emptyText: {
+    color: colors.textTertiary,
+    fontSize: 14,
+  },
+
+  // Section label
+  sectionLabel: {
+    color: colors.primary,
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 1.5,
+    marginBottom: spacing.sm,
+  },
+
+  // Crops
+  cropsSection: {
+    marginBottom: spacing.xxl,
   },
   cropStrip: {
-    paddingBottom: 8,
+    paddingBottom: 4,
+    gap: 8,
   },
   cropThumb: {
-    width: 72,
-    height: 72,
-    borderRadius: 10,
+    width: 80,
+    height: 80,
+    borderRadius: radii.md,
     overflow: 'hidden',
-    marginRight: 8,
-    backgroundColor: '#2c2c2e',
+    backgroundColor: colors.bgNested,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
-  cropThumbImage: {
+  cropImage: {
     width: '100%',
     height: '100%',
   },
-  cropThumbPlaceholder: {
-    width: 72,
-    height: 72,
-    borderRadius: 10,
-    marginRight: 8,
-    backgroundColor: '#2c2c2e',
+  cropPlaceholder: {
+    width: 80,
+    height: 80,
+    borderRadius: radii.md,
+    backgroundColor: colors.bgNested,
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 6,
   },
-  cropThumbLabel: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: '600',
-    textAlign: 'center',
-  },
-  cropThumbSubtext: {
-    color: '#8e8e93',
+  cropPlaceholderText: {
+    color: colors.textMuted,
     fontSize: 9,
+    fontWeight: '600',
+  },
+
+  // Matched book
+  matchedSection: {
+    marginBottom: spacing.xxl,
+  },
+  matchedCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    padding: spacing.xl,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+  matchedTitle: {
+    color: colors.textPrimary,
+    fontSize: 18,
+    fontFamily: fonts.display.semiBold,
+    lineHeight: 24,
+  },
+  matchedAuthors: {
+    color: colors.textSecondary,
+    fontSize: 14,
     marginTop: 4,
-    textAlign: 'center',
   },
-  bodyText: {
-    color: '#a0a0a5',
-    fontSize: 13,
-    lineHeight: 18,
+  matchedMeta: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: spacing.md,
+    marginTop: spacing.md,
   },
+  matchedMetaText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    letterSpacing: 0.3,
+  },
+  statusRow: {
+    marginTop: spacing.lg,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.separator,
+  },
+  statusText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
+    textTransform: 'capitalize',
+  },
+  reasonText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 4,
+  },
+
+  // Accept
+  acceptButton: {
+    backgroundColor: colors.primary,
+    borderRadius: radii.lg,
+    paddingVertical: 15,
+    alignItems: 'center',
+    marginTop: spacing.lg,
+    ...shadows.glow,
+  },
+  acceptButtonDisabled: {
+    backgroundColor: colors.bgNested,
+    shadowOpacity: 0,
+  },
+  acceptButtonText: {
+    color: colors.bgDeep,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  acceptedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(126, 200, 126, 0.1)',
+    borderRadius: radii.lg,
+    paddingVertical: 12,
+    marginTop: spacing.lg,
+    borderWidth: 1,
+    borderColor: 'rgba(126, 200, 126, 0.2)',
+  },
+  acceptedBannerIcon: {
+    color: colors.verified,
+    fontSize: 16,
+    fontWeight: '700',
+  },
+  acceptedBannerText: {
+    color: colors.verified,
+    fontSize: 14,
+    fontWeight: '600',
+  },
+
+  // Suggestions
+  suggestionsSection: {
+    marginBottom: spacing.xxl,
+  },
+  suggestionsHint: {
+    color: colors.textTertiary,
+    fontSize: 12,
+    marginBottom: spacing.md,
+  },
+  suggestionCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    marginBottom: spacing.sm,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+  suggestionInfo: {
+    flex: 1,
+  },
+  suggestionTitle: {
+    color: colors.textPrimary,
+    fontSize: 14,
+    fontWeight: '500',
+  },
+  suggestionAuthors: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    marginTop: 2,
+  },
+  suggestionMeta: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+    marginTop: 4,
+  },
+  suggestionMetaText: {
+    color: colors.textMuted,
+    fontSize: 10,
+  },
+  selectButton: {
+    backgroundColor: colors.primaryMuted,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radii.pill,
+    marginLeft: spacing.md,
+  },
+  selectButtonText: {
+    color: colors.primary,
+    fontSize: 12,
+    fontWeight: '700',
+  },
+
+  // Fields
   fieldsSection: {
-    marginTop: 12,
+    marginBottom: spacing.xxl,
+  },
+  fieldsCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   fieldRow: {
-    marginBottom: 6,
+    marginBottom: spacing.md,
   },
   fieldLabel: {
-    color: '#8e8e93',
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
     marginBottom: 2,
   },
   fieldValue: {
-    color: '#fff',
-    fontSize: 13,
+    color: colors.textPrimary,
+    fontSize: 14,
   },
   altToggle: {
-    marginTop: 8,
-    alignSelf: 'flex-start',
+    marginTop: spacing.sm,
   },
   altToggleText: {
-    color: '#007AFF',
+    color: colors.primary,
     fontSize: 12,
     fontWeight: '600',
   },
   altContainer: {
-    marginTop: 8,
-    backgroundColor: '#1c1c1e',
-    borderRadius: 10,
-    padding: 10,
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
+    borderTopWidth: 1,
+    borderTopColor: colors.separator,
   },
   altGroup: {
-    marginBottom: 8,
+    marginBottom: spacing.md,
   },
-  altLabel: {
-    color: '#8e8e93',
-    fontSize: 11,
+  altGroupLabel: {
+    color: colors.textTertiary,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
     marginBottom: 4,
   },
   altItem: {
-    color: '#fff',
+    color: colors.textSecondary,
     fontSize: 12,
     marginBottom: 2,
   },
-  resolvedSection: {
-    marginTop: 16,
+
+  // Evidence
+  evidenceSection: {
+    marginBottom: spacing.xxl,
   },
-  resolvedCard: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 10,
-    padding: 12,
-  },
-  resolvedTitle: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
-  },
-  resolvedAuthors: {
-    color: '#8e8e93',
-    fontSize: 13,
-    marginTop: 4,
-  },
-  resolvedMeta: {
+  evidenceToggle: {
     flexDirection: 'row',
-    flexWrap: 'wrap',
-    marginTop: 8,
-  },
-  resolvedIsbn: {
-    color: '#636366',
-    fontSize: 11,
-    marginRight: 12,
-  },
-  resolvedSource: {
-    color: '#636366',
-    fontSize: 11,
-  },
-  resolvedStatus: {
-    marginTop: 8,
-  },
-  resolvedStatusText: {
-    fontSize: 12,
-    fontWeight: '500',
-  },
-  resolvedReasonText: {
-    color: '#8e8e93',
-    fontSize: 11,
-    marginTop: 4,
-  },
-  statusAccepted: {
-    color: '#30D158',
-  },
-  statusReview: {
-    color: '#FF9F0A',
-  },
-  statusRejected: {
-    color: '#FF453A',
-  },
-  acceptButton: {
-    backgroundColor: '#30D158',
-    paddingVertical: 12,
-    paddingHorizontal: 20,
-    borderRadius: 8,
-    marginTop: 12,
     alignItems: 'center',
+    justifyContent: 'space-between',
   },
-  acceptButtonDisabled: {
-    backgroundColor: '#2c2c2e',
-  },
-  acceptButtonText: {
-    color: '#fff',
+  evidenceChevron: {
+    color: colors.textMuted,
     fontSize: 14,
-    fontWeight: '600',
   },
-  acceptedBadge: {
-    backgroundColor: 'rgba(48, 209, 88, 0.2)',
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 8,
-    marginTop: 12,
+  evidenceCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.lg,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
-  acceptedBadgeText: {
-    color: '#30D158',
-    fontSize: 13,
-    fontWeight: '500',
+  evidenceText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    lineHeight: 18,
+    fontFamily: 'Menlo',
   },
+
+  // Debug
+  debugSection: {
+    marginBottom: spacing.xl,
+  },
+  debugCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.lg,
+    padding: spacing.md,
+  },
+  debugLabel: {
+    color: colors.textSecondary,
+    fontSize: 11,
+    marginBottom: 3,
+    fontFamily: 'Menlo',
+  },
+  debugScore: {
+    color: colors.verified,
+    fontSize: 10,
+    marginLeft: 8,
+    fontFamily: 'Menlo',
+  },
+
+  // Revert
   revertSection: {
-    marginTop: 12,
+    marginBottom: spacing.xxl,
   },
   revertButton: {
-    backgroundColor: '#38383a',
-    paddingVertical: 10,
-    paddingHorizontal: 14,
-    borderRadius: 8,
+    backgroundColor: colors.bgNested,
+    paddingVertical: 11,
+    paddingHorizontal: 16,
+    borderRadius: radii.md,
     alignSelf: 'flex-start',
   },
   revertButtonDisabled: {
-    backgroundColor: '#2c2c2e',
+    opacity: 0.4,
   },
   revertButtonText: {
-    color: '#007AFF',
+    color: colors.textSecondary,
     fontSize: 13,
-    fontWeight: '600',
+    fontWeight: '500',
   },
-  revertHelperText: {
-    color: '#636366',
-    fontSize: 11,
-    marginTop: 6,
+  revertButtonTextDisabled: {
+    color: colors.textMuted,
   },
-  emptyText: {
-    color: '#636366',
-    fontSize: 12,
-    fontStyle: 'italic',
-  },
-  debugSection: {
-    marginTop: 8,
-  },
+
+  // Evidence lines
   lineRow: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 10,
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
   },
   lineText: {
-    color: '#fff',
-    fontSize: 13,
-    marginBottom: 6,
-  },
-  lineMetaRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+    color: colors.textPrimary,
+    fontSize: 12,
+    marginBottom: 4,
+    fontFamily: 'Menlo',
   },
   lineMeta: {
-    color: '#8e8e93',
-    fontSize: 11,
-    marginRight: 12,
+    color: colors.textMuted,
+    fontSize: 10,
+    fontFamily: 'Menlo',
   },
+
+  // Preview
   previewOverlay: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
+    top: 0, left: 0, right: 0, bottom: 0,
     zIndex: 9999,
     elevation: 9999,
   },
   previewBackdrop: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.85)',
+    top: 0, left: 0, right: 0, bottom: 0,
+    backgroundColor: 'rgba(12, 10, 9, 0.9)',
   },
   previewContent: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
+    padding: spacing.xxl,
   },
   previewImage: {
     width: '100%',
     height: '70%',
   },
   previewClose: {
-    marginTop: 16,
-    backgroundColor: '#1c1c1e',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 8,
+    marginTop: spacing.xxl,
+    backgroundColor: colors.bgElevated,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: radii.md,
   },
   previewCloseText: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '600',
-  },
-  // Manual Review Suggestions
-  suggestionsSection: {
-    marginTop: 16,
-  },
-  suggestionsHint: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginBottom: 8,
-  },
-  suggestionCard: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 8,
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  suggestionContent: {
-    flex: 1,
-  },
-  suggestionTitle: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  suggestionAuthors: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginTop: 2,
-  },
-  suggestionMeta: {
-    flexDirection: 'row',
-    marginTop: 4,
-  },
-  suggestionIsbn: {
-    color: '#636366',
-    fontSize: 10,
-    marginRight: 8,
-  },
-  suggestionYear: {
-    color: '#636366',
-    fontSize: 10,
-  },
-  suggestionAction: {
-    backgroundColor: '#007AFF',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 6,
-    marginLeft: 8,
-  },
-  suggestionActionText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  // Evidence Search Debug
-  debugCard: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 10,
-    padding: 12,
-  },
-  debugLabel: {
-    color: '#8e8e93',
-    fontSize: 11,
-    marginBottom: 4,
-  },
-  topScoresSection: {
-    marginTop: 8,
-  },
-  debugScore: {
-    color: '#30D158',
-    fontSize: 11,
-    marginLeft: 8,
-    marginBottom: 2,
-  },
-  queriesSection: {
-    marginTop: 8,
-  },
-  debugQuery: {
-    color: '#FF9F0A',
-    fontSize: 10,
-    marginLeft: 8,
-    marginBottom: 2,
   },
 });

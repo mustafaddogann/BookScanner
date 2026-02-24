@@ -1,10 +1,13 @@
 import React, { useMemo, useCallback } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, ScrollView, Image } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, Image, Animated } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, ScanSession } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { ensureFileUri } from '../utils/fileUri';
+import { colors, fonts, spacing, radii, shadows } from '../theme';
+import { useFadeIn } from '../hooks/useFadeIn';
+import { AnimatedPressable } from '../components/AnimatedPressable';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
@@ -15,15 +18,38 @@ function formatSessionLabel(session: ScanSession): string {
   return 'Camera scan';
 }
 
-function formatSessionDate(createdAt: string): string {
+function formatRelativeDate(createdAt: string): string {
   const date = new Date(createdAt);
   if (Number.isNaN(date.getTime())) return createdAt;
-  return date.toLocaleString();
+  const now = Date.now();
+  const diffMs = now - date.getTime();
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return 'Just now';
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDays = Math.floor(diffHr / 24);
+  if (diffDays < 7) return `${diffDays}d ago`;
+  return date.toLocaleDateString();
+}
+
+function getStatusInfo(status: string): { label: string; color: string; bg: string } {
+  switch (status) {
+    case 'completed':
+      return { label: 'Completed', color: colors.verified, bg: 'rgba(126, 200, 126, 0.1)' };
+    case 'error':
+      return { label: 'Error', color: colors.rejected, bg: 'rgba(199, 92, 92, 0.1)' };
+    case 'processing':
+      return { label: 'Processing', color: colors.primary, bg: colors.primaryMuted };
+    default:
+      return { label: status, color: colors.textTertiary, bg: colors.bgNested };
+  }
 }
 
 export function SessionsScreen(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
   const sessions = useAppStore((state) => state.sessions);
+  const headerAnim = useFadeIn(0, 16);
 
   const recentSessions = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => {
@@ -34,64 +60,97 @@ export function SessionsScreen(): React.JSX.Element {
     return sorted;
   }, [sessions]);
 
+  const totalBooks = useMemo(() => {
+    return sessions.reduce((sum, s) => sum + (s.detectionCount || 0), 0);
+  }, [sessions]);
+
   const handleOpenSession = useCallback((sessionId: string) => {
     navigation.navigate('Results', { sessionId });
   }, [navigation]);
 
   return (
     <View style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>Sessions</Text>
-      </View>
-      <ScrollView contentContainerStyle={styles.content}>
+      <Animated.View style={[styles.header, headerAnim]}>
+        <Text style={styles.title}>My Library</Text>
+        <View style={styles.headerStats}>
+          <Text style={styles.headerStat}>
+            <Text style={styles.headerStatValue}>{sessions.length}</Text> scans
+          </Text>
+          <View style={styles.headerStatDivider} />
+          <Text style={styles.headerStat}>
+            <Text style={styles.headerStatValue}>{totalBooks}</Text> books
+          </Text>
+        </View>
+      </Animated.View>
+
+      <ScrollView
+        contentContainerStyle={styles.content}
+        showsVerticalScrollIndicator={false}
+      >
         {recentSessions.length === 0 ? (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyText}>No sessions yet</Text>
-            <Text style={styles.emptySubtext}>Your scans will appear here.</Text>
+            <View style={styles.emptyIconBg}>
+              <Text style={styles.emptyIcon}>{'\u{1F4DA}'}</Text>
+            </View>
+            <Text style={styles.emptyTitle}>No sessions yet</Text>
+            <Text style={styles.emptySubtext}>
+              Your scanned shelves will appear here.
+            </Text>
           </View>
         ) : (
-          recentSessions.map((session) => (
-            <TouchableOpacity
-              key={session.sessionId}
-              style={styles.sessionCard}
-              onPress={() => handleOpenSession(session.sessionId)}
-            >
-              <View style={styles.thumbnail}>
-                {session.imagePath ? (
-                  <Image
-                    source={{ uri: ensureFileUri(session.imagePath) }}
-                    style={styles.thumbnailImage}
-                    resizeMode="cover"
-                  />
-                ) : (
-                  <View style={styles.thumbnailPlaceholder}>
-                    <Text style={styles.thumbnailPlaceholderText}>—</Text>
-                  </View>
-                )}
-              </View>
-              <View style={styles.sessionInfo}>
-                <Text style={styles.sessionTitle}>{formatSessionLabel(session)}</Text>
-                <Text style={styles.sessionMeta}>
-                  {formatSessionDate(session.createdAt)}
-                </Text>
-                {typeof session.detectionCount === 'number' && (
-                  <Text style={styles.sessionMeta}>
-                    Books: {session.detectionCount}
+          recentSessions.map((session, index) => {
+            const statusInfo = getStatusInfo(session.status);
+            return (
+              <AnimatedPressable
+                key={session.sessionId}
+                style={styles.sessionCard}
+                onPress={() => handleOpenSession(session.sessionId)}
+              >
+                {/* Thumbnail */}
+                <View style={styles.thumbnail}>
+                  {session.imagePath ? (
+                    <Image
+                      source={{ uri: ensureFileUri(session.imagePath) }}
+                      style={styles.thumbnailImage}
+                      resizeMode="cover"
+                    />
+                  ) : (
+                    <View style={styles.thumbnailPlaceholder}>
+                      <Text style={styles.thumbnailPlaceholderText}>{'\u{1F4F7}'}</Text>
+                    </View>
+                  )}
+                </View>
+
+                {/* Content */}
+                <View style={styles.sessionInfo}>
+                  <Text style={styles.sessionTitle} numberOfLines={1}>
+                    {formatSessionLabel(session)}
                   </Text>
-                )}
-              </View>
-              <View style={styles.statusColumn}>
-                <View
-                  style={[
-                    styles.statusDot,
-                    session.status === 'completed' && styles.statusDotSuccess,
-                    session.status === 'error' && styles.statusDotError,
-                  ]}
-                />
-                <Text style={styles.sessionStatus}>{session.status}</Text>
-              </View>
-            </TouchableOpacity>
-          ))
+                  <View style={styles.sessionMetaRow}>
+                    <Text style={styles.sessionDate}>
+                      {formatRelativeDate(session.createdAt)}
+                    </Text>
+                    {typeof session.detectionCount === 'number' && (
+                      <>
+                        <View style={styles.metaDot} />
+                        <Text style={styles.sessionBooks}>
+                          {session.detectionCount} book{session.detectionCount === 1 ? '' : 's'}
+                        </Text>
+                      </>
+                    )}
+                  </View>
+                </View>
+
+                {/* Status */}
+                <View style={[styles.statusPill, { backgroundColor: statusInfo.bg }]}>
+                  <View style={[styles.statusDotSmall, { backgroundColor: statusInfo.color }]} />
+                  <Text style={[styles.statusLabel, { color: statusInfo.color }]}>
+                    {statusInfo.label}
+                  </Text>
+                </View>
+              </AnimatedPressable>
+            );
+          })
         )}
       </ScrollView>
     </View>
@@ -101,52 +160,94 @@ export function SessionsScreen(): React.JSX.Element {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   header: {
-    paddingTop: 60,
-    paddingHorizontal: 20,
-    paddingBottom: 12,
+    paddingTop: 64,
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: spacing.xl,
   },
   title: {
-    color: '#fff',
-    fontSize: 22,
-    fontWeight: '600',
+    color: colors.textPrimary,
+    fontSize: 28,
+    fontFamily: fonts.display.bold,
+    letterSpacing: -0.3,
   },
-  content: {
-    paddingHorizontal: 20,
-    paddingBottom: 24,
-  },
-  emptyState: {
-    backgroundColor: '#1c1c1e',
-    padding: 16,
-    borderRadius: 10,
-  },
-  emptyText: {
-    color: '#8e8e93',
-    fontSize: 14,
-  },
-  emptySubtext: {
-    color: '#636366',
-    fontSize: 12,
-    marginTop: 6,
-  },
-  sessionCard: {
-    backgroundColor: '#1c1c1e',
-    padding: 14,
-    borderRadius: 10,
-    marginBottom: 10,
+  headerStats: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'space-between',
+    marginTop: spacing.sm,
+  },
+  headerStat: {
+    color: colors.textTertiary,
+    fontSize: 13,
+  },
+  headerStatValue: {
+    color: colors.textSecondary,
+    fontWeight: '700',
+  },
+  headerStatDivider: {
+    width: 1,
+    height: 12,
+    backgroundColor: colors.bgOverlay,
+    marginHorizontal: spacing.md,
+  },
+  content: {
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: spacing.xxxxl,
+  },
+
+  // Empty State
+  emptyState: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xxl,
+    padding: spacing.xxxl,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+  emptyIconBg: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.primaryMuted,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  emptyIcon: {
+    fontSize: 24,
+  },
+  emptyTitle: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontFamily: fonts.display.semiBold,
+    marginBottom: spacing.xs,
+  },
+  emptySubtext: {
+    color: colors.textTertiary,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
+  },
+
+  // Session Card
+  sessionCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   thumbnail: {
-    width: 52,
-    height: 52,
-    borderRadius: 8,
+    width: 56,
+    height: 56,
+    borderRadius: radii.md,
     overflow: 'hidden',
-    backgroundColor: '#2c2c2e',
-    marginRight: 12,
+    backgroundColor: colors.bgNested,
   },
   thumbnailImage: {
     width: '100%',
@@ -158,44 +259,54 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   thumbnailPlaceholderText: {
-    color: '#636366',
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 20,
   },
   sessionInfo: {
     flex: 1,
-    marginRight: 12,
+    marginLeft: spacing.lg,
+    marginRight: spacing.sm,
   },
   sessionTitle: {
-    color: '#fff',
-    fontSize: 14,
+    color: colors.textPrimary,
+    fontSize: 15,
     fontWeight: '600',
+    letterSpacing: 0.1,
   },
-  sessionMeta: {
-    color: '#8e8e93',
-    fontSize: 12,
+  sessionMetaRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginTop: 4,
   },
-  statusColumn: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statusDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#636366',
-    marginBottom: 6,
-  },
-  statusDotSuccess: {
-    backgroundColor: '#30D158',
-  },
-  statusDotError: {
-    backgroundColor: '#FF453A',
-  },
-  sessionStatus: {
-    color: '#636366',
+  sessionDate: {
+    color: colors.textTertiary,
     fontSize: 12,
-    textTransform: 'capitalize',
+  },
+  metaDot: {
+    width: 3,
+    height: 3,
+    borderRadius: 1.5,
+    backgroundColor: colors.textMuted,
+    marginHorizontal: 6,
+  },
+  sessionBooks: {
+    color: colors.textTertiary,
+    fontSize: 12,
+  },
+  statusPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: radii.pill,
+    gap: 5,
+  },
+  statusDotSmall: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+  },
+  statusLabel: {
+    fontSize: 11,
+    fontWeight: '600',
   },
 });

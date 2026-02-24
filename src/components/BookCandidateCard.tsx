@@ -1,7 +1,9 @@
 import React, { memo, useMemo } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import type { BookCandidate } from '../types';
 import { BookCandidateDiagnosticsRow } from './BookCandidateDiagnosticsRow';
+import { AnimatedPressable } from './AnimatedPressable';
+import { colors, fonts, spacing, radii, shadows } from '../theme';
 
 interface BookCandidateCardProps {
   candidate: BookCandidate;
@@ -18,28 +20,38 @@ type EvidenceSnapshot = {
   avgConfidence?: number;
 };
 
-/**
- * Format confidence value for display
- * @param value - Confidence value (0-1 or 0-100)
- * @param clampMax - Optional maximum value to clamp to (e.g., 0.49 for rejected items)
- */
 function formatConfidence(value?: number | null, clampMax?: number): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
 
   let normalized = value;
-  // Normalize to 0-1 range if in 0-100 range
   if (value > 1 && value <= 100) {
     normalized = value / 100;
   }
-  // Skip invalid ranges
   if (normalized < 0 || normalized > 1) return null;
 
-  // Apply clamp if specified
   if (typeof clampMax === 'number' && normalized > clampMax) {
     normalized = clampMax;
   }
 
   return `${Math.round(normalized * 100)}%`;
+}
+
+function getStatusColor(decision?: string): string {
+  switch (decision) {
+    case 'accept': return colors.verified;
+    case 'suggested': return colors.primary;
+    case 'reject': return colors.rejected;
+    default: return colors.textMuted;
+  }
+}
+
+function getStatusBg(decision?: string): string {
+  switch (decision) {
+    case 'accept': return 'rgba(126, 200, 126, 0.08)';
+    case 'suggested': return colors.primaryMuted;
+    case 'reject': return 'rgba(199, 92, 92, 0.08)';
+    default: return colors.bgElevated;
+  }
 }
 
 function BookCandidateCardBase({
@@ -56,25 +68,19 @@ function BookCandidateCardBase({
   const mergedText = (evidence?.fullText ?? evidence?.mergedTextBlock ?? '').trim();
   const explicitAvg = evidence?.avgConfidence;
 
-  // Get resolver decision and resolved book
   const resolverDecision = candidate.resolverDecision;
   const resolvedBook = candidate.resolvedBook;
 
-  // Determine what to display based on resolver state
   const isAccepted = resolverDecision === 'accept';
   const isSuggested = resolverDecision === 'suggested';
   const isRejected = resolverDecision === 'reject';
   const hasResolvedBook = !!resolvedBook;
 
-  // Display title and author:
-  // - For accept/suggested with resolvedBook: use resolvedBook info
-  // - Otherwise: use the provided title/author props
   const displayTitle = hasResolvedBook ? resolvedBook.title : title;
   const displayAuthor = hasResolvedBook
     ? resolvedBook.authors?.join(', ')
     : author;
 
-  // Calculate base OCR confidence
   const ocrConfidence = useMemo(() => {
     if (typeof explicitAvg === 'number') return explicitAvg;
     if (mergedLines.length === 0) return null;
@@ -82,46 +88,22 @@ function BookCandidateCardBase({
     return total / mergedLines.length;
   }, [explicitAvg, mergedLines]);
 
-  // Get resolver confidence if available
   const resolverConfidenceValue = candidate.resolvedConfidence;
 
-  /**
-   * Confidence alignment with resolver status:
-   * - If resolver accepts: use resolver confidence (or OCR confidence if not available)
-   * - If resolver suggests: use resolver confidence (or OCR confidence)
-   * - If resolver rejects: clamp to max 49% to indicate unverified status
-   * - If pending/disabled: use OCR confidence as-is
-   */
   const { displayConfidence, confidenceClampMax, isUnverified } = useMemo(() => {
-    // Use resolver confidence when available, fallback to OCR confidence
     const baseConfidence = typeof resolverConfidenceValue === 'number'
       ? resolverConfidenceValue
       : ocrConfidence;
 
     if (isRejected) {
-      // Rejected: clamp to 49% max, mark as unverified
-      return {
-        displayConfidence: baseConfidence,
-        confidenceClampMax: 0.49,
-        isUnverified: true,
-      };
+      return { displayConfidence: baseConfidence, confidenceClampMax: 0.49, isUnverified: true };
     }
 
     if (isAccepted || isSuggested) {
-      // Accepted/Suggested: use resolver confidence without clamping
-      return {
-        displayConfidence: baseConfidence,
-        confidenceClampMax: undefined,
-        isUnverified: false,
-      };
+      return { displayConfidence: baseConfidence, confidenceClampMax: undefined, isUnverified: false };
     }
 
-    // Pending/disabled/error: use OCR confidence as-is
-    return {
-      displayConfidence: ocrConfidence,
-      confidenceClampMax: undefined,
-      isUnverified: false,
-    };
+    return { displayConfidence: ocrConfidence, confidenceClampMax: undefined, isUnverified: false };
   }, [ocrConfidence, resolverConfidenceValue, isRejected, isAccepted, isSuggested]);
 
   const candidateId = (candidate as { candidateId?: string }).candidateId;
@@ -129,45 +111,55 @@ function BookCandidateCardBase({
     ? `Book ${candidate.orderingKey + 1}`
     : (candidateId || candidate.id);
   const confidenceLabel = formatConfidence(displayConfidence, confidenceClampMax);
+  const statusColor = getStatusColor(resolverDecision);
+  const statusBg = getStatusBg(resolverDecision);
+
+  const confidenceBarValue = useMemo(() => {
+    if (typeof displayConfidence !== 'number') return 0;
+    let norm = displayConfidence;
+    if (norm > 1 && norm <= 100) norm = norm / 100;
+    if (typeof confidenceClampMax === 'number' && norm > confidenceClampMax) norm = confidenceClampMax;
+    return Math.max(0, Math.min(1, norm));
+  }, [displayConfidence, confidenceClampMax]);
 
   const content = (
-    <View style={styles.card}>
+    <View style={[styles.card, { borderColor: statusBg }]}>
+      {/* Top: label + status + meta */}
       <View style={styles.headerRow}>
-        <View style={styles.headerLeft}>
-          <Text style={styles.title}>{label}</Text>
-          {/* Decision badge: Verified, Suggested, No match */}
+        <Text style={styles.label}>{label}</Text>
+        <View style={styles.badgesRow}>
           {isAccepted && (
-            <View style={styles.verifiedBadge}>
-              <Text style={styles.verifiedBadgeText}>Verified</Text>
+            <View style={[styles.statusBadge, { backgroundColor: 'rgba(126, 200, 126, 0.12)' }]}>
+              <View style={[styles.statusBadgeDot, { backgroundColor: colors.verified }]} />
+              <Text style={[styles.statusBadgeText, { color: colors.verified }]}>Verified</Text>
             </View>
           )}
           {isSuggested && (
-            <View style={styles.suggestedBadge}>
-              <Text style={styles.suggestedBadgeText}>Suggested</Text>
+            <View style={[styles.statusBadge, { backgroundColor: colors.primaryMuted }]}>
+              <View style={[styles.statusBadgeDot, { backgroundColor: colors.primary }]} />
+              <Text style={[styles.statusBadgeText, { color: colors.primary }]}>Suggested</Text>
             </View>
           )}
           {isRejected && (
-            <View style={styles.rejectedBadge}>
-              <Text style={styles.rejectedBadgeText}>No match</Text>
+            <View style={[styles.statusBadge, { backgroundColor: 'rgba(199, 92, 92, 0.12)' }]}>
+              <View style={[styles.statusBadgeDot, { backgroundColor: colors.rejected }]} />
+              <Text style={[styles.statusBadgeText, { color: colors.rejected }]}>No match</Text>
             </View>
           )}
           {isAutoApplied && (
-            <View style={styles.autoBadge}>
-              <Text style={styles.autoBadgeText}>Auto</Text>
+            <View style={[styles.statusBadge, { backgroundColor: colors.bgNested }]}>
+              <Text style={[styles.statusBadgeText, { color: colors.verified }]}>Auto</Text>
             </View>
           )}
           {!!isEdited && (
-            <View style={styles.editedBadge}>
-              <Text style={styles.editedBadgeText}>Edited</Text>
+            <View style={[styles.statusBadge, { backgroundColor: colors.bgNested }]}>
+              <Text style={[styles.statusBadgeText, { color: colors.accent }]}>Edited</Text>
             </View>
           )}
         </View>
-        <Text style={styles.meta}>
-          {cropCount} crop{cropCount === 1 ? '' : 's'}
-        </Text>
       </View>
 
-      {/* Show resolved book info for accept/suggested */}
+      {/* Resolved book info */}
       {hasResolvedBook && (isAccepted || isSuggested) && (
         <View style={styles.resolvedInfo}>
           <Text style={styles.resolvedTitle} numberOfLines={2}>
@@ -175,42 +167,64 @@ function BookCandidateCardBase({
           </Text>
           {displayAuthor && (
             <Text style={styles.resolvedAuthor} numberOfLines={1}>
-              {displayAuthor}
+              by {displayAuthor}
             </Text>
           )}
           {resolvedBook.isbn13 && (
-            <Text style={styles.resolvedIsbn}>ISBN: {resolvedBook.isbn13}</Text>
+            <Text style={styles.resolvedIsbn}>ISBN {resolvedBook.isbn13}</Text>
           )}
         </View>
       )}
 
-      {/* For reject: show fields fallback */}
+      {/* Fallback fields for reject/pending */}
       {!hasResolvedBook && (displayTitle || displayAuthor) && (
-        <View style={styles.fields}>
+        <View style={styles.fieldsBlock}>
           {displayTitle && (
             <Text style={styles.fieldTitle} numberOfLines={1}>
-              Title: {displayTitle}
+              {displayTitle}
             </Text>
           )}
           {displayAuthor && (
             <Text style={styles.fieldAuthor} numberOfLines={1}>
-              Author: {displayAuthor}
+              {displayAuthor}
             </Text>
           )}
         </View>
       )}
 
-      {confidenceLabel && (
-        <Text style={[styles.confidence, isUnverified && styles.confidenceUnverified]}>
-          {isUnverified ? 'Unverified' : 'Confidence'} {confidenceLabel}
+      {/* Confidence + crops meta row */}
+      <View style={styles.metaRow}>
+        {confidenceLabel && (
+          <View style={[styles.metaPill, isUnverified && styles.metaPillWarn]}>
+            <Text style={[styles.metaPillText, isUnverified && styles.metaPillTextWarn]}>
+              {isUnverified ? 'Unverified' : 'Confidence'} {confidenceLabel}
+            </Text>
+          </View>
+        )}
+        <View style={styles.metaPill}>
+          <Text style={styles.metaPillText}>
+            {cropCount} crop{cropCount === 1 ? '' : 's'}
+          </Text>
+        </View>
+      </View>
+
+      {/* Evidence text for reject or unresolved */}
+      {(isRejected || !hasResolvedBook) && mergedText.length > 0 && (
+        <Text style={styles.evidenceText} numberOfLines={2}>
+          {mergedText}
         </Text>
       )}
 
-      {/* Evidence text: show for reject or when no resolved book */}
-      {(isRejected || !hasResolvedBook) && (
-        <Text style={styles.evidence} numberOfLines={3}>
-          {mergedText.length > 0 ? mergedText : 'No evidence text'}
-        </Text>
+      {/* Confidence bar */}
+      {confidenceBarValue > 0 && (
+        <View style={styles.confidenceBarBg}>
+          <View
+            style={[
+              styles.confidenceBarFill,
+              { width: `${Math.round(confidenceBarValue * 100)}%`, backgroundColor: statusColor },
+            ]}
+          />
+        </View>
       )}
 
       <BookCandidateDiagnosticsRow
@@ -225,9 +239,9 @@ function BookCandidateCardBase({
   }
 
   return (
-    <TouchableOpacity onPress={onPress} activeOpacity={0.8}>
+    <AnimatedPressable onPress={onPress} scaleDown={0.98}>
       {content}
-    </TouchableOpacity>
+    </AnimatedPressable>
   );
 }
 
@@ -236,138 +250,133 @@ BookCandidateCard.displayName = 'BookCandidateCard';
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 12,
-    padding: 12,
-    marginBottom: 16,
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    padding: spacing.lg,
+    marginBottom: spacing.md,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   headerRow: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 6,
+    marginBottom: spacing.sm,
   },
-  headerLeft: {
+  label: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    fontWeight: '600',
+    letterSpacing: 0.3,
+  },
+  badgesRow: {
     flexDirection: 'row',
     alignItems: 'center',
+    gap: 6,
   },
-  title: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: '600',
+  statusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
+    gap: 4,
   },
-  editedBadge: {
-    backgroundColor: '#2c2c2e',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
+  statusBadgeDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
   },
-  editedBadgeText: {
-    color: '#FF9F0A',
+  statusBadgeText: {
     fontSize: 10,
-    fontWeight: '600',
+    fontWeight: '700',
+    letterSpacing: 0.3,
   },
-  autoBadge: {
-    backgroundColor: '#2c2c2e',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
-  },
-  autoBadgeText: {
-    color: '#30D158',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  // Decision badges
-  verifiedBadge: {
-    backgroundColor: 'rgba(48, 209, 88, 0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
-  },
-  verifiedBadgeText: {
-    color: '#30D158',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  suggestedBadge: {
-    backgroundColor: 'rgba(255, 159, 10, 0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
-  },
-  suggestedBadgeText: {
-    color: '#FF9F0A',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  rejectedBadge: {
-    backgroundColor: 'rgba(255, 69, 58, 0.2)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-    marginLeft: 8,
-  },
-  rejectedBadgeText: {
-    color: '#FF453A',
-    fontSize: 10,
-    fontWeight: '600',
-  },
-  // Resolved book info
+
+  // Resolved book
   resolvedInfo: {
-    backgroundColor: '#2c2c2e',
-    borderRadius: 8,
-    padding: 8,
-    marginBottom: 8,
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.sm,
   },
   resolvedTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontFamily: fonts.display.semiBold,
+    lineHeight: 22,
+  },
+  resolvedAuthor: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    marginTop: 3,
+  },
+  resolvedIsbn: {
+    color: colors.textMuted,
+    fontSize: 10,
+    marginTop: 6,
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
+  },
+
+  // Fallback fields
+  fieldsBlock: {
+    marginBottom: spacing.sm,
+  },
+  fieldTitle: {
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '600',
   },
-  resolvedAuthor: {
-    color: '#8e8e93',
+  fieldAuthor: {
+    color: colors.textSecondary,
     fontSize: 12,
     marginTop: 2,
   },
-  resolvedIsbn: {
-    color: '#636366',
+
+  // Meta row
+  metaRow: {
+    flexDirection: 'row',
+    gap: 6,
+    marginBottom: spacing.sm,
+  },
+  metaPill: {
+    backgroundColor: colors.bgNested,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
+  },
+  metaPillWarn: {
+    backgroundColor: 'rgba(212, 168, 83, 0.08)',
+  },
+  metaPillText: {
+    color: colors.textTertiary,
     fontSize: 10,
-    marginTop: 4,
-  },
-  meta: {
-    color: '#8e8e93',
-    fontSize: 12,
-  },
-  fields: {
-    marginBottom: 6,
-  },
-  fieldTitle: {
-    color: '#fff',
-    fontSize: 13,
     fontWeight: '600',
   },
-  fieldAuthor: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginTop: 2,
+  metaPillTextWarn: {
+    color: colors.primary,
   },
-  confidence: {
-    color: '#30D158',
+
+  // Evidence
+  evidenceText: {
+    color: colors.textMuted,
     fontSize: 12,
-    marginBottom: 6,
+    lineHeight: 17,
+    fontStyle: 'italic',
+    marginBottom: spacing.sm,
   },
-  // Unverified confidence styling (for rejected resolver decisions)
-  confidenceUnverified: {
-    color: '#FF9F0A', // Orange to indicate unverified status
+
+  // Confidence bar
+  confidenceBarBg: {
+    height: 3,
+    backgroundColor: colors.bgNested,
+    borderRadius: 2,
+    marginTop: spacing.xs,
+    overflow: 'hidden',
   },
-  evidence: {
-    color: '#a0a0a5',
-    fontSize: 12,
-    lineHeight: 18,
+  confidenceBarFill: {
+    height: 3,
+    borderRadius: 2,
   },
 });

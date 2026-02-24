@@ -48,6 +48,7 @@ import {
   autoExportRejects,
   getServerUrl,
 } from '../services/autoExportService';
+import { colors, fonts, spacing, radii, shadows } from '../theme';
 
 // Tab options for switching between overlay, crops, and books views
 type ResultsTab = 'overlay' | 'crops' | 'books';
@@ -1051,81 +1052,77 @@ export function ResultsScreen(): React.JSX.Element {
   const bookListHeader = useMemo(() => {
     if (!hasBookCandidates && !showDiagnosticsUI) return null;
 
-    const filterButtons: { key: StatusFilter; label: string; count: number }[] = [
+    const filterButtons: { key: StatusFilter; label: string; count: number; dotColor?: string }[] = [
       { key: 'all', label: 'All', count: resolverDebugCounts.total },
-      { key: 'reject', label: 'Reject', count: resolverDebugCounts.reject },
-      { key: 'suggested', label: 'Suggested', count: resolverDebugCounts.suggested },
-      { key: 'accept', label: 'Accept', count: resolverDebugCounts.accept },
+      { key: 'accept', label: 'Verified', count: resolverDebugCounts.accept, dotColor: colors.verified },
+      { key: 'suggested', label: 'Suggested', count: resolverDebugCounts.suggested, dotColor: colors.primary },
+      { key: 'reject', label: 'Unresolved', count: resolverDebugCounts.reject, dotColor: colors.rejected },
     ];
 
     return (
       <View style={styles.booksSummaryHeader}>
         {hasBookCandidates && bookCandidatesSummary && (
-          <>
+          <View style={styles.summaryRow}>
             <Text style={styles.booksSummaryText}>
-              {bookCandidatesSummary.candidates} books from {bookCandidatesSummary.rawDetections} detections
+              {bookCandidatesSummary.candidates} books found
             </Text>
             <Text style={styles.booksSummarySubtext}>
-              Avg {bookCandidatesSummary.avgCropsPerCandidate} crops per book
+              from {bookCandidatesSummary.rawDetections} spine detections
             </Text>
-          </>
+          </View>
         )}
-        {/* Status filter buttons */}
+        {/* Status filter pills */}
         {hasBookCandidates && (
-          <View style={styles.statusFilterContainer}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.statusFilterScroll} contentContainerStyle={styles.statusFilterContainer}>
             {filterButtons.map((btn) => (
               <TouchableOpacity
                 key={btn.key}
                 style={[
                   styles.statusFilterButton,
                   statusFilter === btn.key && styles.statusFilterButtonActive,
-                  btn.key === 'reject' && statusFilter === btn.key && styles.statusFilterButtonReject,
                 ]}
                 onPress={() => setStatusFilter(btn.key)}
+                activeOpacity={0.7}
               >
+                {btn.dotColor && <View style={[styles.filterDot, { backgroundColor: btn.dotColor }]} />}
                 <Text
                   style={[
                     styles.statusFilterButtonText,
                     statusFilter === btn.key && styles.statusFilterButtonTextActive,
                   ]}
                 >
-                  {btn.label} ({btn.count})
+                  {btn.label}
+                </Text>
+                <Text style={[
+                  styles.statusFilterCount,
+                  statusFilter === btn.key && styles.statusFilterCountActive,
+                ]}>
+                  {btn.count}
                 </Text>
               </TouchableOpacity>
             ))}
             {/* Export Rejects button */}
-            {resolverDebugCounts.reject > 0 && (
+            {resolverDebugCounts.reject > 0 && showDiagnosticsUI && (
               <TouchableOpacity
                 style={[styles.statusFilterButton, styles.exportButton]}
                 onPress={handleExportRejects}
+                activeOpacity={0.7}
               >
                 <Text style={styles.statusFilterButtonText}>Export</Text>
               </TouchableOpacity>
             )}
-          </View>
+          </ScrollView>
         )}
         {showDiagnosticsUI && (
           <View style={styles.debugSummary}>
             <Text style={styles.debugSummaryText}>
-              candidates_total: {resolverDebugCounts.total}
-            </Text>
-            <Text style={styles.debugSummaryText}>
-              resolved_accept: {resolverDebugCounts.accept}
-            </Text>
-            <Text style={styles.debugSummaryText}>
-              resolved_suggested: {resolverDebugCounts.suggested}
-            </Text>
-            <Text style={styles.debugSummaryText}>
-              resolved_reject: {resolverDebugCounts.reject}
-            </Text>
-            <Text style={styles.debugSummaryText}>
-              hypotheses_zero_count: {resolverDebugCounts.hypothesesZero}
+              total: {resolverDebugCounts.total} | accept: {resolverDebugCounts.accept} | suggested: {resolverDebugCounts.suggested} | reject: {resolverDebugCounts.reject}
             </Text>
           </View>
         )}
       </View>
     );
-  }, [bookCandidatesSummary, hasBookCandidates, showDiagnosticsUI, resolverDebugCounts, statusFilter]);
+  }, [bookCandidatesSummary, hasBookCandidates, showDiagnosticsUI, resolverDebugCounts, statusFilter, handleExportRejects]);
 
   const bookListFooter = useMemo(() => {
     if (!hasBookCandidates || !isMetadataResolutionEnabled()) return null;
@@ -1152,17 +1149,22 @@ export function ResultsScreen(): React.JSX.Element {
   ]);
 
   const bookListEmpty = useMemo(() => (
-    <View style={styles.noCropsContainer}>
-      <Text style={styles.noCropsTitle}>No Book Candidates</Text>
-      <Text style={styles.noCropsMessage}>
+    <View style={styles.emptyState}>
+      <View style={styles.emptyIconCircle}>
+        <Text style={styles.emptyIcon}>{'📚'}</Text>
+      </View>
+      <Text style={styles.emptyTitle}>No Books Found</Text>
+      <Text style={styles.emptyMessage}>
         {detections.length === 0
-          ? 'No detections were found in this scan.'
-          : 'Book candidates will appear here after the pipeline groups detections.'}
+          ? 'No spines were detected in this scan. Try positioning the camera closer to the bookshelf.'
+          : 'The pipeline is still processing. Book candidates will appear here shortly.'}
       </Text>
       {bookCandidatesSummary && (
-        <Text style={styles.noCropsStats}>
-          {bookCandidatesSummary.rawDetections} detections, {bookCandidatesSummary.rawCrops} crops
-        </Text>
+        <View style={styles.emptyStatsPill}>
+          <Text style={styles.emptyStatsText}>
+            {bookCandidatesSummary.rawDetections} detections · {bookCandidatesSummary.rawCrops} crops
+          </Text>
+        </View>
       )}
     </View>
   ), [bookCandidatesSummary, detections.length]);
@@ -1359,8 +1361,9 @@ export function ResultsScreen(): React.JSX.Element {
   if (loading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color="#007AFF" />
-        <Text style={styles.loadingText}>Loading results...</Text>
+        <ActivityIndicator size="large" color={colors.primary} />
+        <Text style={styles.loadingTitle}>Loading Results</Text>
+        <Text style={styles.loadingSubtext}>Preparing your scan data...</Text>
       </View>
     );
   }
@@ -1379,11 +1382,38 @@ export function ResultsScreen(): React.JSX.Element {
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-          <Text style={styles.backButtonText}>Back</Text>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+          <Text style={styles.backButtonText}>{'\u2039'}</Text>
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Results</Text>
-        <Text style={styles.detectionCount}>{detections.length} detected</Text>
+        <View style={styles.headerCenter}>
+          <Text style={styles.headerTitle}>Results</Text>
+          {bookCandidates.length > 0 && (
+            <View style={styles.headerStats}>
+              {resolverDebugCounts.accept > 0 && (
+                <View style={[styles.headerStatPill, { backgroundColor: 'rgba(126, 200, 126, 0.12)' }]}>
+                  <View style={[styles.headerStatDot, { backgroundColor: colors.verified }]} />
+                  <Text style={[styles.headerStatText, { color: colors.verified }]}>{resolverDebugCounts.accept}</Text>
+                </View>
+              )}
+              {resolverDebugCounts.suggested > 0 && (
+                <View style={[styles.headerStatPill, { backgroundColor: colors.primaryMuted }]}>
+                  <View style={[styles.headerStatDot, { backgroundColor: colors.primary }]} />
+                  <Text style={[styles.headerStatText, { color: colors.primary }]}>{resolverDebugCounts.suggested}</Text>
+                </View>
+              )}
+              {resolverDebugCounts.reject > 0 && (
+                <View style={[styles.headerStatPill, { backgroundColor: 'rgba(199, 92, 92, 0.12)' }]}>
+                  <View style={[styles.headerStatDot, { backgroundColor: colors.rejected }]} />
+                  <Text style={[styles.headerStatText, { color: colors.rejected }]}>{resolverDebugCounts.reject}</Text>
+                </View>
+              )}
+            </View>
+          )}
+        </View>
+        <View style={styles.detectionCountContainer}>
+          <Text style={styles.detectionCount}>{detections.length}</Text>
+          <Text style={styles.detectionCountLabel}>spines</Text>
+        </View>
       </View>
 
       {/* Spine Preview - Always visible compact view of detected spines */}
@@ -1403,14 +1433,14 @@ export function ResultsScreen(): React.JSX.Element {
                   <React.Fragment key={index}>
                     <Polygon
                       points={getPolygonPoints(detection, index)}
-                      fill="rgba(0, 200, 83, 0.25)"
-                      stroke="#00C853"
+                      fill="rgba(212, 168, 83, 0.20)"
+                      stroke={colors.primary}
                       strokeWidth={2}
                     />
                     <SvgText
                       x={center.x}
                       y={center.y}
-                      fill="#00C853"
+                      fill={colors.primary}
                       fontSize={10}
                       fontWeight="bold"
                       textAnchor="middle"
@@ -1427,25 +1457,29 @@ export function ResultsScreen(): React.JSX.Element {
 
       {/* Primary view selector */}
       <View style={styles.primaryBar}>
-        <View style={styles.primaryLeft}>
-          <TouchableOpacity
-            style={[styles.primaryTab, activeTab === 'books' && styles.primaryTabActive]}
-            onPress={() => setActiveTab('books')}
-          >
-            <Text style={[styles.primaryTabText, activeTab === 'books' && styles.primaryTabTextActive]}>
-              Books {bookCandidates.length > 0 && `(${bookCandidates.length})`}
-            </Text>
-          </TouchableOpacity>
-        </View>
+        <TouchableOpacity
+          style={[styles.primaryTab, activeTab === 'books' && styles.primaryTabActive]}
+          onPress={() => setActiveTab('books')}
+          activeOpacity={0.7}
+        >
+          <Text style={[styles.primaryTabText, activeTab === 'books' && styles.primaryTabTextActive]}>
+            Books
+          </Text>
+          {bookCandidates.length > 0 && (
+            <View style={[styles.primaryTabBadge, activeTab === 'books' && styles.primaryTabBadgeActive]}>
+              <Text style={[styles.primaryTabBadgeText, activeTab === 'books' && styles.primaryTabBadgeTextActive]}>
+                {bookCandidates.length}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
         {showDiagnosticsUI && (
           <TouchableOpacity
             style={[styles.diagnosticsToggle, diagnosticsVisible && styles.diagnosticsToggleActive]}
             onPress={() => {
-              // Navigate to full DiagnosticsScreen with sessionId
               navigation.navigate('Diagnostics', { sessionId });
             }}
             onLongPress={() => {
-              // Toggle inline overlay/crops on long-press
               setDiagnosticsVisible((prev) => {
                 const next = !prev;
                 if (!next) {
@@ -1456,6 +1490,7 @@ export function ResultsScreen(): React.JSX.Element {
                 return next;
               });
             }}
+            activeOpacity={0.7}
           >
             <Text style={[styles.diagnosticsToggleText, diagnosticsVisible && styles.diagnosticsToggleTextActive]}>
               Diagnostics
@@ -1508,8 +1543,8 @@ export function ResultsScreen(): React.JSX.Element {
                     {/* OBB polygon */}
                     <Polygon
                       points={getPolygonPoints(detection, index)}
-                      fill={isSelected ? 'rgba(0, 122, 255, 0.3)' : 'rgba(255, 149, 0, 0.2)'}
-                      stroke={isSelected ? '#007AFF' : '#FF9500'}
+                      fill={isSelected ? 'rgba(212, 168, 83, 0.3)' : 'rgba(212, 168, 83, 0.15)'}
+                      stroke={isSelected ? colors.primary : colors.primaryDim}
                       strokeWidth={isSelected ? 3 : 2}
                       onPress={() => handleDetectionTap(index)}
                     />
@@ -1519,7 +1554,7 @@ export function ResultsScreen(): React.JSX.Element {
                       cx={center.x}
                       cy={center.y}
                       r={isSelected ? 6 : 4}
-                      fill={isSelected ? '#007AFF' : '#FF9500'}
+                      fill={isSelected ? colors.primary : colors.primaryDim}
                       onPress={() => handleDetectionTap(index)}
                     />
 
@@ -1527,7 +1562,7 @@ export function ResultsScreen(): React.JSX.Element {
                     <SvgText
                       x={center.x}
                       y={center.y - 12}
-                      fill={isSelected ? '#007AFF' : '#FF9500'}
+                      fill={isSelected ? colors.primary : colors.primaryDim}
                       fontSize={12}
                       fontWeight="bold"
                       textAnchor="middle"
@@ -1815,42 +1850,47 @@ export function ResultsScreen(): React.JSX.Element {
           behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
           style={styles.modalOverlay}
         >
+          <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={handleCloseEditModal} />
           <View style={styles.modalContent}>
+            <View style={styles.modalHandle} />
             <View style={styles.modalHeader}>
               <Text style={styles.modalTitle}>Edit Book Info</Text>
-              <TouchableOpacity onPress={handleCloseEditModal} style={styles.modalCloseButton}>
+              <TouchableOpacity onPress={handleCloseEditModal} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
                 <Text style={styles.modalCloseText}>Cancel</Text>
               </TouchableOpacity>
             </View>
 
             <View style={styles.modalInputContainer}>
-              <Text style={styles.modalInputLabel}>Title</Text>
+              <Text style={styles.modalInputLabel}>TITLE</Text>
               <TextInput
                 style={styles.modalInput}
                 value={editTitle}
                 onChangeText={setEditTitle}
                 placeholder="Enter book title"
-                placeholderTextColor="#636366"
+                placeholderTextColor={colors.textMuted}
                 autoCapitalize="words"
                 autoCorrect={false}
+                returnKeyType="next"
               />
             </View>
 
             <View style={styles.modalInputContainer}>
-              <Text style={styles.modalInputLabel}>Author</Text>
+              <Text style={styles.modalInputLabel}>AUTHOR</Text>
               <TextInput
                 style={styles.modalInput}
                 value={editAuthor}
                 onChangeText={setEditAuthor}
                 placeholder="Enter author name"
-                placeholderTextColor="#636366"
+                placeholderTextColor={colors.textMuted}
                 autoCapitalize="words"
                 autoCorrect={false}
+                returnKeyType="done"
+                onSubmitEditing={handleSaveEdits}
               />
             </View>
 
-            <TouchableOpacity style={styles.modalSaveButton} onPress={handleSaveEdits}>
-              <Text style={styles.modalSaveButtonText}>Save</Text>
+            <TouchableOpacity style={styles.modalSaveButton} onPress={handleSaveEdits} activeOpacity={0.8}>
+              <Text style={styles.modalSaveButtonText}>Save Changes</Text>
             </TouchableOpacity>
           </View>
         </KeyboardAvoidingView>
@@ -2075,24 +2115,24 @@ function MetadataResolutionCard({
     switch (action) {
       // New action types
       case 'accept_high':
-        return { label: 'Accepted (High)', color: '#30D158', icon: '✓' };
+        return { label: 'Accepted (High)', color: colors.verified, icon: '✓' };
       case 'accept_medium':
-        return { label: 'Accepted', color: '#30D158', icon: '✓' };
+        return { label: 'Accepted', color: colors.verified, icon: '✓' };
       case 'suggested':
-        return { label: 'Suggested', color: '#FF9F0A', icon: '~' };
+        return { label: 'Suggested', color: colors.suggested, icon: '~' };
       case 'reject':
-        return { label: 'No Match', color: '#8E8E93', icon: '✗' };
+        return { label: 'No Match', color: colors.textSecondary, icon: '✗' };
       // Legacy action types (backwards compatibility)
       case 'auto-accept':
-        return { label: 'Matched', color: '#30D158', icon: '✓' };
+        return { label: 'Matched', color: colors.verified, icon: '✓' };
       case 'suggest':
-        return { label: 'Suggested', color: '#FF9F0A', icon: '?' };
+        return { label: 'Suggested', color: colors.suggested, icon: '?' };
       case 'ambiguous':
-        return { label: 'Ambiguous', color: '#FF453A', icon: '!' };
+        return { label: 'Ambiguous', color: colors.rejected, icon: '!' };
       case 'no-match':
-        return { label: 'No Match', color: '#8E8E93', icon: '—' };
+        return { label: 'No Match', color: colors.textSecondary, icon: '—' };
       default:
-        return { label: 'Unknown', color: '#8E8E93', icon: '?' };
+        return { label: 'Unknown', color: colors.textSecondary, icon: '?' };
     }
   };
 
@@ -2135,9 +2175,9 @@ function MetadataResolutionCard({
           <Text style={styles.metadataLabel}>Evidence Quality:</Text>
           <Text style={[
             styles.metadataEvidenceTier,
-            evidenceSummary.sessionTier === 'strong' && { color: '#30D158' },
-            evidenceSummary.sessionTier === 'usable' && { color: '#FF9F0A' },
-            evidenceSummary.sessionTier === 'weak' && { color: '#FF453A' },
+            evidenceSummary.sessionTier === 'strong' && { color: colors.verified },
+            evidenceSummary.sessionTier === 'usable' && { color: colors.suggested },
+            evidenceSummary.sessionTier === 'weak' && { color: colors.rejected },
           ]}>
             {evidenceSummary.sessionTier.charAt(0).toUpperCase() + evidenceSummary.sessionTier.slice(1)}
           </Text>
@@ -2252,242 +2292,341 @@ function MetadataResolutionCard({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
-  loadingText: {
-    color: '#fff',
-    fontSize: 16,
-    marginTop: 16,
+  loadingTitle: {
+    color: colors.textPrimary,
+    fontSize: 18,
+    fontFamily: fonts.display.semiBold,
+    marginTop: spacing.xl,
   },
+  loadingSubtext: {
+    color: colors.textMuted,
+    fontSize: 13,
+    marginTop: spacing.sm,
+  },
+
+  // Error
   errorBanner: {
-    backgroundColor: '#FF3B30',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
+    backgroundColor: 'rgba(199, 92, 92, 0.9)',
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
   },
   errorText: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 13,
     textAlign: 'center',
   },
+
+  // Header
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.lg,
     paddingTop: 60,
-    paddingBottom: 12,
-    backgroundColor: '#1c1c1e',
+    paddingBottom: spacing.md,
+    backgroundColor: colors.bgElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.separator,
   },
   backButton: {
-    padding: 8,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: colors.bgNested,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   backButtonText: {
-    color: '#007AFF',
-    fontSize: 16,
+    color: colors.primary,
+    fontSize: 24,
+    lineHeight: 28,
+    marginTop: -2,
+  },
+  headerCenter: {
+    flex: 1,
+    alignItems: 'center',
   },
   headerTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 18,
-    fontWeight: '600',
+    fontFamily: fonts.display.semiBold,
+  },
+  headerStats: {
+    flexDirection: 'row',
+    gap: 6,
+    marginTop: 6,
+  },
+  headerStatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: radii.pill,
+    gap: 4,
+  },
+  headerStatDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  headerStatText: {
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  detectionCountContainer: {
+    alignItems: 'center',
+    backgroundColor: colors.bgNested,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: radii.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   detectionCount: {
-    color: '#8e8e93',
+    color: colors.primary,
     fontSize: 14,
+    fontWeight: '700',
   },
+  detectionCountLabel: {
+    color: colors.textMuted,
+    fontSize: 9,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+
+  // Spine preview
   spinePreviewContainer: {
-    height: 180,
-    backgroundColor: '#000',
-    marginHorizontal: 12,
-    marginVertical: 8,
-    borderRadius: 12,
+    height: 160,
+    backgroundColor: colors.bgBase,
+    marginHorizontal: spacing.md,
+    marginVertical: spacing.sm,
+    borderRadius: radii.lg,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   spinePreviewImage: {
     flex: 1,
     width: '100%',
     height: '100%',
   },
+
+  // Image container
   imageContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   image: {
     flex: 1,
     width: '100%',
     height: '100%',
   },
+
+  // Info panel
   infoPanel: {
-    backgroundColor: '#1c1c1e',
-    padding: 16,
+    backgroundColor: colors.bgElevated,
+    padding: spacing.lg,
     borderTopWidth: 1,
-    borderTopColor: '#38383a',
+    borderTopColor: colors.separator,
   },
   infoPanelTitle: {
-    color: '#fff',
-    fontSize: 16,
+    color: colors.textPrimary,
+    fontSize: 15,
     fontWeight: '600',
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   infoRow: {
     flexDirection: 'row',
   },
   infoItem: {
-    marginRight: 24,
+    marginRight: spacing.xxl,
   },
   infoLabel: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginBottom: 4,
+    color: colors.textTertiary,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 3,
   },
   infoValue: {
-    color: '#fff',
-    fontSize: 14,
+    color: colors.textPrimary,
+    fontSize: 13,
     fontWeight: '500',
   },
+
+  // Detection chips
   listContainer: {
-    backgroundColor: '#1c1c1e',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    backgroundColor: colors.bgElevated,
+    paddingHorizontal: spacing.lg,
+    paddingVertical: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: '#38383a',
+    borderTopColor: colors.separator,
   },
   detectionChip: {
-    backgroundColor: '#38383a',
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
+    backgroundColor: colors.bgNested,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    borderRadius: radii.pill,
     marginRight: 8,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   detectionChipSelected: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primaryMuted,
+    borderColor: colors.primary,
   },
   detectionChipText: {
-    color: '#fff',
-    fontSize: 14,
+    color: colors.textSecondary,
+    fontSize: 13,
   },
   detectionChipTextSelected: {
+    color: colors.primary,
     fontWeight: '600',
   },
-  // Tab bar styles
+
+  // Tab bar
   tabBar: {
     flexDirection: 'row',
-    backgroundColor: '#1c1c1e',
+    backgroundColor: colors.bgElevated,
     borderBottomWidth: 1,
-    borderBottomColor: '#38383a',
+    borderBottomColor: colors.separator,
   },
   primaryBar: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: '#1c1c1e',
+    backgroundColor: colors.bgElevated,
     borderBottomWidth: 1,
-    borderBottomColor: '#38383a',
-    paddingHorizontal: 12,
-  },
-  primaryLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
+    borderBottomColor: colors.separator,
+    paddingHorizontal: spacing.lg,
   },
   primaryTab: {
-    paddingVertical: 12,
-    paddingHorizontal: 8,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: spacing.md,
+    gap: 6,
   },
   primaryTabActive: {
     borderBottomWidth: 2,
-    borderBottomColor: '#007AFF',
+    borderBottomColor: colors.primary,
   },
   primaryTabText: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 15,
     fontWeight: '600',
   },
   primaryTabTextActive: {
-    color: '#007AFF',
+    color: colors.primary,
+  },
+  primaryTabBadge: {
+    backgroundColor: colors.bgNested,
+    paddingHorizontal: 7,
+    paddingVertical: 2,
+    borderRadius: radii.pill,
+  },
+  primaryTabBadgeActive: {
+    backgroundColor: colors.primaryMuted,
+  },
+  primaryTabBadgeText: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  primaryTabBadgeTextActive: {
+    color: colors.primary,
   },
   diagnosticsToggle: {
-    paddingVertical: 8,
+    paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: '#2c2c2e',
+    borderRadius: radii.pill,
+    backgroundColor: colors.bgNested,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   diagnosticsToggleActive: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primaryMuted,
+    borderColor: colors.primary,
   },
   diagnosticsToggleText: {
-    color: '#8e8e93',
-    fontSize: 12,
+    color: colors.textMuted,
+    fontSize: 11,
     fontWeight: '600',
   },
   diagnosticsToggleTextActive: {
-    color: '#fff',
+    color: colors.primary,
   },
   tab: {
     flex: 1,
-    paddingVertical: 12,
+    paddingVertical: spacing.md,
     alignItems: 'center',
   },
   tabActive: {
     borderBottomWidth: 2,
-    borderBottomColor: '#007AFF',
+    borderBottomColor: colors.primary,
   },
   tabText: {
-    color: '#8e8e93',
-    fontSize: 15,
+    color: colors.textSecondary,
+    fontSize: 14,
     fontWeight: '500',
   },
   tabTextActive: {
-    color: '#007AFF',
+    color: colors.primary,
   },
-  // Crops view styles
+
+  // Crops view
   cropsContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   cropsScrollContent: {
-    padding: 16,
+    padding: spacing.lg,
   },
   noCropsContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 32,
+    padding: spacing.xxxl,
   },
   noCropsTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
-    marginBottom: 12,
+    color: colors.textPrimary,
+    fontSize: 17,
+    fontFamily: fonts.display.semiBold,
+    marginBottom: spacing.md,
     textAlign: 'center',
   },
   noCropsMessage: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 14,
     textAlign: 'center',
     lineHeight: 20,
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   noCropsStats: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 12,
     textAlign: 'center',
   },
   shareAllButton: {
-    backgroundColor: '#007AFF',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    borderRadius: 8,
+    backgroundColor: colors.primaryMuted,
+    paddingVertical: 10,
+    paddingHorizontal: 20,
+    borderRadius: radii.pill,
     alignSelf: 'center',
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   shareAllButtonText: {
-    color: '#fff',
-    fontSize: 16,
+    color: colors.primary,
+    fontSize: 14,
     fontWeight: '600',
   },
   cropsGrid: {
@@ -2498,17 +2637,19 @@ const styles = StyleSheet.create({
   cropCard: {
     width: '100%',
     height: 200,
-    backgroundColor: '#1c1c1e',
-    borderRadius: 12,
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.lg,
     overflow: 'hidden',
     position: 'relative',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   cropCardSelected: {
     borderWidth: 2,
-    borderColor: '#007AFF',
+    borderColor: colors.primary,
   },
   cropCardSkipped: {
-    opacity: 0.5,
+    opacity: 0.4,
   },
   cropImage: {
     width: '100%',
@@ -2518,123 +2659,124 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 8,
     left: 8,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    backgroundColor: 'rgba(12, 10, 9, 0.75)',
     paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 4,
+    paddingVertical: 3,
+    borderRadius: radii.sm,
   },
   cropIndex: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: colors.textPrimary,
+    fontSize: 11,
+    fontWeight: '700',
   },
   cropShareButton: {
     position: 'absolute',
     bottom: 8,
     right: 8,
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primary,
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 4,
+    paddingVertical: 5,
+    borderRadius: radii.sm,
   },
   cropShareButtonText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: colors.bgDeep,
+    fontSize: 11,
+    fontWeight: '700',
   },
   cropSkippedContent: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 16,
+    padding: spacing.lg,
   },
   cropSkippedIndex: {
-    color: '#636366',
-    fontSize: 24,
+    color: colors.textMuted,
+    fontSize: 22,
     fontWeight: '600',
-    marginBottom: 8,
+    marginBottom: spacing.sm,
   },
   cropSkippedText: {
-    color: '#8e8e93',
-    fontSize: 14,
+    color: colors.textTertiary,
+    fontSize: 13,
     fontWeight: '500',
   },
   cropSkippedReason: {
-    color: '#636366',
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: 10,
     marginTop: 4,
     textAlign: 'center',
   },
   cropsSummary: {
-    paddingTop: 8,
+    paddingTop: spacing.md,
     alignItems: 'center',
   },
   cropsSummaryText: {
-    color: '#8e8e93',
-    fontSize: 13,
-    marginBottom: 4,
+    color: colors.textMuted,
+    fontSize: 12,
+    marginBottom: 3,
   },
-  // OCR styles
+
+  // OCR
   cropCardContainer: {
-    marginRight: 16,
-    marginBottom: 16,
+    marginRight: spacing.lg,
+    marginBottom: spacing.lg,
     width: (SCREEN_WIDTH - 48) / 2,
   },
   ocrBadge: {
     position: 'absolute',
     top: 8,
     right: 8,
-    backgroundColor: 'rgba(52, 199, 89, 0.9)',
+    backgroundColor: 'rgba(126, 200, 126, 0.85)',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: radii.sm,
   },
   ocrBadgeText: {
-    color: '#fff',
+    color: colors.bgDeep,
     fontSize: 10,
-    fontWeight: '600',
+    fontWeight: '700',
   },
   ocrProcessingOverlay: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(12, 10, 9, 0.65)',
     justifyContent: 'center',
     alignItems: 'center',
   },
   ocrInfoContainer: {
-    paddingTop: 8,
+    paddingTop: spacing.sm,
     paddingHorizontal: 4,
     minHeight: 44,
   },
   ocrTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 13,
     fontWeight: '600',
     lineHeight: 16,
   },
   ocrAuthor: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 11,
     marginTop: 2,
   },
   ocrNoText: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 11,
     fontStyle: 'italic',
   },
   runOcrButton: {
-    backgroundColor: '#38383a',
+    backgroundColor: colors.primaryMuted,
     paddingVertical: 6,
     paddingHorizontal: 12,
-    borderRadius: 4,
+    borderRadius: radii.sm,
     alignSelf: 'flex-start',
   },
   runOcrButtonText: {
-    color: '#007AFF',
+    color: colors.primary,
     fontSize: 12,
-    fontWeight: '500',
+    fontWeight: '600',
   },
   ocrUnavailable: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 11,
     fontStyle: 'italic',
   },
@@ -2642,285 +2784,380 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   editHint: {
-    color: '#007AFF',
+    color: colors.primary,
     fontSize: 10,
     marginTop: 4,
+    fontWeight: '500',
   },
-  // Modal styles
+
+  // Modal
   modalOverlay: {
     flex: 1,
     justifyContent: 'flex-end',
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(12, 10, 9, 0.5)',
   },
   modalContent: {
-    backgroundColor: '#1c1c1e',
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 20,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+    backgroundColor: colors.bgElevated,
+    borderTopLeftRadius: radii.xxl,
+    borderTopRightRadius: radii.xxl,
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: Platform.OS === 'ios' ? 40 : spacing.xxl,
+    borderTopWidth: 1,
+    borderTopColor: colors.glassBorder,
+  },
+  modalHandle: {
+    width: 36,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: colors.bgOverlay,
+    alignSelf: 'center',
+    marginTop: spacing.md,
+    marginBottom: spacing.lg,
   },
   modalHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 20,
+    marginBottom: spacing.xxl,
   },
   modalTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 18,
-    fontWeight: '600',
-  },
-  modalCloseButton: {
-    padding: 8,
+    fontFamily: fonts.display.semiBold,
   },
   modalCloseText: {
-    color: '#007AFF',
-    fontSize: 16,
+    color: colors.textSecondary,
+    fontSize: 15,
   },
   modalInputContainer: {
-    marginBottom: 16,
+    marginBottom: spacing.xl,
   },
   modalInputLabel: {
-    color: '#8e8e93',
-    fontSize: 13,
-    marginBottom: 8,
+    color: colors.textTertiary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 0.5,
+    marginBottom: spacing.sm,
   },
   modalInput: {
-    backgroundColor: '#38383a',
-    borderRadius: 8,
-    padding: 12,
-    color: '#fff',
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.lg,
+    color: colors.textPrimary,
     fontSize: 16,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   modalSaveButton: {
-    backgroundColor: '#007AFF',
-    borderRadius: 8,
-    padding: 14,
+    backgroundColor: colors.primary,
+    borderRadius: radii.lg,
+    paddingVertical: 15,
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: spacing.sm,
+    ...shadows.glowSubtle,
   },
   modalSaveButtonText: {
-    color: '#fff',
+    color: colors.bgDeep,
     fontSize: 16,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  // Crop image container for rotation handling
+
+  // Crop image rotation
   cropImageContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     overflow: 'hidden',
   },
-  // Rotation badge overlay
   rotationBadge: {
     position: 'absolute',
     bottom: 8,
     left: 8,
-    backgroundColor: 'rgba(88, 86, 214, 0.9)',
+    backgroundColor: 'rgba(139, 115, 64, 0.9)',
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 4,
+    borderRadius: radii.sm,
   },
   rotationBadgeText: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 10,
-    fontWeight: '600',
+    fontWeight: '700',
   },
-  // Error state for failed crop loads
+
+  // Crop error
   cropErrorContent: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 12,
-    backgroundColor: '#2c2c2e',
+    padding: spacing.md,
+    backgroundColor: colors.bgNested,
   },
   cropErrorIndex: {
-    color: '#FF453A',
-    fontSize: 24,
-    fontWeight: '600',
-    marginBottom: 8,
+    color: colors.rejected,
+    fontSize: 22,
+    fontWeight: '700',
+    marginBottom: spacing.sm,
   },
   cropErrorText: {
-    color: '#FF453A',
+    color: colors.rejected,
     fontSize: 12,
     fontWeight: '500',
     marginBottom: 4,
   },
   cropErrorFilename: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 10,
     textAlign: 'center',
   },
-  // Full-screen preview modal styles
+
+  // Preview modal
   previewModalContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   previewHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.lg,
     paddingTop: 60,
-    paddingBottom: 16,
-    backgroundColor: '#1c1c1e',
+    paddingBottom: spacing.lg,
+    backgroundColor: colors.bgElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: colors.separator,
   },
   previewCloseButton: {
-    padding: 8,
+    padding: spacing.sm,
   },
   previewCloseText: {
-    color: '#007AFF',
-    fontSize: 16,
+    color: colors.primary,
+    fontSize: 15,
   },
   previewHeaderTitle: {
-    color: '#fff',
-    fontSize: 18,
-    fontWeight: '600',
+    color: colors.textPrimary,
+    fontSize: 17,
+    fontFamily: fonts.display.semiBold,
   },
   previewShareButton: {
-    padding: 8,
+    padding: spacing.sm,
   },
   previewShareText: {
-    color: '#007AFF',
-    fontSize: 16,
+    color: colors.primary,
+    fontSize: 15,
   },
   previewImageContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   previewImage: {
     width: '100%',
     height: '100%',
   },
   previewInfoPanel: {
-    backgroundColor: '#1c1c1e',
-    padding: 20,
-    paddingBottom: Platform.OS === 'ios' ? 40 : 20,
+    backgroundColor: colors.bgElevated,
+    padding: spacing.xxl,
+    paddingBottom: Platform.OS === 'ios' ? 40 : spacing.xxl,
+    borderTopWidth: 1,
+    borderTopColor: colors.separator,
   },
   previewTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 20,
-    fontWeight: '600',
-    marginBottom: 8,
+    fontFamily: fonts.display.semiBold,
+    marginBottom: spacing.sm,
   },
   previewAuthor: {
-    color: '#8e8e93',
-    fontSize: 16,
-    marginBottom: 12,
+    color: colors.textSecondary,
+    fontSize: 15,
+    marginBottom: spacing.md,
   },
   previewOcrStats: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   previewOcrStatsText: {
-    color: '#636366',
-    fontSize: 13,
-    marginRight: 16,
+    color: colors.textMuted,
+    fontSize: 12,
+    marginRight: spacing.lg,
   },
   previewNoText: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 14,
     fontStyle: 'italic',
-    marginBottom: 16,
+    marginBottom: spacing.lg,
   },
   previewEditButton: {
-    backgroundColor: '#38383a',
-    paddingVertical: 12,
+    backgroundColor: colors.primaryMuted,
+    paddingVertical: 10,
     paddingHorizontal: 20,
-    borderRadius: 8,
+    borderRadius: radii.pill,
     alignSelf: 'flex-start',
   },
   previewEditButtonText: {
-    color: '#007AFF',
-    fontSize: 15,
-    fontWeight: '500',
-  },
-  // Books view styles (Gate 7)
-  booksContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  booksScrollContent: {
-    padding: 16,
-  },
-  booksSummaryHeader: {
-    backgroundColor: '#1c1c1e',
-    padding: 12,
-    borderRadius: 8,
-    marginBottom: 16,
-  },
-  booksSummaryText: {
-    color: '#fff',
-    fontSize: 15,
+    color: colors.primary,
+    fontSize: 14,
     fontWeight: '600',
   },
+
+  // Books view
+  booksContainer: {
+    flex: 1,
+    backgroundColor: colors.bgDeep,
+  },
+  booksScrollContent: {
+    padding: spacing.lg,
+    paddingBottom: spacing.xxxxl,
+  },
+
+  // Book list header
+  booksSummaryHeader: {
+    marginBottom: spacing.lg,
+  },
+  summaryRow: {
+    marginBottom: spacing.md,
+  },
+  booksSummaryText: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontFamily: fonts.display.semiBold,
+  },
   booksSummarySubtext: {
-    color: '#8e8e93',
-    fontSize: 13,
-    marginTop: 4,
+    color: colors.textMuted,
+    fontSize: 12,
+    marginTop: 3,
   },
   debugSummary: {
-    marginTop: 10,
-    paddingTop: 10,
+    marginTop: spacing.md,
+    paddingTop: spacing.md,
     borderTopWidth: 1,
-    borderTopColor: '#2c2c2e',
+    borderTopColor: colors.separator,
   },
   debugSummaryText: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginTop: 2,
+    color: colors.textMuted,
+    fontSize: 11,
+    fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+  },
+
+  // Status filters
+  statusFilterScroll: {
+    flexGrow: 0,
   },
   statusFilterContainer: {
     flexDirection: 'row',
-    marginTop: 12,
     gap: 8,
+    paddingVertical: 2,
   },
   statusFilterButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: '#2c2c2e',
+    paddingVertical: 7,
+    borderRadius: radii.pill,
+    backgroundColor: colors.bgElevated,
     borderWidth: 1,
-    borderColor: '#3c3c3e',
+    borderColor: colors.glassBorder,
+    gap: 5,
   },
   statusFilterButtonActive: {
-    backgroundColor: '#0a84ff',
-    borderColor: '#0a84ff',
+    backgroundColor: colors.primaryMuted,
+    borderColor: colors.primary,
   },
-  statusFilterButtonReject: {
-    backgroundColor: '#ff453a',
-    borderColor: '#ff453a',
+  filterDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
   },
   statusFilterButtonText: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 13,
     fontWeight: '500',
   },
   statusFilterButtonTextActive: {
-    color: '#ffffff',
+    color: colors.primary,
+    fontWeight: '600',
+  },
+  statusFilterCount: {
+    color: colors.textMuted,
+    fontSize: 11,
+    fontWeight: '700',
+  },
+  statusFilterCountActive: {
+    color: colors.primary,
   },
   exportButton: {
-    backgroundColor: '#5856d6',
-    borderColor: '#5856d6',
+    backgroundColor: colors.bgNested,
+    borderColor: colors.glassBorder,
   },
+
+  // Empty state
+  emptyState: {
+    alignItems: 'center',
+    paddingVertical: spacing.xxxxl,
+    paddingHorizontal: spacing.xxl,
+  },
+  emptyIconCircle: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: colors.primaryMuted,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: spacing.xl,
+  },
+  emptyIcon: {
+    fontSize: 28,
+  },
+  emptyTitle: {
+    color: colors.textPrimary,
+    fontSize: 18,
+    fontFamily: fonts.display.semiBold,
+    marginBottom: spacing.md,
+    textAlign: 'center',
+  },
+  emptyMessage: {
+    color: colors.textSecondary,
+    fontSize: 14,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: spacing.lg,
+  },
+  emptyStatsPill: {
+    backgroundColor: colors.bgElevated,
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: radii.pill,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+  emptyStatsText: {
+    color: colors.textMuted,
+    fontSize: 12,
+  },
+
+  // Book cards (legacy - used by MetadataResolutionCard)
   bookCard: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 12,
-    marginBottom: 16,
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    marginBottom: spacing.lg,
     overflow: 'hidden',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   bookCardHeader: {
     flexDirection: 'row',
-    padding: 12,
+    padding: spacing.md,
   },
   bookCardThumbnail: {
     width: 60,
     height: 80,
-    borderRadius: 6,
-    backgroundColor: '#38383a',
+    borderRadius: radii.sm,
+    backgroundColor: colors.bgNested,
     overflow: 'hidden',
   },
   bookThumbnailImage: {
@@ -2933,252 +3170,271 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   bookThumbnailText: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 20,
     fontWeight: '600',
   },
   bookCardInfo: {
     flex: 1,
-    marginLeft: 12,
+    marginLeft: spacing.md,
   },
   bookCardIndex: {
-    color: '#8e8e93',
-    fontSize: 11,
-    fontWeight: '500',
-    marginBottom: 4,
+    color: colors.textMuted,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    marginBottom: 3,
   },
   bookCardTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 15,
-    fontWeight: '600',
+    fontFamily: fonts.display.semiBold,
     lineHeight: 20,
   },
   bookCardNoTitle: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 14,
     fontStyle: 'italic',
   },
   bookCardAuthor: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 13,
     marginTop: 2,
   },
   bookCardMeta: {
-    marginTop: 8,
+    marginTop: spacing.sm,
   },
   bookCardMetaText: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 11,
   },
   bookEvidenceContainer: {
-    padding: 12,
+    padding: spacing.md,
     paddingTop: 0,
     borderTopWidth: 1,
-    borderTopColor: '#38383a',
+    borderTopColor: colors.separator,
     marginTop: 4,
   },
   bookEvidenceLabel: {
-    color: '#8e8e93',
-    fontSize: 11,
-    fontWeight: '500',
+    color: colors.textTertiary,
+    fontSize: 10,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
     marginBottom: 6,
-    marginTop: 12,
+    marginTop: spacing.md,
   },
   bookEvidenceText: {
-    color: '#a0a0a5',
+    color: colors.textSecondary,
     fontSize: 12,
     lineHeight: 18,
   },
   bookEvidenceCount: {
-    color: '#636366',
+    color: colors.textMuted,
     fontSize: 10,
-    marginTop: 8,
+    marginTop: spacing.sm,
   },
   bookCropsStrip: {
-    paddingHorizontal: 12,
-    paddingBottom: 12,
-    marginTop: 8,
+    paddingHorizontal: spacing.md,
+    paddingBottom: spacing.md,
+    marginTop: spacing.sm,
   },
   bookCropThumb: {
     width: 44,
     height: 60,
-    borderRadius: 4,
-    marginRight: 8,
-    backgroundColor: '#38383a',
+    borderRadius: radii.sm,
+    marginRight: spacing.sm,
+    backgroundColor: colors.bgNested,
   },
-  // Metadata Resolution Card styles (Gate 8+)
+
+  // Metadata Resolution Card
   metadataCard: {
-    backgroundColor: '#1c1c1e',
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 16,
-    marginBottom: 16,
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    padding: spacing.lg,
+    marginTop: spacing.lg,
+    marginBottom: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
   metadataCardHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   metadataCardTitle: {
-    color: '#fff',
-    fontSize: 17,
-    fontWeight: '600',
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontFamily: fonts.display.semiBold,
   },
   metadataStatusBadge: {
     paddingHorizontal: 10,
     paddingVertical: 4,
-    borderRadius: 12,
+    borderRadius: radii.pill,
   },
   metadataStatusText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: '600',
+    color: colors.bgDeep,
+    fontSize: 11,
+    fontWeight: '700',
   },
   metadataNoData: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 14,
-    marginBottom: 16,
+    marginBottom: spacing.lg,
     textAlign: 'center',
   },
   metadataLabel: {
-    color: '#8e8e93',
-    fontSize: 13,
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontWeight: '500',
   },
   metadataEvidenceRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   metadataEvidenceTier: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 13,
     fontWeight: '600',
-    marginLeft: 8,
+    marginLeft: spacing.sm,
   },
   metadataOfflineBadge: {
-    backgroundColor: '#3a3a3c',
+    backgroundColor: colors.primaryMuted,
     paddingHorizontal: 10,
     paddingVertical: 6,
-    borderRadius: 6,
-    marginBottom: 12,
+    borderRadius: radii.sm,
+    marginBottom: spacing.md,
   },
   metadataOfflineText: {
-    color: '#FF9F0A',
+    color: colors.primary,
     fontSize: 12,
     textAlign: 'center',
   },
   metadataBookInfo: {
-    backgroundColor: '#2c2c2e',
-    borderRadius: 8,
-    padding: 12,
-    marginBottom: 12,
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
   },
   metadataBookTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 16,
-    fontWeight: '600',
+    fontFamily: fonts.display.semiBold,
     marginBottom: 4,
   },
   metadataBookAuthor: {
-    color: '#a0a0a5',
+    color: colors.textSecondary,
     fontSize: 14,
-    marginBottom: 8,
+    marginBottom: spacing.sm,
   },
   metadataBookMeta: {
-    color: '#8e8e93',
+    color: colors.textTertiary,
     fontSize: 12,
     marginBottom: 2,
   },
   metadataBookIsbn: {
-    color: '#636366',
-    fontSize: 11,
+    color: colors.textMuted,
+    fontSize: 10,
     marginTop: 6,
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
+    letterSpacing: 0.5,
+    textTransform: 'uppercase',
   },
   metadataConfidence: {
-    color: '#30D158',
+    color: colors.verified,
     fontSize: 12,
-    fontWeight: '500',
-    marginTop: 8,
+    fontWeight: '600',
+    marginTop: spacing.sm,
   },
   metadataWarnings: {
     flexDirection: 'row',
     flexWrap: 'wrap',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: spacing.md,
+    gap: 6,
   },
   metadataWarningsLabel: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginRight: 8,
+    color: colors.textTertiary,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
   },
   metadataWarningBadge: {
-    backgroundColor: '#FF453A33',
+    backgroundColor: 'rgba(199, 92, 92, 0.12)',
     paddingHorizontal: 8,
     paddingVertical: 3,
-    borderRadius: 4,
-    marginRight: 6,
-    marginBottom: 4,
+    borderRadius: radii.pill,
   },
   metadataWarningText: {
-    color: '#FF453A',
+    color: colors.rejected,
     fontSize: 11,
+    fontWeight: '500',
   },
   metadataAlternatives: {
-    marginBottom: 12,
+    marginBottom: spacing.md,
   },
   metadataAlternativesLabel: {
-    color: '#8e8e93',
-    fontSize: 12,
-    marginBottom: 8,
+    color: colors.textTertiary,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+    marginBottom: spacing.sm,
   },
   metadataAlternativeItem: {
-    backgroundColor: '#2c2c2e',
-    borderRadius: 6,
-    padding: 10,
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.md,
     marginBottom: 6,
     borderWidth: 1,
     borderColor: 'transparent',
   },
   metadataAlternativeSelected: {
-    borderColor: '#007AFF',
+    borderColor: colors.primary,
+    backgroundColor: colors.primaryMuted,
   },
   metadataAlternativeTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 14,
     fontWeight: '500',
   },
   metadataAlternativeAuthor: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 12,
     marginTop: 2,
   },
   metadataNoMatch: {
-    backgroundColor: '#3a3a3c',
-    borderRadius: 6,
-    padding: 12,
-    marginBottom: 12,
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.md,
+    marginBottom: spacing.md,
   },
   metadataNoMatchText: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 13,
     textAlign: 'center',
+    lineHeight: 18,
   },
   metadataRetryButton: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primary,
     paddingVertical: 12,
-    borderRadius: 8,
+    borderRadius: radii.lg,
     alignItems: 'center',
     justifyContent: 'center',
     minHeight: 44,
+    ...shadows.glowSubtle,
   },
   metadataRetryButtonDisabled: {
-    backgroundColor: '#38383a',
+    backgroundColor: colors.bgNested,
+    shadowOpacity: 0,
   },
   metadataRetryButtonText: {
-    color: '#fff',
+    color: colors.bgDeep,
     fontSize: 15,
-    fontWeight: '600',
+    fontWeight: '700',
   },
 });

@@ -1,1 +1,3 @@
-// Hooks exports - add custom hooks here as needed
+export { useFadeIn } from './useFadeIn';
+export { usePressScale } from './usePressScale';
+export { useShimmer } from './useShimmer';

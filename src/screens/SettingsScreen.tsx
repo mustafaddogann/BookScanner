@@ -1,5 +1,14 @@
+/**
+ * SettingsScreen - Clean, sectioned settings with proper hierarchy
+ *
+ * UX: Settings are grouped by audience.
+ * Regular users see: Diagnostics toggle, About, Help.
+ * Developers see: Additional debug tools and server config.
+ * Each section has a clear title and divider.
+ */
+
 import React, { useState } from 'react';
-import { StyleSheet, View, Text, TouchableOpacity, TextInput, Alert, ActionSheetIOS, Platform } from 'react-native';
+import { StyleSheet, View, Text, TouchableOpacity, TextInput, Alert, ActionSheetIOS, Platform, ScrollView } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
@@ -7,34 +16,77 @@ import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 import { useDebugStore } from '../store/useDebugStore';
 import { getServerUrl, setServerUrl, checkRescanStatus } from '../services/autoExportService';
 import RNFS from 'react-native-fs';
+import { colors, fonts, spacing, radii } from '../theme';
 
-// Test fixture paths (bundled with app in debug builds)
 const TEST_FIXTURES = [
   { name: 'Shelf 001 - Mystery (vertical)', filename: 'shelf_001.jpg' },
   { name: 'Shelf 002 - Mystery & Crime (horizontal)', filename: 'shelf_002.jpg' },
 ];
 
-const AUTO_RETRY_KEY = 'auto_retry_enabled';
-
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 
-// Diagnostics toggle is only functional in debug builds
 const DIAGNOSTICS_ALLOWED = __DEV__;
 
 interface SettingsScreenProps {
   onBack?: () => void;
 }
 
+function SettingRow({ label, right }: { label: string; right: React.ReactNode }) {
+  return (
+    <View style={styles.settingRow}>
+      <Text style={styles.settingLabel}>{label}</Text>
+      {right}
+    </View>
+  );
+}
+
+function ToggleChip({
+  value,
+  onToggle,
+  disabled,
+}: {
+  value: boolean;
+  onToggle: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <TouchableOpacity
+      style={[
+        styles.toggle,
+        value && styles.toggleActive,
+        disabled && styles.toggleDisabled,
+      ]}
+      onPress={onToggle}
+      disabled={disabled}
+      activeOpacity={0.7}
+    >
+      <Text style={[
+        styles.toggleText,
+        value && styles.toggleTextActive,
+        disabled && styles.toggleTextDisabled,
+      ]}>
+        {value ? 'On' : 'Off'}
+      </Text>
+    </TouchableOpacity>
+  );
+}
+
+function SmallButton({ label, onPress }: { label: string; onPress: () => void }) {
+  return (
+    <TouchableOpacity style={styles.smallButton} onPress={onPress} activeOpacity={0.7}>
+      <Text style={styles.smallButtonText}>{label}</Text>
+    </TouchableOpacity>
+  );
+}
+
 export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
 
-  // Use persistent store for diagnostics setting
   const diagnosticsEnabled = useDebugStore((state) => state.diagnosticsEnabled);
   const setDiagnosticsEnabled = useDebugStore((state) => state.setDiagnosticsEnabled);
   const autoRetryEnabled = useDebugStore((state) => state.autoRetryEnabled);
   const setAutoRetryEnabled = useDebugStore((state) => state.setAutoRetryEnabled);
 
-  // ClawdBot server URL for auto-export
   const [serverUrl, setLocalServerUrl] = useState<string>(() => getServerUrl() || '');
   const [serverUrlEditing, setServerUrlEditing] = useState(false);
 
@@ -61,264 +113,220 @@ export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Eleme
     <View style={styles.container}>
       <View style={styles.header}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
-          <Text style={styles.backButtonText}>Back</Text>
+          <Text style={styles.backButtonText}>{'\u2039'} Back</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Settings</Text>
         <View style={styles.headerSpacer} />
       </View>
 
-      <View style={styles.content}>
+      <ScrollView contentContainerStyle={styles.content} showsVerticalScrollIndicator={false}>
+        {/* Diagnostics */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Diagnostics</Text>
-          <View style={styles.settingRow}>
-            <Text style={styles.settingLabel}>Enable diagnostics</Text>
-            <TouchableOpacity
-              style={[
-                styles.toggle,
-                diagnosticsEnabled && styles.toggleActive,
-                !DIAGNOSTICS_ALLOWED && styles.toggleDisabled,
-              ]}
-              onPress={() => {
-                if (DIAGNOSTICS_ALLOWED) {
-                  setDiagnosticsEnabled(!diagnosticsEnabled);
-                }
-              }}
-              disabled={!DIAGNOSTICS_ALLOWED}
-            >
-              <Text
-                style={[
-                  styles.toggleText,
-                  diagnosticsEnabled && styles.toggleTextActive,
-                  !DIAGNOSTICS_ALLOWED && styles.toggleTextDisabled,
-                ]}
-              >
-                {diagnosticsEnabled ? 'On' : 'Off'}
-              </Text>
-            </TouchableOpacity>
+          <View style={styles.sectionCard}>
+            <SettingRow
+              label="Enable diagnostics"
+              right={
+                <ToggleChip
+                  value={diagnosticsEnabled}
+                  onToggle={() => DIAGNOSTICS_ALLOWED && setDiagnosticsEnabled(!diagnosticsEnabled)}
+                  disabled={!DIAGNOSTICS_ALLOWED}
+                />
+              }
+            />
+            <Text style={styles.hint}>
+              {DIAGNOSTICS_ALLOWED
+                ? (DEBUG_ARTIFACTS_ENABLED
+                    ? 'Debug artifacts are available in this build.'
+                    : 'Diagnostics enabled. Debug artifacts will be generated.')
+                : 'Diagnostics require a debug-enabled build.'}
+            </Text>
           </View>
-          <Text style={styles.settingNote}>
-            {DIAGNOSTICS_ALLOWED
-              ? (DEBUG_ARTIFACTS_ENABLED
-                  ? 'Debug artifacts are available in this build.'
-                  : 'Diagnostics enabled. Debug artifacts will be generated.')
-              : 'Diagnostics require a debug-enabled build. Toggle is disabled.'}
-          </Text>
-
         </View>
 
-        {/* Developer section - only visible in debug builds */}
+        {/* Developer Tools — only in __DEV__ */}
         {__DEV__ && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Developer</Text>
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>Open Diagnostics</Text>
-              <TouchableOpacity
-                style={styles.devButton}
-                onPress={() => navigation.navigate('Diagnostics', undefined)}
-              >
-                <Text style={styles.devButtonText}>Open</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>Open Debug</Text>
-              <TouchableOpacity
-                style={styles.devButton}
-                onPress={() => navigation.navigate('Debug')}
-              >
-                <Text style={styles.devButtonText}>Open</Text>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>Auto-Retry Mode</Text>
-              <TouchableOpacity
-                style={[
-                  styles.toggle,
-                  autoRetryEnabled && styles.toggleActive,
-                ]}
-                onPress={() => setAutoRetryEnabled(!autoRetryEnabled)}
-              >
-                <Text
-                  style={[
-                    styles.toggleText,
-                    autoRetryEnabled && styles.toggleTextActive,
-                  ]}
-                >
-                  {autoRetryEnabled ? 'On' : 'Off'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.settingNote}>
-              {autoRetryEnabled
-                ? 'Auto-retry enabled: Will retry resolution every 10s'
-                : 'Enable for automated testing (retries until 0 rejects)'}
-            </Text>
-
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>ClawdBot Server</Text>
-              <TouchableOpacity
-                style={styles.devButton}
-                onPress={() => setServerUrlEditing(true)}
-              >
-                <Text style={styles.devButtonText}>
-                  {serverUrl ? 'Edit' : 'Setup'}
-                </Text>
-              </TouchableOpacity>
-            </View>
-            {serverUrl ? (
-              <Text style={styles.settingNote}>
-                Auto-upload enabled: {serverUrl.substring(0, 30)}...
+            <View style={styles.sectionCard}>
+              <SettingRow
+                label="Open Diagnostics"
+                right={<SmallButton label="Open" onPress={() => navigation.navigate('Diagnostics', undefined)} />}
+              />
+              <View style={styles.divider} />
+              <SettingRow
+                label="Open Debug"
+                right={<SmallButton label="Open" onPress={() => navigation.navigate('Debug')} />}
+              />
+              <View style={styles.divider} />
+              <SettingRow
+                label="Auto-Retry Mode"
+                right={
+                  <ToggleChip
+                    value={autoRetryEnabled}
+                    onToggle={() => setAutoRetryEnabled(!autoRetryEnabled)}
+                  />
+                }
+              />
+              <Text style={styles.hint}>
+                {autoRetryEnabled
+                  ? 'Auto-retry active: retries resolution every 10s'
+                  : 'Enable for automated testing (retries until 0 rejects)'}
               </Text>
-            ) : (
-              <Text style={styles.settingNote}>
-                Run `node scripts/rejectsServer.js` on Mac to get URL
-              </Text>
-            )}
 
-            {serverUrl && (
-              <View style={styles.settingRow}>
-                <Text style={styles.settingLabel}>Check for Rescan</Text>
-                <TouchableOpacity
-                  style={styles.devButton}
-                  onPress={async () => {
-                    try {
-                      const status = await checkRescanStatus();
-                      if (status.rescan) {
-                        Alert.alert(
-                          'Rescan Signal',
-                          `Reason: ${status.reason}\n\nLast analysis: ${status.latestAnalysis?.rejectCount || 0} rejects`,
-                          [
-                            { text: 'Later', style: 'cancel' },
-                            {
-                              text: 'Rescan Now',
-                              onPress: () => {
-                                // TODO: Trigger rescan - for now just navigate to scanner
-                                Alert.alert('Rescan', 'Navigate to scanner and scan again');
+              <View style={styles.divider} />
+              <SettingRow
+                label="ClawdBot Server"
+                right={
+                  <SmallButton
+                    label={serverUrl ? 'Edit' : 'Setup'}
+                    onPress={() => setServerUrlEditing(true)}
+                  />
+                }
+              />
+              <Text style={styles.hint}>
+                {serverUrl
+                  ? `Connected: ${serverUrl.substring(0, 30)}...`
+                  : 'Run `node scripts/rejectsServer.js` on Mac'}
+              </Text>
+
+              {serverUrl && (
+                <>
+                  <View style={styles.divider} />
+                  <SettingRow
+                    label="Check for Rescan"
+                    right={
+                      <SmallButton
+                        label="Check"
+                        onPress={async () => {
+                          try {
+                            const status = await checkRescanStatus();
+                            if (status.rescan) {
+                              Alert.alert(
+                                'Rescan Signal',
+                                `Reason: ${status.reason}\n\nLast analysis: ${status.latestAnalysis?.rejectCount || 0} rejects`,
+                                [
+                                  { text: 'Later', style: 'cancel' },
+                                  {
+                                    text: 'Rescan Now',
+                                    onPress: () => {
+                                      Alert.alert('Rescan', 'Navigate to scanner and scan again');
+                                    }
+                                  }
+                                ]
+                              );
+                            } else {
+                              Alert.alert('No Rescan Needed', 'No pending rescan signal from server.');
+                            }
+                          } catch (err: any) {
+                            Alert.alert('Error', err.message);
+                          }
+                        }}
+                      />
+                    }
+                  />
+                </>
+              )}
+
+              {serverUrlEditing && (
+                <View style={styles.serverUrlInput}>
+                  <TextInput
+                    style={styles.textInput}
+                    value={serverUrl}
+                    onChangeText={setLocalServerUrl}
+                    placeholder="http://192.168.x.x:8765/upload"
+                    placeholderTextColor={colors.textMuted}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                  />
+                  <View style={styles.serverUrlActions}>
+                    <TouchableOpacity style={styles.urlCancelBtn} onPress={() => setServerUrlEditing(false)}>
+                      <Text style={styles.urlCancelText}>Cancel</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.urlSaveBtn} onPress={handleSaveServerUrl}>
+                      <Text style={styles.urlSaveText}>Save</Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+              )}
+
+              <View style={styles.divider} />
+              <SettingRow
+                label="Load Test Fixture"
+                right={
+                  <SmallButton
+                    label="Load"
+                    onPress={() => {
+                      if (Platform.OS === 'ios') {
+                        ActionSheetIOS.showActionSheetWithOptions(
+                          {
+                            options: ['Cancel', ...TEST_FIXTURES.map(f => f.name)],
+                            cancelButtonIndex: 0,
+                            title: 'Select Test Shelf Image',
+                          },
+                          async (buttonIndex) => {
+                            if (buttonIndex === 0) return;
+                            const fixture = TEST_FIXTURES[buttonIndex - 1];
+                            const possiblePaths = [
+                              `${RNFS.MainBundlePath}/${fixture.filename}`,
+                              `${RNFS.MainBundlePath}/TestFixtures/${fixture.filename}`,
+                              `${RNFS.DocumentDirectoryPath}/TestFixtures/${fixture.filename}`,
+                            ];
+                            for (const testPath of possiblePaths) {
+                              const exists = await RNFS.exists(testPath);
+                              if (exists) {
+                                navigation.navigate('Scanner', { importUri: `file://${testPath}` });
+                                return;
                               }
                             }
-                          ]
+                            Alert.alert(
+                              'Test Fixture Not Found',
+                              `To use test fixtures:\n\n1. On Mac: Run 'node scripts/copyTestFixtures.js'\n2. Or: Import "${fixture.filename}" from Photos\n\nFiles are in: test_fixtures/shelves/`,
+                              [{ text: 'OK' }]
+                            );
+                          }
                         );
                       } else {
-                        Alert.alert('No Rescan Needed', 'No pending rescan signal from server.');
+                        Alert.alert('Not Supported', 'Test fixtures are only available on iOS');
                       }
-                    } catch (err: any) {
-                      Alert.alert('Error', err.message);
-                    }
-                  }}
-                >
-                  <Text style={styles.devButtonText}>Check</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-
-            {serverUrlEditing && (
-              <View style={styles.serverUrlInput}>
-                <TextInput
-                  style={styles.textInput}
-                  value={serverUrl}
-                  onChangeText={setLocalServerUrl}
-                  placeholder="http://192.168.x.x:8765/upload"
-                  placeholderTextColor="#666"
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                  keyboardType="url"
-                />
-                <View style={styles.serverUrlButtons}>
-                  <TouchableOpacity
-                    style={styles.cancelButton}
-                    onPress={() => setServerUrlEditing(false)}
-                  >
-                    <Text style={styles.cancelButtonText}>Cancel</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={styles.saveButton}
-                    onPress={handleSaveServerUrl}
-                  >
-                    <Text style={styles.saveButtonText}>Save</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-            )}
-
-            <View style={styles.settingRow}>
-              <Text style={styles.settingLabel}>Load Test Fixture</Text>
-              <TouchableOpacity
-                style={styles.devButton}
-                onPress={() => {
-                  if (Platform.OS === 'ios') {
-                    ActionSheetIOS.showActionSheetWithOptions(
-                      {
-                        options: ['Cancel', ...TEST_FIXTURES.map(f => f.name)],
-                        cancelButtonIndex: 0,
-                        title: 'Select Test Shelf Image',
-                      },
-                      async (buttonIndex) => {
-                        if (buttonIndex === 0) return; // Cancel
-                        const fixture = TEST_FIXTURES[buttonIndex - 1];
-
-                        // Try multiple locations for test fixtures
-                        const possiblePaths = [
-                          // Direct in bundle root (Xcode copies resources flat)
-                          `${RNFS.MainBundlePath}/${fixture.filename}`,
-                          // TestFixtures folder in bundle (if Xcode preserves structure)
-                          `${RNFS.MainBundlePath}/TestFixtures/${fixture.filename}`,
-                          // App Documents/TestFixtures (copied by script)
-                          `${RNFS.DocumentDirectoryPath}/TestFixtures/${fixture.filename}`,
-                        ];
-
-                        for (const testPath of possiblePaths) {
-                          const exists = await RNFS.exists(testPath);
-                          if (exists) {
-                            console.log(`[TestFixture] Found at: ${testPath}`);
-                            navigation.navigate('Scanner', { importUri: `file://${testPath}` });
-                            return;
-                          }
-                        }
-
-                        // Not found - show instructions
-                        Alert.alert(
-                          'Test Fixture Not Found',
-                          `To use test fixtures:\n\n` +
-                          `1. On Mac: Run 'node scripts/copyTestFixtures.js'\n` +
-                          `2. Or: Import "${fixture.filename}" from Photos\n\n` +
-                          `Files are in: test_fixtures/shelves/`,
-                          [{ text: 'OK' }]
-                        );
-                      }
-                    );
-                  } else {
-                    Alert.alert('Not Supported', 'Test fixtures are only available on iOS');
-                  }
-                }}
-              >
-                <Text style={styles.devButtonText}>Load</Text>
-              </TouchableOpacity>
+                    }}
+                  />
+                }
+              />
+              <Text style={styles.hint}>
+                Load saved shelf images for testing without camera
+              </Text>
             </View>
-            <Text style={styles.settingNote}>
-              Load saved shelf images for testing without camera import
-            </Text>
           </View>
         )}
 
+        {/* About */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>About</Text>
-          <View style={styles.settingRow}>
-            <Text style={styles.settingLabel}>Version</Text>
-            <Text style={styles.settingValue}>v0.0.0</Text>
-          </View>
-          <View style={styles.settingRow}>
-            <Text style={styles.settingLabel}>Build</Text>
-            <Text style={styles.settingValue}>dev</Text>
+          <View style={styles.sectionCard}>
+            <SettingRow
+              label="Version"
+              right={<Text style={styles.settingValue}>v0.0.0</Text>}
+            />
+            <View style={styles.divider} />
+            <SettingRow
+              label="Build"
+              right={<Text style={styles.settingValue}>dev</Text>}
+            />
           </View>
         </View>
 
+        {/* Help */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Help</Text>
-          <Text style={styles.helpText}>
-            Scan a shelf, tap a book to review details, and edit title/author when needed.
-          </Text>
+          <View style={styles.sectionCard}>
+            <Text style={styles.helpText}>
+              Scan a shelf, tap a book to review details, and edit title/author when needed.
+            </Text>
+          </View>
         </View>
-      </View>
+      </ScrollView>
     </View>
   );
 }
@@ -326,142 +334,175 @@ export function SettingsScreen({ onBack }: SettingsScreenProps): React.JSX.Eleme
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: colors.bgDeep,
   },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
+    paddingHorizontal: spacing.xxl,
     paddingTop: 60,
-    paddingBottom: 12,
-    backgroundColor: '#1c1c1e',
+    paddingBottom: spacing.lg,
   },
   backButton: {
-    padding: 8,
+    padding: spacing.sm,
   },
   backButtonText: {
-    color: '#007AFF',
+    color: colors.primary,
     fontSize: 16,
   },
   headerTitle: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 18,
-    fontWeight: '600',
+    fontFamily: fonts.display.semiBold,
   },
   headerSpacer: {
     width: 48,
   },
   content: {
-    flex: 1,
-    padding: 20,
+    paddingHorizontal: spacing.xxl,
+    paddingBottom: spacing.xxxxl,
   },
+
+  // Section
   section: {
-    marginBottom: 24,
+    marginBottom: spacing.xxl,
   },
   sectionTitle: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: '600',
-    marginBottom: 12,
+    color: colors.textTertiary,
+    fontSize: 12,
+    fontWeight: '700',
+    textTransform: 'uppercase',
+    letterSpacing: 1.2,
+    marginBottom: spacing.md,
+    marginLeft: spacing.xs,
   },
+  sectionCard: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xl,
+    padding: spacing.lg,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+
+  // Setting row
   settingRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingVertical: 6,
+    paddingVertical: 4,
   },
   settingLabel: {
-    color: '#fff',
+    color: colors.textPrimary,
     fontSize: 14,
+    flex: 1,
   },
   settingValue: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 13,
   },
-  settingNote: {
-    color: '#636366',
-    fontSize: 12,
-    marginTop: 6,
+
+  // Divider
+  divider: {
+    height: 1,
+    backgroundColor: colors.separator,
+    marginVertical: spacing.md,
   },
+
+  // Hint text
+  hint: {
+    color: colors.textMuted,
+    fontSize: 11,
+    marginTop: 4,
+    lineHeight: 16,
+  },
+
+  // Toggle
   toggle: {
-    backgroundColor: '#2c2c2e',
-    paddingHorizontal: 12,
+    backgroundColor: colors.bgNested,
+    paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 12,
+    borderRadius: radii.pill,
   },
   toggleActive: {
-    backgroundColor: '#007AFF',
+    backgroundColor: colors.primary,
   },
   toggleDisabled: {
-    backgroundColor: '#1c1c1e',
-    opacity: 0.5,
+    opacity: 0.4,
   },
   toggleText: {
-    color: '#8e8e93',
+    color: colors.textSecondary,
     fontSize: 12,
     fontWeight: '600',
   },
   toggleTextActive: {
-    color: '#fff',
+    color: colors.bgDeep,
   },
   toggleTextDisabled: {
-    color: '#636366',
+    color: colors.textTertiary,
   },
-  helpText: {
-    color: '#8e8e93',
-    fontSize: 13,
-    lineHeight: 18,
-  },
-  devButton: {
-    backgroundColor: '#FF9F0A',
-    paddingHorizontal: 12,
+
+  // Small button
+  smallButton: {
+    backgroundColor: colors.primaryMuted,
+    paddingHorizontal: 14,
     paddingVertical: 6,
-    borderRadius: 8,
+    borderRadius: radii.pill,
   },
-  devButtonText: {
-    color: '#000',
+  smallButtonText: {
+    color: colors.primary,
     fontSize: 12,
     fontWeight: '600',
   },
+
+  // Help
+  helpText: {
+    color: colors.textSecondary,
+    fontSize: 13,
+    lineHeight: 20,
+  },
+
+  // Server URL input
   serverUrlInput: {
-    marginTop: 12,
-    backgroundColor: '#1c1c1e',
-    borderRadius: 8,
-    padding: 12,
+    marginTop: spacing.md,
+    backgroundColor: colors.bgNested,
+    borderRadius: radii.md,
+    padding: spacing.md,
   },
   textInput: {
-    backgroundColor: '#2c2c2e',
-    color: '#fff',
-    borderRadius: 6,
-    padding: 10,
-    fontSize: 14,
+    backgroundColor: colors.bgDeep,
+    color: colors.textPrimary,
+    borderRadius: radii.sm,
+    padding: spacing.md,
+    fontSize: 13,
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
   },
-  serverUrlButtons: {
+  serverUrlActions: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    marginTop: 10,
-    gap: 10,
+    marginTop: spacing.md,
+    gap: spacing.sm,
   },
-  cancelButton: {
+  urlCancelBtn: {
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 6,
-    backgroundColor: '#3a3a3c',
+    borderRadius: radii.sm,
+    backgroundColor: colors.bgOverlay,
   },
-  cancelButtonText: {
-    color: '#fff',
-    fontSize: 14,
+  urlCancelText: {
+    color: colors.textPrimary,
+    fontSize: 13,
   },
-  saveButton: {
+  urlSaveBtn: {
     paddingHorizontal: 16,
     paddingVertical: 8,
-    borderRadius: 6,
-    backgroundColor: '#007AFF',
+    borderRadius: radii.sm,
+    backgroundColor: colors.primary,
   },
-  saveButtonText: {
-    color: '#fff',
-    fontSize: 14,
+  urlSaveText: {
+    color: colors.bgDeep,
+    fontSize: 13,
     fontWeight: '600',
   },
 });
