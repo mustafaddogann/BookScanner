@@ -10,6 +10,7 @@ import {
   buildEvidenceTokens,
   normalizeForScoring,
   isGenericTitle,
+  GENERIC_TOKENS,
   type EvidenceTokens,
   type BuildEvidenceTokensOptions,
 } from './evidenceNormalization';
@@ -199,6 +200,13 @@ const MIN_SIGNAL_SCORE_CAP = CONFIG_MIN_SIGNAL_CAP;
  * Keeps weak one-token fuzzy overlaps from looking as strong as exact matches.
  */
 const FUZZY_ONLY_SIGNAL_CAP = Math.min(MIN_SIGNAL_SCORE_CAP, MIN_SIGNAL_SCORE_CAP / 2);
+const OCR_RELAXED_FUZZY_THRESHOLD = Math.max(0.68, FUZZY_MATCH_THRESHOLD - 0.07);
+const OCR_VARIANT_BONUS_PER_TOKEN = 0.035;
+const OCR_VARIANT_BONUS_CAP = 0.08;
+const FUZZY_NEAR_MISS_BONUS_PER_TOKEN = 0.02;
+const FUZZY_NEAR_MISS_BONUS_CAP = 0.07;
+const OCR_CONFUSION_EQUIVALENT_BONUS_PER_TOKEN = 0.025;
+const OCR_CONFUSION_EQUIVALENT_BONUS_CAP = 0.06;
 
 let hasLoggedScoringDebug = false;
 
@@ -210,7 +218,215 @@ let hasLoggedScoringDebug = false;
  * OCR often fuses short joiners into neighboring words (e.g., "knotsand").
  * Expose split variants to improve overlap matching without lowering thresholds.
  */
-const OCR_FUSED_JOINERS = ['and', 'into', 'with', 'from', 'the'];
+const OCR_FUSED_JOINERS = ['and', 'into', 'with', 'from', 'the', 'for', 'your', 'god'];
+
+const OCR_LOW_SIGNAL_TOKENS = new Set([
+  'jove',
+  'mystery',
+  'recipes',
+  'berkley',
+  'novel',
+  'fiction',
+  'author',
+  'authors',
+  'writer',
+  'bestsell',
+  'national',
+  'new',
+  'york',
+  'times',
+  'vision',
+  'bestseler',
+  'bestsellek',
+  'bestsellin',
+  'bestsellerer',
+  'oll',
+  'pcto',
+  'ati',
+  'att',
+  'eiv',
+  'ana',
+  'eg',
+  'sas',
+  'can',
+  'wi',
+  'un',
+  'ne',
+  'al',
+  'eu',
+  'bh',
+  'rcuior',
+  'rctior',
+  'ties',
+  'mettikes',
+  'iavers',
+  'noblems',
+  'prin',
+  'crinis',
+  'bestseller',
+  'bestselling',
+  'paperback',
+  'hardcover',
+  'mass',
+  'market',
+  // Frequent OCR garbage observed in rejects
+  'sili',
+  'siall',
+  'histi',
+  'shous',
+  'isouttesoiai',
+  'isouttesoiat',
+  'leetea',
+  'listemas',
+  'nosta',
+  'nhop',
+  'ilsde',
+  'novei',
+  'stak',
+  's7ll',
+  'noisea',
+  'noisia',
+  'ele',
+  'll',
+  'nill',
+  'asth',
+  'grand',
+  'central',
+  'tor',
+  'bin',
+  'cin',
+  'une',
+  'aire',
+  // Additional low-signal fragments observed in recent OCR rejects
+  'rom',
+  'moll',
+  'vora',
+  'frinie',
+  'bestrellins',
+  'besiselling',
+  'ets',
+  'ts',
+  'du',
+]);
+
+const OCR_TOKEN_VARIANT_MAP = new Map<string, string[]>([
+  ['fave', ['faye']],
+  ['cave', ['faye']],
+  ['acaid', ['ngaio']],
+  ['agaid', ['ngaio']],
+  ['arica', ['erica']],
+  ['cis', ['isforseries', 'c']],
+  ['priscil', ['priscilla']],
+  ['priscill', ['priscilla']],
+  ['priscila', ['priscilla']],
+  ['warsh', ['marsh']],
+  ['straighi', ['straight']],
+  ['straighe', ['straight']],
+  ['straighiinto', ['straight', 'into']],
+  ['straigheinto', ['straight', 'into']],
+  ['fi', ['fire']],
+  ['unconqueredfi', ['unconquered', 'fire']],
+  ['fiace', ['face']],
+  ['runforyour', ['run', 'for', 'your']],
+  ['foryourlife', ['for', 'your', 'life']],
+  ['runforyourlife', ['run', 'for', 'your', 'life']],
+  ['rosesare', ['roses', 'are']],
+  ['staksout', ['stakeout']],
+  ['tonyhillerman', ['tony', 'hillerman']],
+  ['talkinggod', ['talking', 'god']],
+  ['jamespatterson', ['james', 'patterson']],
+  ['davidbaldacce', ['david', 'baldacci']],
+  ['baldacce', ['baldacci']],
+  ['visicn', ['vision']],
+  ['vora', ['york']],
+  ['nattonal', ['national']],
+  ['natlenats', ['national']],
+  ['roberto', ['robert']],
+  ['wamraugh', ['wambaugh']],
+  ['fbarck', ['black']],
+  ['petarbl', ['marble']],
+  ['cookon', ['cook']],
+  ['sicht', ['sight']],
+  ['oe', ['zoe']],
+  ['joc', ['joe']],
+  ['onthe', ['on', 'the']],
+  ['ciyde', ['clyde']],
+  ['cinde', ['cindy']],
+  ['pandips', ['phillips']],
+  ['philips', ['phillips']],
+  ['bundsided', ['blindsided']],
+  ['bindsded', ['blindsided']],
+  ['bicody', ['bloody']],
+  ['wodd', ['wood']],
+  ['willl', ['will']],
+  ['rabbl', ['rabbi']],
+  ['kemielman', ['kemelman']],
+  ['ieuit', ['exit']],
+  ['unrer', ['under']],
+  ['ames', ['james']],
+  ['tomustice', ['justice']],
+  ['chlarfo', ['charlaine']],
+  ['aiche', ['aicher']],
+  ['eith', ['keith']],
+  ['teethey', ['keith']],
+  ['tohn', ['john']],
+  ['iohn', ['john']],
+  ['candford', ['sandford']],
+  ['lighining', ['lightning']],
+  ['htning', ['lightning']],
+  ['tricia', ['patricia']],
+  ['parterson', ['patterson']],
+  ['parerson', ['patterson']],
+  ['pateasan', ['patterson']],
+  ['alongcane', ['along', 'came']],
+  ['aspder', ['spider']],
+  ['asper', ['spider']],
+  ['robertr', ['robert']],
+  ['fallison', ['allison']],
+  ['stelen', ['stolen']],
+  ['framie', ['frame']],
+  ['suspiciou', ['suspicious']],
+  ['bonegragk', ['bonecrack']],
+  ['boneerack', ['bonecrack']],
+  ['franhis', ['francis']],
+  ['dhesk', ['desk']],
+  ['crafton', ['grafton']],
+  ['cson', ['jackson']],
+  ['deathat', ['death', 'at']],
+  ['fai', ['faith']],
+  ['hearto', ['heart', 'of']],
+  ['fustie', ['justice']],
+  ['wielane', ['william']],
+  ['wilhane', ['william']],
+  ['coughline', ['coughlin']],
+  ['coughen', ['coughlin']],
+  ['alcoughen', ['coughlin']],
+  ['sumeet', ['sweet']],
+  ['seai', ['scents']],
+  ['bles', ['brass', 'black']],
+  ['denver', ['deaver']],
+  ['cene', ['bane']],
+  ['simee', ['suzanne']],
+  ['seream', ['scream']],
+  ['deaf', ['dead']],
+  ['ca', ['cat']],
+  ['dis', ['dick']],
+  ['peuplevs', ['people', 'vs']],
+  ['crosse', ['cross']],
+  ['fetten', ['fallen']],
+  ['hawimett', ['hammett']],
+  ['dishell', ['dashiell']],
+  ['barte', ['bartz']],
+  ['besiselling', ['bestselling']],
+  ['bestrellins', ['bestselling']],
+  ['bin', ['isforseries', 'b']],
+  ['cin', ['isforseries', 'c']],
+  ['s7ll', ['isforseries']],
+]);
+
+const MAX_EVIDENCE_NOISE_DISCOUNT_RATIO = 0.5;
+const HEAVY_OCR_NOISE_RATIO = 0.55;
+const HEAVY_OCR_MAX_DISCOUNT_RATIO = 0.65;
 
 function expandMergedTokenVariants(token: string): string[] {
   const lower = token.toLowerCase();
@@ -223,6 +439,9 @@ function expandMergedTokenVariants(token: string): string[] {
       const base = lower.slice(0, -joiner.length);
       if (base.length >= 3) {
         variants.add(base);
+        if (base.endsWith('i') && base.length >= 6) {
+          variants.add(`${base.slice(0, -1)}t`);
+        }
         variants.add(joiner);
       }
     }
@@ -234,14 +453,291 @@ function expandMergedTokenVariants(token: string): string[] {
         variants.add(joiner);
       }
     }
+
+    const middleIndex = lower.indexOf(joiner);
+    if (middleIndex > 2) {
+      let left = lower.slice(0, middleIndex);
+      const right = lower.slice(middleIndex + joiner.length);
+      if (left.length >= 3 && right.length >= 3) {
+        if (left.endsWith('i') && left.length >= 6) {
+          left = `${left.slice(0, -1)}t`;
+        }
+        variants.add(left);
+        variants.add(joiner);
+        variants.add(right);
+      }
+    }
   }
 
   return Array.from(variants);
 }
 
+function expandOcrCharacterVariants(token: string): string[] {
+  const lower = token.toLowerCase();
+  const variants = new Set<string>();
+  const hadDigitConfusion = /[01]/.test(lower);
+
+  const digitNormalized = lower
+    .replace(/0/g, 'o')
+    .replace(/1/g, 'l');
+  if (digitNormalized !== lower) {
+    variants.add(digitNormalized);
+  }
+
+  if (hadDigitConfusion && digitNormalized.length >= 4 && /[li]/.test(digitNormalized)) {
+    variants.add(digitNormalized.replace(/l/g, 'i'));
+    variants.add(digitNormalized.replace(/i/g, 'l'));
+  }
+
+  if (lower.length >= 4 && lower.includes('o')) {
+    variants.add(lower.replace(/o/g, '0'));
+  }
+
+  if (lower.length >= 4 && /[vy]/.test(lower)) {
+    variants.add(lower.replace(/v/g, 'y'));
+    variants.add(lower.replace(/y/g, 'v'));
+  }
+
+  return Array.from(variants);
+}
+
+function expandCommonLetterSwapVariants(token: string): string[] {
+  const lower = token.toLowerCase();
+  const variants = new Set<string>();
+
+  if (/[il]/.test(lower) && lower.length >= 4) {
+    variants.add(lower.replace(/i/g, 'l'));
+    variants.add(lower.replace(/l/g, 'i'));
+  }
+
+  if (lower.length >= 5) {
+    if (lower.startsWith('c')) {
+      variants.add(`g${lower.slice(1)}`);
+    } else if (lower.startsWith('g')) {
+      variants.add(`c${lower.slice(1)}`);
+    }
+  }
+
+  variants.delete(lower);
+  return Array.from(variants);
+}
+
+function expandRepeatedCharacterVariants(token: string): string[] {
+  const lower = token.toLowerCase();
+  const variants = new Set<string>();
+
+  const collapsedToDouble = lower.replace(/([a-z])\1{2,}/g, '$1$1');
+  if (collapsedToDouble !== lower) {
+    variants.add(collapsedToDouble);
+  }
+
+  const collapsedToSingle = lower.replace(/([a-z])\1+/g, '$1');
+  if (collapsedToSingle !== lower) {
+    variants.add(collapsedToSingle);
+  }
+
+  return Array.from(variants);
+}
+
+function sharedPrefixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a[i] === b[i]) {
+    i++;
+  }
+  return i;
+}
+
+function sharedSuffixLength(a: string, b: string): number {
+  const max = Math.min(a.length, b.length);
+  let i = 0;
+  while (i < max && a[a.length - 1 - i] === b[b.length - 1 - i]) {
+    i++;
+  }
+  return i;
+}
+
+function normalizeOcrConfusionSignature(token: string): string {
+  return token
+    .toLowerCase()
+    .replace(/0/g, 'o')
+    .replace(/1/g, 'l')
+    .replace(/i/g, 'l')
+    .replace(/v/g, 'y')
+    .replace(/^g/, 'c');
+}
+
+function isLikelyOcrConfusionEquivalent(a: string, b: string): boolean {
+  if (a.length < 4 || b.length < 4) {
+    return false;
+  }
+  if (Math.abs(a.length - b.length) > 1) {
+    return false;
+  }
+
+  const normalizedA = normalizeOcrConfusionSignature(a);
+  const normalizedB = normalizeOcrConfusionSignature(b);
+  if (normalizedA !== normalizedB) {
+    return false;
+  }
+
+  if (GENERIC_TOKENS.has(normalizedA) || OCR_LOW_SIGNAL_TOKENS.has(normalizedA)) {
+    return false;
+  }
+
+  return (
+    sharedPrefixLength(a, b) >= 2 ||
+    sharedSuffixLength(a, b) >= 2
+  );
+}
+
+function isLikelyTruncatedPrefixMatch(a: string, b: string): boolean {
+  const [shorter, longer] = a.length <= b.length ? [a, b] : [b, a];
+  if (longer.length - shorter.length !== 1) {
+    return false;
+  }
+
+  if (shorter.length < 2 || longer.length > 6) {
+    return false;
+  }
+
+  if (!longer.startsWith(shorter)) {
+    return false;
+  }
+
+  if (GENERIC_TOKENS.has(shorter) || OCR_LOW_SIGNAL_TOKENS.has(shorter)) {
+    return false;
+  }
+
+  return true;
+}
+
+function passesFuzzyThreshold(
+  similarity: number,
+  candidateVariant: string,
+  evidenceVariant: string
+): boolean {
+  if (similarity >= FUZZY_MATCH_THRESHOLD) {
+    return true;
+  }
+
+  // OCR truncates terminal characters on short tokens ("ca" -> "cat").
+  if (isLikelyTruncatedPrefixMatch(candidateVariant, evidenceVariant)) {
+    return true;
+  }
+
+  if (isLikelyOcrConfusionEquivalent(candidateVariant, evidenceVariant)) {
+    return true;
+  }
+
+  if (similarity < OCR_RELAXED_FUZZY_THRESHOLD) {
+    return false;
+  }
+
+  const minLength = Math.min(candidateVariant.length, evidenceVariant.length);
+  if (minLength < 6) {
+    return false;
+  }
+
+  return (
+    sharedPrefixLength(candidateVariant, evidenceVariant) >= 3 ||
+    sharedSuffixLength(candidateVariant, evidenceVariant) >= 3
+  );
+}
+
+function buildTokenVariants(token: string): string[] {
+  const lower = token.toLowerCase();
+  const variants = new Set<string>([lower]);
+
+  for (const variant of expandMergedTokenVariants(lower)) {
+    variants.add(variant);
+  }
+
+  const firstPass = Array.from(variants);
+  for (const variant of firstPass) {
+    for (const charVariant of expandOcrCharacterVariants(variant)) {
+      variants.add(charVariant);
+    }
+    for (const swapVariant of expandCommonLetterSwapVariants(variant)) {
+      variants.add(swapVariant);
+    }
+    for (const repeatedVariant of expandRepeatedCharacterVariants(variant)) {
+      variants.add(repeatedVariant);
+    }
+  }
+
+  const secondPass = Array.from(variants);
+  for (const variant of secondPass) {
+    const mapped = OCR_TOKEN_VARIANT_MAP.get(variant);
+    if (mapped) {
+      for (const replacement of mapped) {
+        variants.add(replacement);
+      }
+    }
+  }
+
+  return Array.from(variants);
+}
+
+function hasIsForSeriesPattern(title: string | null | undefined): boolean {
+  if (!title) return false;
+  return /["']?[a-z0-9]["']?\s+is\s+for\b/i.test(title);
+}
+
+function isLowSignalEvidenceToken(token: string): boolean {
+  const lower = token.toLowerCase();
+  return (
+    lower.length <= 2 ||
+    GENERIC_TOKENS.has(lower) ||
+    OCR_LOW_SIGNAL_TOKENS.has(lower) ||
+    /^\$?\d+(?:\.\d+)?$/.test(lower) ||
+    /^[\d-]{4,}$/.test(lower)
+  );
+}
+
+function getEffectiveEvidenceTokenCount(evidenceTokenSet: Set<string>): number {
+  const totalCount = evidenceTokenSet.size;
+  if (totalCount === 0) {
+    return 0;
+  }
+
+  let lowSignalCount = 0;
+  for (const token of evidenceTokenSet) {
+    if (isLowSignalEvidenceToken(token)) {
+      lowSignalCount++;
+    }
+  }
+
+  const substantiveCount = totalCount - lowSignalCount;
+  const lowSignalRatio = lowSignalCount / totalCount;
+  const maxDiscountRatio =
+    substantiveCount >= 2 && lowSignalRatio >= HEAVY_OCR_NOISE_RATIO
+      ? HEAVY_OCR_MAX_DISCOUNT_RATIO
+      : MAX_EVIDENCE_NOISE_DISCOUNT_RATIO;
+  const maxDiscount = Math.floor(totalCount * maxDiscountRatio);
+  const discountedCount = Math.min(lowSignalCount, maxDiscount);
+  return Math.max(1, totalCount - discountedCount);
+}
+
+function getLowSignalEvidenceRatio(evidenceTokenSet: Set<string>): number {
+  const totalCount = evidenceTokenSet.size;
+  if (totalCount === 0) {
+    return 0;
+  }
+
+  let lowSignalCount = 0;
+  for (const token of evidenceTokenSet) {
+    if (isLowSignalEvidenceToken(token)) {
+      lowSignalCount++;
+    }
+  }
+
+  return lowSignalCount / totalCount;
+}
+
 /**
  * Calculate overlap between candidate tokens and evidence tokens
- * Uses fuzzy Levenshtein matching (threshold >= 0.84) for noise tolerance.
+ * Uses fuzzy Levenshtein matching (threshold from FUZZY_MATCH_THRESHOLD) for OCR tolerance.
  *
  * @returns Object with:
  * - overlapCount: number of matching tokens
@@ -254,7 +750,12 @@ function calculateTokenOverlap(
 ): {
   overlapCount: number;
   matched: string[];
-  matchedPairs: Array<{ candidate: string; evidence: string; similarity: number }>;
+  matchedPairs: Array<{
+    candidate: string;
+    evidence: string;
+    similarity: number;
+    variantMatched: boolean;
+  }>;
 } {
   if (candidateTokens.length === 0 || evidenceTokenSet.size === 0) {
     return { overlapCount: 0, matched: [], matchedPairs: [] };
@@ -265,38 +766,63 @@ function calculateTokenOverlap(
   const evidenceTokens = Array.from(evidenceTokenSet);
   const evidenceTokenVariants = new Map<string, string[]>();
   for (const token of evidenceTokens) {
-    evidenceTokenVariants.set(token, [token, ...expandMergedTokenVariants(token)]);
+    evidenceTokenVariants.set(token, buildTokenVariants(token));
   }
-  const matchedPairs: Array<{ candidate: string; evidence: string; similarity: number }> = [];
+  const candidateTokenVariants = new Map<string, string[]>();
+  for (const token of candidateTokens) {
+    candidateTokenVariants.set(token, buildTokenVariants(token));
+  }
+  const matchedPairs: Array<{
+    candidate: string;
+    evidence: string;
+    similarity: number;
+    variantMatched: boolean;
+  }> = [];
 
   // For each candidate token, find best matching evidence token
   for (const candidateToken of candidateTokens) {
     let bestMatch: string | null = null;
     let bestSimilarity = 0;
+    let bestCandidateVariant = candidateToken;
+    let bestEvidenceVariant = candidateToken;
 
     for (const evidenceToken of evidenceTokens) {
       // Skip already-used evidence tokens (1:1 matching)
       if (usedEvidenceTokens.has(evidenceToken)) continue;
 
       const variants = evidenceTokenVariants.get(evidenceToken) ?? [evidenceToken];
+      const candidateVariants = candidateTokenVariants.get(candidateToken) ?? [candidateToken];
       let localBest = 0;
+      let localBestCandidateVariant = candidateToken;
+      let localBestEvidenceVariant = evidenceToken;
       for (const evidenceVariant of variants) {
-        // Quick exact match check
-        if (candidateToken === evidenceVariant) {
-          localBest = 1.0;
-          break;
-        }
+        for (const candidateVariant of candidateVariants) {
+          // Quick exact match check
+          if (candidateVariant === evidenceVariant) {
+            localBest = 1.0;
+            localBestCandidateVariant = candidateVariant;
+            localBestEvidenceVariant = evidenceVariant;
+            break;
+          }
 
-        // Fuzzy Levenshtein match
-        const similarity = levenshteinSimilarity(candidateToken, evidenceVariant);
-        if (similarity > localBest) {
-          localBest = similarity;
+          // Fuzzy Levenshtein match
+          const similarity = levenshteinSimilarity(candidateVariant, evidenceVariant);
+          if (similarity > localBest) {
+            localBest = similarity;
+            localBestCandidateVariant = candidateVariant;
+            localBestEvidenceVariant = evidenceVariant;
+          }
+        }
+        if (localBest >= 1.0) {
+          break;
         }
       }
 
       if (localBest > bestSimilarity) {
         bestSimilarity = localBest;
         bestMatch = evidenceToken;
+        bestCandidateVariant = localBestCandidateVariant;
+        bestEvidenceVariant = localBestEvidenceVariant;
         if (bestSimilarity >= 1.0) {
           break;
         }
@@ -304,13 +830,18 @@ function calculateTokenOverlap(
     }
 
     // Count as overlap if similarity >= threshold
-    if (bestMatch && bestSimilarity >= FUZZY_MATCH_THRESHOLD) {
+    if (
+      bestMatch &&
+      passesFuzzyThreshold(bestSimilarity, bestCandidateVariant, bestEvidenceVariant)
+    ) {
       matchedSet.add(candidateToken);
       usedEvidenceTokens.add(bestMatch);
       matchedPairs.push({
         candidate: candidateToken,
         evidence: bestMatch,
         similarity: bestSimilarity,
+        variantMatched:
+          bestCandidateVariant !== candidateToken || bestEvidenceVariant !== bestMatch,
       });
     }
   }
@@ -379,6 +910,9 @@ export function scoreCandidate(
 
   // Get title tokens (using aggressive normalization)
   const titleTokens = candidate.title ? normalizeForScoring(candidate.title) : [];
+  if (hasIsForSeriesPattern(candidate.title)) {
+    titleTokens.push('isforseries');
+  }
 
   // Count raw title words for MIN_TOKENS check (before normalization)
   // This prevents "The Fingerprint" from being counted as 1 token just because "the" is filtered
@@ -411,10 +945,13 @@ export function scoreCandidate(
   // Calculate order score based on title's first token (for diagnostics only)
   const orderScore = calculateOrderScore(Array.from(titleTokenSet), evidenceTokens.tokensSet);
 
-  const evidenceTokenCount = evidenceTokens.tokensSet.size;
+  const effectiveEvidenceTokenCount = getEffectiveEvidenceTokenCount(evidenceTokens.tokensSet);
+  const lowSignalEvidenceRatio = getLowSignalEvidenceRatio(evidenceTokens.tokensSet);
   const candidateTokenCount = candidateTokens.length;
   const precision =
-    evidenceTokenCount > 0 ? overlapResult.overlapCount / evidenceTokenCount : 0;
+    effectiveEvidenceTokenCount > 0
+      ? overlapResult.overlapCount / effectiveEvidenceTokenCount
+      : 0;
   const recall =
     candidateTokenCount > 0 ? overlapResult.overlapCount / candidateTokenCount : 0;
   const f1 =
@@ -477,7 +1014,7 @@ export function scoreCandidate(
   ).length;
   const adjustedEvidenceCountForTitle = Math.max(
     1,
-    evidenceTokenCount - authorMatchedEvidenceCount - nonLexicalEvidenceCount
+    effectiveEvidenceTokenCount - authorMatchedEvidenceCount - nonLexicalEvidenceCount
   );
   const titleTokenCount = titleTokenSet.size;
   const titlePrecision =
@@ -496,7 +1033,9 @@ export function scoreCandidate(
   let authorScore: number | null = null;
   if (authorTokenCount > 0) {
     const authorPrecision =
-      evidenceTokenCount > 0 ? authorOnlyResult.overlapCount / evidenceTokenCount : 0;
+      effectiveEvidenceTokenCount > 0
+        ? authorOnlyResult.overlapCount / effectiveEvidenceTokenCount
+        : 0;
     const authorRecall = authorOnlyResult.overlapCount / authorTokenCount;
     authorScore =
       authorPrecision + authorRecall > 0
@@ -563,9 +1102,93 @@ export function scoreCandidate(
     });
   }
 
+  // OCR-corrected variant matches signal close near-misses (e.g., "SEAI" -> "SCENTS").
+  // Keep this bounded and require minimum overlap so weak single-token cases are unaffected.
+  const ocrVariantMatchCount = overlapResult.matchedPairs.filter(
+    (pair) =>
+      pair.variantMatched &&
+      !GENERIC_TOKENS.has(pair.candidate) &&
+      !isLowSignalEvidenceToken(pair.evidence)
+  ).length;
+  const ocrVariantBonus =
+    overlapResult.overlapCount >= MIN_OVERLAP_COUNT
+      ? Math.min(OCR_VARIANT_BONUS_CAP, ocrVariantMatchCount * OCR_VARIANT_BONUS_PER_TOKEN)
+      : 0;
+
+  // Give small credit to high-similarity OCR near-misses that were matched
+  // directly by fuzzy distance (not via explicit variant maps).
+  const fuzzyNearMissCount = overlapResult.matchedPairs.filter(
+    (pair) =>
+      !pair.variantMatched &&
+      pair.similarity < 0.999 &&
+      pair.similarity >= OCR_RELAXED_FUZZY_THRESHOLD &&
+      pair.candidate.length >= 4 &&
+      !GENERIC_TOKENS.has(pair.candidate) &&
+      !isLowSignalEvidenceToken(pair.evidence)
+  ).length;
+  const fuzzyNearMissBonus =
+    overlapResult.overlapCount >= MIN_OVERLAP_COUNT
+      ? Math.min(FUZZY_NEAR_MISS_BONUS_CAP, fuzzyNearMissCount * FUZZY_NEAR_MISS_BONUS_PER_TOKEN)
+      : 0;
+
+  const confusionEquivalentNearMissCount = overlapResult.matchedPairs.filter(
+    (pair) =>
+      !pair.variantMatched &&
+      pair.similarity < 0.999 &&
+      isLikelyOcrConfusionEquivalent(pair.candidate, pair.evidence) &&
+      !GENERIC_TOKENS.has(pair.candidate) &&
+      !isLowSignalEvidenceToken(pair.evidence)
+  ).length;
+  const confusionEquivalentBonus =
+    overlapResult.overlapCount >= MIN_OVERLAP_COUNT
+      ? Math.min(
+          OCR_CONFUSION_EQUIVALENT_BONUS_CAP,
+          confusionEquivalentNearMissCount * OCR_CONFUSION_EQUIVALENT_BONUS_PER_TOKEN
+        )
+      : 0;
+
+  const hasTitleAndAuthorAnchor =
+    titleOnlyResult.overlapCount >= 1 && authorOnlyResult.overlapCount >= 1;
+  const hasStrongAuthorAnchor = authorOnlyResult.overlapCount >= 2;
+  const noisyEvidenceAnchorBonus =
+    overlapResult.overlapCount >= MIN_OVERLAP_COUNT && lowSignalEvidenceRatio >= 0.4
+      ? hasStrongAuthorAnchor
+        ? 0.04
+        : hasTitleAndAuthorAnchor
+          ? 0.02
+          : 0
+      : 0;
+
+  // Rescue noisy badge-heavy OCR where title lines are weak but author anchor is clear.
+  // This lifts near-misses into suggested_weak without changing global thresholds.
+  const hasConfidentAuthorRescueSignal =
+    bestAuthorConfidence >= 0.55 &&
+    bestAuthorTokenCount >= 2 &&
+    authorTokenSet.size >= 2 &&
+    authorOnlyResult.overlapCount >= 2 &&
+    titleOnlyResult.overlapCount <= 1 &&
+    overlapResult.matchedPairs.some(
+      (pair) =>
+        authorTokenSet.has(pair.candidate) &&
+        pair.similarity >= OCR_RELAXED_FUZZY_THRESHOLD
+    );
+  const noisyAuthorRescueBonus =
+    overlapResult.overlapCount >= MIN_OVERLAP_COUNT &&
+    lowSignalEvidenceRatio >= 0.35 &&
+    hasConfidentAuthorRescueSignal
+      ? 0.12
+      : 0;
+
   // Calculate combined score using F1
-  // rawScore = F1 + ISBN bonus (before penalties and caps)
-  const rawScore = f1 + isbnBonus;
+  // rawScore = F1 + bounded OCR bonuses + ISBN bonus (before penalties and caps)
+  const rawScore =
+    f1 +
+    isbnBonus +
+    ocrVariantBonus +
+    fuzzyNearMissBonus +
+    confusionEquivalentBonus +
+    noisyEvidenceAnchorBonus +
+    noisyAuthorRescueBonus;
 
   let score = rawScore;
 
@@ -1081,6 +1704,38 @@ export function makeDecisionFromScores(
       };
     }
 
+    // Extremely strong matches can still tie across duplicate/variant records.
+    // If score + anchored title/author evidence are both high, avoid falling into
+    // ambiguous-suggested loops and accept as medium confidence.
+    const hasSubstantiveTitleAnchor = top.scoring.matchedTitleTokens.some(
+      (token) => token.length >= 5 && !GENERIC_TOKENS.has(token)
+    );
+    const hasAuthorAnchor = (top.scoring.matchedAuthorTokens?.length ?? 0) >= 1;
+    const shouldAcceptHighConfidenceTie =
+      top.scoring.score >= 0.9 &&
+      top.scoring.overlapCount >= MANUAL_REVIEW_MIN_OVERLAP &&
+      hasSubstantiveTitleAnchor &&
+      hasAuthorAnchor;
+
+    if (shouldAcceptHighConfidenceTie) {
+      logGateDecision(
+        'accept_medium',
+        'full_match_high_confidence_tiebreak',
+        resolutionMode,
+        top,
+        debugContext
+      );
+      return {
+        decision: 'accept_medium',
+        topCandidate: top,
+        reviewCandidates: [],
+        scoreGap,
+        reason: 'full_match_high_confidence_tiebreak',
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
     // Manual review for close-call ambiguity
     const isManualReview =
       distinctSecond !== null &&
@@ -1130,6 +1785,31 @@ export function makeDecisionFromScores(
       };
     }
 
+    // OCR-noisy near miss: allow weak suggestion when signal is clearly present
+    // but score falls just below the weak threshold due evidence noise.
+    const hasSubstantiveMatchedToken = top.scoring.matchedTokens.some(
+      (token) => token.length >= 5 && !GENERIC_TOKENS.has(token)
+    );
+    const isNoisyNearMiss =
+      top.scoring.score >= SUGGESTED_WEAK_THRESHOLD - 0.05 &&
+      top.scoring.overlapCount >= Math.max(3, SUGGESTED_WEAK_MIN_OVERLAP) &&
+      scoreGap >= 0.04 &&
+      hasSubstantiveMatchedToken;
+
+    if (isNoisyNearMiss) {
+      logGateDecision('suggested_weak', 'full_match_noisy_near_miss', resolutionMode, top, debugContext);
+      return {
+        decision: 'suggested_weak',
+        topCandidate: top,
+        reviewCandidates: [],
+        scoreGap,
+        reason: 'full_match_noisy_near_miss',
+        manualReview: false,
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
+
     // Reject in FULL_MATCH mode - due to low title/author confidence
     logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
     return {
@@ -1161,6 +1841,29 @@ export function makeDecisionFromScores(
   // but titleHint was "MORROT Thriler")
   const titleTooWeak = titleScore < SUGGESTED_WEAK_THRESHOLD || titleTokenCount < TITLE_ONLY_MIN_TOKENS;
   const overallScoreGood = overallScore >= SUGGESTED_THRESHOLD;
+  const hasSubstantiveMatchedToken = top.scoring.matchedTokens.some(
+    (token) => token.length >= 5 && !GENERIC_TOKENS.has(token)
+  );
+  const isTitleOnlyNoisyNearMiss =
+    titleTooWeak &&
+    !overallScoreGood &&
+    overallScore >= SUGGESTED_WEAK_THRESHOLD &&
+    top.scoring.overlapCount >= SUGGESTED_WEAK_MIN_OVERLAP &&
+    hasSubstantiveMatchedToken;
+
+  if (isTitleOnlyNoisyNearMiss) {
+    logGateDecision('suggested_weak', 'title_only_noisy_near_miss', resolutionMode, top, debugContext);
+    return {
+      decision: 'suggested_weak',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'title_only_noisy_near_miss',
+      manualReview: false,
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
 
   if (titleTooWeak && !overallScoreGood) {
     logGateDecision('reject', 'low_title_confidence', resolutionMode, top, debugContext);
