@@ -7,7 +7,7 @@ import type { ResolvedBook } from '../../types';
 
 // Mock fetch globally
 const mockFetch = jest.fn();
-global.fetch = mockFetch;
+globalThis.fetch = mockFetch;
 
 // These tests cover the Open Library API path; the Supabase catalog is off unless a test enables it.
 let mockSupabaseConfigured = false;
@@ -29,7 +29,6 @@ import {
   OpenLibraryProvider,
   buildResolverKey,
   buildQueryHash,
-  testOpenLibraryIsbnResolution,
 } from '../openLibraryProvider';
 
 // ============================================================================

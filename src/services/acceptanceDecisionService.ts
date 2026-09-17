@@ -10,7 +10,6 @@ import type {
   SearchCandidate,
   ScoredMatch,
   ResolvedBook,
-  VerificationResult,
   AcceptanceDecision,
 } from '../types';
 import { isDominated } from './metadataResolverService';

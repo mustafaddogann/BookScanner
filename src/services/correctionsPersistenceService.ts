@@ -9,7 +9,7 @@
 
 import { getSupabaseClient, isSupabaseConfigured } from '../config/supabase';
 import type { Correction, CorrectionKey, BookCandidate } from '../types';
-import { generateContentHash, getCorrectionKey } from './correctionsMemory';
+import { getCorrectionKey } from './correctionsMemory';
 import { useDebugStore } from '../store/useDebugStore';
 
 /**

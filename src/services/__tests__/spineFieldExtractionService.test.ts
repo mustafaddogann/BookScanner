@@ -22,7 +22,7 @@ import type { BookEvidence, BookEvidenceLine } from '../../types';
 function createMockEvidence(
   lines: Array<{ text: string; confidence?: number; cropIndex?: number }>
 ): BookEvidence {
-  const mergedLines: BookEvidenceLine[] = lines.map((l, i) => ({
+  const mergedLines: BookEvidenceLine[] = lines.map((l) => ({
     text: l.text,
     normalizedText: l.text.toLowerCase().replace(/[^\w\s]/g, ''),
     confidence: l.confidence ?? 0.9,

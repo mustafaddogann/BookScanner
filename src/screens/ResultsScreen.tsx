@@ -26,7 +26,7 @@ import {
 import Svg, { Polygon, Circle, Text as SvgText } from 'react-native-svg';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo, OCRResult, BookCandidate, ResolvedBook, AcceptanceDecision, VerificationFlag } from '../types';
+import type { RootStackParamList, OBBDetection, ScreenMapping, SerializedFrameGeo, BookCandidate, ResolvedBook, AcceptanceDecision, VerificationFlag } from '../types';
 import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../utils/letterbox';
 import { useAppStore, storage, type SessionMeta, type DetectionRectifyInfo } from '../store/useAppStore';
 import { readDebugManifest, getSessionDir } from '../services/debugArtifacts';
@@ -44,7 +44,6 @@ import RNFS from 'react-native-fs';
 import {
   checkRescanStatus,
   getLastScannedImageUri,
-  isAutoRescanEnabled,
   autoExportRejects,
   getServerUrl,
 } from '../services/autoExportService';
@@ -89,7 +88,7 @@ export function ResultsScreen(): React.JSX.Element {
 
   // Tab and crop selection state
   const [activeTab, setActiveTab] = useState<ResultsTab>('books');
-  const [selectedCropIndex, setSelectedCropIndex] = useState<number | null>(null);
+  const [selectedCropIndex] = useState<number | null>(null);
   const [diagnosticsVisible, setDiagnosticsVisible] = useState(false);
 
   // Debug filter for book candidates (reject, suggested, accept, all)
@@ -97,15 +96,21 @@ export function ResultsScreen(): React.JSX.Element {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
 
   // Get rectification results from sessionMeta
-  const rectificationResults = sessionMeta?.rectificationResults || [];
+  const rectificationResults = useMemo(
+    () => sessionMeta?.rectificationResults || [],
+    [sessionMeta?.rectificationResults]
+  );
   const rectificationSummary = sessionMeta?.rectificationSummary;
   const hasSuccessfulCrops = rectificationSummary ? rectificationSummary.succeeded > 0 :
     rectificationResults.some(r => r.cropUri && r.rectificationMethod !== 'skipped');
 
   // Get OCR results from sessionMeta
-  const ocrResults = sessionMeta?.ocrResultsByCropIndex || {};
+  const ocrResults = useMemo(
+    () => sessionMeta?.ocrResultsByCropIndex || {},
+    [sessionMeta?.ocrResultsByCropIndex]
+  );
   const ocrSummary = sessionMeta?.ocrSummary;
-  const userEdits = sessionMeta?.userEdits || {};
+  const userEdits = useMemo(() => sessionMeta?.userEdits || {}, [sessionMeta?.userEdits]);
 
   // Get book candidates from sessionMeta (Gate 7)
   const bookCandidates = useMemo(() => {
@@ -428,7 +433,6 @@ export function ResultsScreen(): React.JSX.Element {
         // ================================================================
         let foundImageUri: string | null = null;
         let foundDimensions: { width: number; height: number } | null = null;
-        let usedStore = false;
 
         if (sessionMeta) {
           console.log('[Results] Using sessionMeta from store (single source of truth)');
@@ -462,7 +466,6 @@ export function ResultsScreen(): React.JSX.Element {
             }
           }
 
-          usedStore = !!foundDimensions;
         }
 
         // ================================================================
@@ -583,6 +586,8 @@ export function ResultsScreen(): React.JSX.Element {
     }
 
     loadSession();
+    // detections.length is only logged; reloading the session when it changes isn't wanted.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionId, sessionMeta]);
 
   // Calculate screen mapping when container layout changes
@@ -650,14 +655,6 @@ export function ResultsScreen(): React.JSX.Element {
   const handleBack = useCallback(() => {
     navigation.goBack();
   }, [navigation]);
-
-  // Handle crop selection - also select corresponding detection
-  const handleCropTap = useCallback((index: number) => {
-    const newIndex = selectedCropIndex === index ? null : index;
-    setSelectedCropIndex(newIndex);
-    // Also select the corresponding detection
-    setSelectedDetection(newIndex);
-  }, [selectedCropIndex, setSelectedDetection]);
 
   // Share a crop image
   const handleShareCrop = useCallback(async (cropInfo: DetectionRectifyInfo) => {
@@ -766,26 +763,6 @@ export function ResultsScreen(): React.JSX.Element {
       setOcrProcessing(null);
     }
   }, [effectiveRectResults, sessionId, ocrAvailable]);
-
-  // Update user edit for a crop
-  const handleUpdateUserEdit = useCallback((cropIndex: number, field: 'title' | 'author', value: string) => {
-    const currentMeta = useAppStore.getState().sessionMeta;
-    if (!currentMeta) return;
-
-    const currentEdits = currentMeta.userEdits || {};
-    const cropEdits = currentEdits[cropIndex] || {};
-
-    useAppStore.getState().setSessionMeta({
-      ...currentMeta,
-      userEdits: {
-        ...currentEdits,
-        [cropIndex]: {
-          ...cropEdits,
-          [field]: value,
-        },
-      },
-    });
-  }, []);
 
   // Get display title/author for a crop (user edit takes precedence)
   const getDisplayText = useCallback((cropIndex: number): { title: string | null; author: string | null } => {
@@ -1636,12 +1613,6 @@ export function ResultsScreen(): React.JSX.Element {
                   const cropH = cropInfo.cropHeight || 1;
                   const autoRotate = isVeryWideCrop(cropW, cropH) && ocrRotation === 0;
                   const displayRotation = autoRotate ? 90 : ocrRotation;
-
-                  // Calculate aspect ratio for proper sizing
-                  const aspectRatio = cropW / cropH;
-                  // If rotated 90 or 270, swap aspect ratio for layout
-                  const layoutRotated = displayRotation === 90 || displayRotation === 270;
-                  const displayAspectRatio = layoutRotated ? (1 / aspectRatio) : aspectRatio;
 
                   return (
                     <View key={index} style={styles.cropCardContainer}>

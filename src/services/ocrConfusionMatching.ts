@@ -169,7 +169,6 @@ export function computeAuthorSimilarity(
 
   // Tolerance based on name length
   const maxLen = Math.max(normOcr.length, normApi.length);
-  const minLen = Math.min(normOcr.length, normApi.length);
 
   // For short names (< 8 chars), allow 1 edit
   // For medium names (8-15 chars), allow 2 edits

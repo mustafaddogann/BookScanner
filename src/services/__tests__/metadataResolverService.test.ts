@@ -98,7 +98,7 @@ describe('normalizeSignals', () => {
     const signals = computeMatchSignals(candidate, book, 0);
     const normalized = normalizeSignals(signals, candidate, book);
 
-    for (const [key, value] of Object.entries(normalized)) {
+    for (const value of Object.values(normalized)) {
       expect(value).toBeGreaterThanOrEqual(0);
       expect(value).toBeLessThanOrEqual(1);
     }

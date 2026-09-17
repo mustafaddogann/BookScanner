@@ -34,7 +34,7 @@ function createMockCandidate(overrides: Partial<BookCandidate> = {}): BookCandid
 // Helper to find text content in a tree
 function findAllText(tree: ReactTestRenderer): string[] {
   const texts: string[] = [];
-  tree.root.findAllByType('Text').forEach((node) => {
+  tree.root.findAll((node) => String(node.type) === 'Text').forEach((node) => {
     if (typeof node.props.children === 'string') {
       texts.push(node.props.children);
     } else if (Array.isArray(node.props.children)) {

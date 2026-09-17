@@ -12,18 +12,16 @@ import {
   ScrollView,
   TouchableOpacity,
   ActivityIndicator,
-  Alert,
 } from 'react-native';
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
-import type { RootStackParamList, PipelineTimings, DebugManifest, ResolvedBook } from '../types';
+import type { RootStackParamList, DebugManifest, ResolvedBook } from '../types';
 import { useAppStore } from '../store/useAppStore';
-import { useDebugStore, type WriteStats } from '../store/useDebugStore';
+import { useDebugStore } from '../store/useDebugStore';
 import { readDebugManifest } from '../services/debugArtifacts';
 import { testOpenLibraryIsbnResolution, buildResolverKey, OpenLibraryProvider } from '../services/openLibraryProvider';
-import { buildEvidenceTokens } from '../services/evidenceNormalization';
 import { generateHypotheses } from '../services/queryHypotheses';
-import { upsertResolvedBook, testBooksCatalogWrite } from '../services/booksCatalogService';
+import { upsertResolvedBook } from '../services/booksCatalogService';
 import { isSupabaseConfigured, getSupabaseBaseUrl, getSupabaseAnonKey, getSupabaseClient } from '../config/supabase';
 import { getCapabilities, clearCapabilitiesCache, type SupabaseCapabilities } from '../services/supabaseCapabilities';
 

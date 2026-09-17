@@ -12,7 +12,6 @@ import {
   MatchScore,
   SCORING_WEIGHTS,
   VerificationFlag,
-  VerificationFlagType,
   VERIFICATION_PENALTIES,
   AcceptanceDecision,
   EvidenceTier,

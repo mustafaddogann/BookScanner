@@ -1,6 +1,6 @@
 import React from 'react';
 import { StyleSheet, View, Text, Image } from 'react-native';
-import { colors, fonts, spacing, radii } from '../theme';
+import { colors, spacing, radii } from '../theme';
 import { AnimatedPressable } from './AnimatedPressable';
 import type { AggregatedBook } from '../hooks/useAggregatedBooks';
 

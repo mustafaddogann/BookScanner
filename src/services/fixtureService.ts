@@ -106,7 +106,7 @@ export async function loadDevFixtures(): Promise<FixtureInfo[]> {
         try {
           const metadataContent = await RNFS.readFile(metadataPath, 'utf8');
           metadata = JSON.parse(metadataContent);
-        } catch (e) {
+        } catch {
           console.warn(`[FixtureService] Failed to parse metadata for ${item.name}`);
         }
       }

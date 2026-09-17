@@ -13,7 +13,7 @@
  * 7. rectification - Generate crop images
  */
 
-import { Image, NativeModules, Platform } from 'react-native';
+import { NativeModules } from 'react-native';
 import RNFS from 'react-native-fs';
 import type {
   ImageMeta,
@@ -25,7 +25,6 @@ import type {
   RawModelOutput,
   InputTensorMeta,
   PipelineOptions,
-  PipelineMode,
   SavedTensor,
   NativeLetterboxTruth,
   OCRResult,
@@ -36,7 +35,6 @@ import {
   CameraSource,
   FixtureSource,
   createReplaySource,
-  isReplaySource,
 } from './imageSource';
 import {
   setArtifactWritingEnabled,
@@ -49,7 +47,6 @@ const { ImagePreprocessor } = NativeModules;
 const hasNativePreprocessor = !!ImagePreprocessor;
 
 console.log(`[Pipeline] Native ImagePreprocessor available: ${hasNativePreprocessor}`);
-import { resizeWithLetterbox } from '../utils/letterbox';
 import { PipelineTimer } from '../utils/timing';
 import {
   type FrameGeo,
@@ -61,13 +58,11 @@ import {
 import {
   loadModel,
   inspectModel,
-  runInference,
   runInferenceRaw,
   getModelIOContract,
   isModelReady,
   getModelInputSize,
   isMockModel,
-  preprocessImage,
   runPostprocess,
   getPostprocessConfig,
   setPostprocessConfig,
@@ -77,7 +72,6 @@ import {
   buildPreprocessDebug,
   analyzeDecodeMode,
   runDiagnosticDecode,
-  runFullDiagnostics,
   getDecodeMode,
   isSigmoidEnabled,
   DEBUG_ALIGNMENT_PRESET,
@@ -114,7 +108,6 @@ import {
   buildLetterboxMeta,
   writeLetterboxMeta,
   writeSourceDecodeStats,
-  writeLetterbox640Preview,
   computeScoreSanityStats,
   writeScoreSanity,
   buildNMSWitnessData,
@@ -128,10 +121,8 @@ import {
   writeGroupingAssignments,
   type AllArtifactsData,
   type FilteredDetectionsData,
-  type PreprocessDebug,
   type SourceDecodeStats,
   type ScoreSanityStats,
-  type NMSWitnessData,
   type RectificationOverlayDetection,
 } from './debugArtifacts';
 import { buildImageMetaFromUri } from './imageService';

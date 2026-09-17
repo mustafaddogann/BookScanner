@@ -20,7 +20,6 @@ const ImagePreprocessor = NativeModules.ImagePreprocessor;
 
 // Cache for availability check
 let textRecognitionAvailable: boolean | null = null;
-let textRecognitionMethod: string | null = null;
 let availabilityCheckLogged = false;
 
 /**
@@ -50,7 +49,6 @@ export async function isTextRecognitionAvailable(): Promise<{
   try {
     const result = await TextRecognizer.isTextRecognitionAvailable();
     textRecognitionAvailable = result.available;
-    textRecognitionMethod = result.method;
     console.log(`[OCR] Text recognition: ${result.available ? 'AVAILABLE' : 'NOT AVAILABLE'} (${result.method})`);
     return result;
   } catch (error: any) {

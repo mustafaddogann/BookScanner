@@ -24,7 +24,6 @@ import {
   PASS2_MAX_HYPOTHESES,
   MIN_QUERY_LENGTH,
   MAX_QUERY_TOKENS,
-  BOOST_MAX_NGRAM_SIZE,
   BOOST_TOP_TOKENS_COUNT,
 } from '../config/metadataResolutionConfig';
 

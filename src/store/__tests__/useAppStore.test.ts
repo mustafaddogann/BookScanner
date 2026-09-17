@@ -6,7 +6,7 @@
  */
 
 import { useAppStore } from '../useAppStore';
-import type { DetectionRectifyInfo, SessionMeta } from '../useAppStore';
+import type { DetectionRectifyInfo } from '../useAppStore';
 import type { OCRResult, SerializedFrameGeo } from '../../types';
 
 // Suppress console.log during tests

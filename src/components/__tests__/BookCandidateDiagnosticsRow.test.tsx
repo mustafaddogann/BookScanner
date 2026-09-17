@@ -18,7 +18,7 @@ jest.mock('../../store/useDebugStore', () => ({
 }));
 
 // Mock __DEV__
-const originalDev = (global as any).__DEV__;
+const originalDev = (globalThis as any).__DEV__;
 
 function createMockCandidate(overrides?: Partial<BookCandidate>): BookCandidate {
   const evidence: BookEvidence = {
@@ -46,7 +46,7 @@ function findByTestID(tree: ReactTestRenderer, testID: string) {
 
 function findAllText(tree: ReactTestRenderer): string[] {
   const texts: string[] = [];
-  tree.root.findAllByType('Text').forEach((node) => {
+  tree.root.findAll((node) => String(node.type) === 'Text').forEach((node) => {
     if (typeof node.props.children === 'string') {
       texts.push(node.props.children);
     }
@@ -57,12 +57,12 @@ function findAllText(tree: ReactTestRenderer): string[] {
 describe('BookCandidateDiagnosticsRow', () => {
   beforeEach(() => {
     jest.clearAllMocks();
-    (global as any).__DEV__ = true;
+    (globalThis as any).__DEV__ = true;
     mockDiagnosticsValue = true;
   });
 
   afterAll(() => {
-    (global as any).__DEV__ = originalDev;
+    (globalThis as any).__DEV__ = originalDev;
   });
 
   describe('visibility based on diagnosticsEnabled', () => {
@@ -122,7 +122,7 @@ describe('BookCandidateDiagnosticsRow', () => {
     });
 
     it('does NOT render diagnostics row when not in __DEV__ mode', () => {
-      (global as any).__DEV__ = false;
+      (globalThis as any).__DEV__ = false;
       mockDiagnosticsValue = true;
 
       const candidate = createMockCandidate({

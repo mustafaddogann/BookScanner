@@ -15,30 +15,19 @@ import type { ResolvedBook, EvidenceSourceKind } from '../types';
 import { OpenLibraryProvider } from './openLibraryProvider';
 import {
   scoreAndRankCandidates,
-  makeDecisionFromScores,
   type ScoredCandidate,
-  type ScoringDecision,
-  ACCEPT_HIGH_THRESHOLD,
-  SUGGESTED_THRESHOLD,
 } from './candidateScoring';
-import { buildEvidenceTokens, type EvidenceTokens } from './evidenceNormalization';
+import { buildEvidenceTokens } from './evidenceNormalization';
 import { prepareResolverQuery, type ResolverQueryInputs } from './resolverQueryPrep';
 import {
   extractIsbnFromOcrLines,
-  validateAndNormalizeIsbn,
   type IsbnExtractionResult,
 } from './isbnExtraction';
 import {
-  computeAuthorSimilarity,
-  normalizeForApiComparison,
-} from './ocrConfusionMatching';
-import {
-  detectBadgeTypoContext,
   getEnhancedBadgeExclusions,
 } from './badgeTypoDetection';
 import {
   executeTitleMatchFallback,
-  type TitleMatchFallbackResult,
   type TitleMatchFallbackDebug,
 } from './titleMatchFallback';
 

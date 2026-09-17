@@ -20,7 +20,6 @@ import {
   computeAuthorSimilarity,
   findBestAuthorMatch,
   normalizeForOcrComparison,
-  normalizeForApiComparison,
 } from '../ocrConfusionMatching';
 
 import {

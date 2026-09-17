@@ -177,11 +177,6 @@ export function ScannerScreen(): React.JSX.Element {
     navigation.navigate('Debug');
   }, [navigation]);
 
-  const importAvailable = false;
-  const handleImport = useCallback(() => {
-    if (!importAvailable) return;
-  }, [importAvailable]);
-
   const handleToggleRail = useCallback(() => {
     setRailExpanded((prev) => !prev);
   }, []);

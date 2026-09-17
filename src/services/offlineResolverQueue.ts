@@ -7,7 +7,7 @@
  */
 
 import { MMKV } from 'react-native-mmkv';
-import { Platform, AppState, AppStateStatus } from 'react-native';
+import { AppState, AppStateStatus } from 'react-native';
 import NetInfo from '@react-native-community/netinfo';
 import type { NetInfoState } from '@react-native-community/netinfo';
 import type { BookCandidate } from '../types';
@@ -15,11 +15,8 @@ import {
   ResolveRequest,
   buildResolveRequest,
   resolveCandidate,
-  applyResolverResult,
-  ResolverResult,
 } from './supabaseResolverClient';
 import { isMetadataVerboseDebug, isOfflineQueueEnabled as isMetadataOfflineQueueEnabled } from '../config/debug';
-import { useAppStore } from '../store/useAppStore';
 
 // ============================================================================
 // Configuration

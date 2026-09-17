@@ -26,7 +26,7 @@ import { useCorrectionsStore } from '../../store/useCorrectionsStore';
 function createMockEvidence(lines: string[] = ['Test Book', 'Test Author']): BookEvidence {
   return {
     topCrops: [0],
-    mergedLines: lines.map((text, i) => ({
+    mergedLines: lines.map((text) => ({
       text,
       normalizedText: text.toLowerCase().replace(/[^\w\s]/g, ''),
       confidence: 0.9,
@@ -180,7 +180,7 @@ describe('generateContentHash', () => {
 
     const evidence1: BookEvidence = {
       topCrops: [0],
-      mergedLines: lines1.map((text, i) => ({
+      mergedLines: lines1.map((text) => ({
         text,
         normalizedText: text.toLowerCase().replace(/[^\w\s]/g, ''),
         confidence: 0.9,
@@ -193,7 +193,7 @@ describe('generateContentHash', () => {
 
     const evidence2: BookEvidence = {
       topCrops: [0],
-      mergedLines: lines2.map((text, i) => ({
+      mergedLines: lines2.map((text) => ({
         text,
         normalizedText: text.toLowerCase().replace(/[^\w\s]/g, ''),
         confidence: 0.9,
@@ -206,7 +206,7 @@ describe('generateContentHash', () => {
 
     const evidence3: BookEvidence = {
       topCrops: [0],
-      mergedLines: lines3.map((text, i) => ({
+      mergedLines: lines3.map((text) => ({
         text,
         normalizedText: text.toLowerCase().replace(/[^\w\s]/g, ''),
         confidence: 0.9,

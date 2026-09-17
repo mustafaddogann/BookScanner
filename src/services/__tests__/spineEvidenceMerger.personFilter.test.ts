@@ -8,18 +8,18 @@ import type { BookCandidate, OCRResult } from '../../types';
 describe('SpineEvidenceMerger: Person-like title filtering', () => {
   it('should filter person-like native title candidate and use advanced extraction', () => {
     // Simulate the screenshot case: native OCR gives LISA CHILDS as both title and author
-    const candidate: BookCandidate = {
+    const candidate = {
       id: 'test-1',
       cropIndices: [0],
       evidence: {
         mergedLines: [],
         titleHints: [],
         authorHints: [],
-        debug: {} as any,
+        debug: {},
       },
-    };
+    } as unknown as BookCandidate;
 
-    const ocrResult: OCRResult = {
+    const ocrResult = {
       ok: true,
       rawText: 'ZEBRA\nNEW FORK\nTIMES\nBESTSELLER\nLISA CHILDS\nTHE\nBURIED',
       lines: [
@@ -35,7 +35,7 @@ describe('SpineEvidenceMerger: Person-like title filtering', () => {
       titleCandidate: 'LISA CHILDS',
       authorCandidate: 'LISA CHILDS',
       confidence: 0.9,
-    };
+    } as unknown as OCRResult;
 
     const ocrResultsByCropIndex: Record<number, OCRResult> = {
       0: ocrResult,
@@ -62,18 +62,18 @@ describe('SpineEvidenceMerger: Person-like title filtering', () => {
 
   it('should filter title-like native author candidate', () => {
     // Native OCR gives "OVERTURE TO DEATH" as both title and author
-    const candidate: BookCandidate = {
+    const candidate = {
       id: 'test-3',
       cropIndices: [0],
       evidence: {
         mergedLines: [],
         titleHints: [],
         authorHints: [],
-        debug: {} as any,
+        debug: {},
       },
-    };
+    } as unknown as BookCandidate;
 
-    const ocrResult: OCRResult = {
+    const ocrResult = {
       ok: true,
       rawText: 'JOVE\nMYSTERY\nOVERTURE TO DEATH\nTONIO MARSH',
       lines: [
@@ -86,7 +86,7 @@ describe('SpineEvidenceMerger: Person-like title filtering', () => {
       titleCandidate: 'OVERTURE TO DEATH',
       authorCandidate: 'OVERTURE TO DEATH',
       confidence: 0.95,
-    };
+    } as unknown as OCRResult;
 
     const ocrResultsByCropIndex: Record<number, OCRResult> = {
       0: ocrResult,
@@ -111,18 +111,18 @@ describe('SpineEvidenceMerger: Person-like title filtering', () => {
   });
 
   it('should keep non-person-like title candidates', () => {
-    const candidate: BookCandidate = {
+    const candidate = {
       id: 'test-2',
       cropIndices: [0],
       evidence: {
         mergedLines: [],
         titleHints: [],
         authorHints: [],
-        debug: {} as any,
+        debug: {},
       },
-    };
+    } as unknown as BookCandidate;
 
-    const ocrResult: OCRResult = {
+    const ocrResult = {
       ok: true,
       rawText: 'THE SHINING\nSTEPHEN KING',
       lines: [
@@ -132,7 +132,7 @@ describe('SpineEvidenceMerger: Person-like title filtering', () => {
       titleCandidate: 'THE SHINING',
       authorCandidate: 'STEPHEN KING',
       confidence: 0.95,
-    };
+    } as unknown as OCRResult;
 
     const ocrResultsByCropIndex: Record<number, OCRResult> = {
       0: ocrResult,

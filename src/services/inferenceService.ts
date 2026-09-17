@@ -32,7 +32,7 @@ import type {
   LetterboxParams,
   RawModelOutput,
 } from '../types';
-import { mapModelToOriginalOBB, normalizeAngle } from '../utils/letterbox';
+import { mapModelToOriginalOBB } from '../utils/letterbox';
 import {
   writeModelIO,
   writeRawModelOutput,
@@ -988,15 +988,11 @@ let modelWarmupComplete = false;
 /** Invoke counter for current capture session */
 let invokeCount = 0;
 
-/** Current capture session ID for invoke tracking */
-let currentCaptureSession: string | null = null;
-
 /**
  * Reset invoke counter for new capture session
  */
 export function resetInvokeCounter(sessionId: string): void {
   invokeCount = 0;
-  currentCaptureSession = sessionId;
   console.log(`[InferenceService] Invoke counter reset for session ${sessionId}`);
 }
 
@@ -1098,7 +1094,7 @@ async function resolveModelPath(): Promise<{ path: string; isAssetUri: boolean }
         console.log('[InferenceService] Listing bundle resources for debugging...');
         try {
           await resolver.listBundleResources();
-        } catch (e) {
+        } catch {
           // Ignore listing errors
         }
 
@@ -1131,7 +1127,7 @@ async function resolveModelPath(): Promise<{ path: string; isAssetUri: boolean }
         } else {
           console.log('[InferenceService] No .tflite files found in bundle root');
         }
-      } catch (listError) {
+      } catch {
         // Ignore listing errors
       }
 
@@ -1159,7 +1155,7 @@ async function resolveModelPath(): Promise<{ path: string; isAssetUri: boolean }
       console.log(`[InferenceService] Android assets dir: ${assetsDir}`);
       // Note: On Android, we can't easily verify asset existence before loading
       // The loadTensorflowModel will fail if the file doesn't exist
-    } catch (e) {
+    } catch {
       // Ignore - Android asset verification is best-effort
     }
 
@@ -1521,17 +1517,12 @@ export function getModelIOContract(): ModelIOContract | null {
  * NOTE: The exact format (NHWC vs NCHW) depends on the exported model.
  * Check model_io_contract.json after export to verify input shape.
  */
-export function preprocessImage(
-  imageData: Uint8Array,
-  width: number,
-  height: number
-): Float32Array {
+export function preprocessImage(imageData: Uint8Array): Float32Array {
   const inputSize = MODEL_INPUT_SIZE;
 
   // Check model input shape to determine format
   const inputShape = modelIOContract?.inputTensors[0]?.shape;
   const isNHWC = inputShape && inputShape[3] === 3; // [1, H, W, C]
-  const isNCHW = inputShape && inputShape[1] === 3; // [1, C, H, W]
 
   if (isNHWC) {
     // TFLite typically uses NHWC format
@@ -1859,7 +1850,7 @@ export function decodeModelOutput(
     return detections;
   }
 
-  const [batch, numChannels, numAnchors] = outputShape;
+  const [, numChannels, numAnchors] = outputShape;
 
   // Verified format: [1, 6, 8400]
   if (numChannels !== 6) {

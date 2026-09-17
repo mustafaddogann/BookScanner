@@ -12,19 +12,13 @@
 import {
   normalizeForMatch,
   tokens,
-  isPriceLikeLine,
-  isFragmentLine,
   isOrgLikeLine,
-  isExactImprintLine,
-  containsImprintToken,
-  isBadgeContext,
   isPersonLikeLine,
   isTitleBridgeStopword,
 } from './lineClassification';
 
 import {
   splitInlineTitleAuthor,
-  isPublisherOrMarketing,
   cleanupPossessiveNoise,
   PUBLISHER_BLOCKLIST,
   MARKETING_BLOCKLIST,

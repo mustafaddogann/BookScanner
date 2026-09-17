@@ -104,7 +104,7 @@ function createMockEvidenceSummary(options: {
 function createMockBookEvidence(
   lines: Array<{ text: string; confidence?: number }>
 ): BookEvidence {
-  const mergedLines: BookEvidenceLine[] = lines.map((l, i) => ({
+  const mergedLines: BookEvidenceLine[] = lines.map((l) => ({
     text: l.text,
     normalizedText: l.text.toLowerCase().replace(/[^\w\s]/g, ''),
     confidence: l.confidence ?? 0.9,

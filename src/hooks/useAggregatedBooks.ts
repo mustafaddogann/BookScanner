@@ -179,6 +179,8 @@ export function useAggregatedBooks(): {
     });
 
     return { books: deduped, diagnostics: diag };
+    // bgScans and refreshKey aren't read here; they re-trigger the MMKV reads above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessions, liveSessionMeta, currentSessionId, bgScans, refreshKey]);
 
   return { books, isLoading: false, totalCount: books.length, refresh, diagnostics };

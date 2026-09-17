@@ -455,11 +455,9 @@ export function groupDetectionsIntoCandidates(input: GroupingInput): GroupingRes
 
     // Compute centroid of all detections in cluster
     let sumCx = 0;
-    let sumCy = 0;
     let sumAngle = 0;
     for (const idx of detectionIndices) {
       sumCx += detections[idx].cx;
-      sumCy += detections[idx].cy;
       sumAngle += detections[idx].angle;
     }
     const centroidX = sumCx / detectionIndices.length;

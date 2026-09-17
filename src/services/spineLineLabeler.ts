@@ -69,8 +69,6 @@ export interface LineLabelingResult {
 // Configuration
 // ============================================================================
 
-/** Score threshold for classification */
-const CLASSIFICATION_THRESHOLD = 0.55;
 
 /** Minimum score difference for confident classification */
 const CONFIDENCE_MARGIN = 0.12;

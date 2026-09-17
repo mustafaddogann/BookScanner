@@ -179,7 +179,6 @@ function checkSuspiciousEdition(
 
   // Normalize text for comparison
   const normalizedEvidence = normalizeForComparison(fullTextBlock);
-  const normalizedPublisher = normalizeForComparison(book.publisher);
 
   // Check if publisher appears in evidence
   // Use relaxed matching (publisher name might be abbreviated)

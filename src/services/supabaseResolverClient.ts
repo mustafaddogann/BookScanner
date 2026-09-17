@@ -15,11 +15,8 @@ import {
 } from '../config/supabase';
 import type {
   BookCandidate,
-  BookHypothesis,
   ResolvedBook,
-  AcceptanceDecision,
   EvidenceTier,
-  SearchCandidate,
 } from '../types';
 import { isMetadataVerboseDebug } from '../config/debug';
 import { computeEvidenceHash } from '../utils/evidenceHash';

@@ -14,7 +14,7 @@ import {
   pointInOBB,
   approximateOBBIoU,
 } from '../letterbox';
-import type { OBBDetection, OBBModelSpace, LetterboxParams } from '../../types';
+import type { OBBDetection } from '../../types';
 
 describe('resizeWithLetterbox', () => {
   it('should handle square image (no padding needed)', () => {
@@ -47,7 +47,6 @@ describe('resizeWithLetterbox', () => {
     const expectedScale = 640 / 1920; // ~0.333
     expect(result.scale).toBeCloseTo(expectedScale, 5);
 
-    const scaledWidth = Math.round(1920 * result.scale);
     const scaledHeight = Math.round(1080 * result.scale);
     expect(result.padX).toBe(0);
     expect(result.padY).toBe(Math.round((640 - scaledHeight) / 2));

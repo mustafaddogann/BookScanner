@@ -19,7 +19,6 @@ import {
 import {
   generateHypotheses,
   generateBoostHypotheses,
-  getQuerySet,
   type SearchHypothesis,
   type HypothesisDebugContext,
   type HypothesisGenerationResult,
@@ -38,7 +37,6 @@ import {
   makeDecisionFromScores,
   type ScoredCandidate,
   type ScoringDecision,
-  type DecisionResult,
 } from './candidateScoring';
 import {
   MAX_RESULTS_PER_HYPOTHESIS as CONFIG_MAX_RESULTS,
@@ -52,9 +50,6 @@ const OPEN_LIBRARY_BOOKS = 'https://openlibrary.org/api/books';
 
 // Request timeout in milliseconds
 const FETCH_TIMEOUT = 10000;
-
-// Cache expiry for resolver_cache (7 days in milliseconds)
-const CACHE_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
 
 // ============================================================================
 // Rate-limit Safety Constants (from config)

@@ -7,11 +7,9 @@
 
 import {
   extractIsbnFromOcrLines,
-  validateAndNormalizeIsbn,
 } from '../isbnExtraction';
 
 import {
-  computeAuthorSimilarity,
   findBestAuthorMatch,
 } from '../ocrConfusionMatching';
 

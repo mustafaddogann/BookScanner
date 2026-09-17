@@ -13,13 +13,9 @@
 
 import {
   getRoleScore,
-  scoreTitleLikeness,
-  scorePersonLikeness,
   buildJoinedTitleCandidates,
-  shouldOverridePersonAsTitle,
   checkPersonOverride,
   shouldRejectAsAuthor,
-  type RoleScore,
   type PersonOverrideResult,
 } from './roleScoring';
 

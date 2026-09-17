@@ -8,7 +8,6 @@
  */
 
 const fs = require('fs');
-const path = require('path');
 
 // Known patterns that indicate specific issues
 const ISSUE_PATTERNS = {
@@ -48,7 +47,6 @@ const ISSUE_PATTERNS = {
 function analyzeReject(reject) {
   const issues = [];
   const mergedText = reject.mergedText || '';
-  const reason = reject.resolverDecisionReason || '';
 
   // Check each pattern category
   for (const [category, patterns] of Object.entries(ISSUE_PATTERNS)) {

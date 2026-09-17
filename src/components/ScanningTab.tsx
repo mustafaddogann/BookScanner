@@ -6,7 +6,7 @@ import type { RootStackParamList, ScanSession } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 import { ensureFileUri } from '../utils/fileUri';
-import { colors, fonts, spacing, radii, shadows } from '../theme';
+import { colors, fonts, spacing, radii } from '../theme';
 import { AnimatedPressable } from './AnimatedPressable';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;

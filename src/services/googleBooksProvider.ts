@@ -183,7 +183,6 @@ export class GoogleBooksProvider implements MetadataLookupProvider {
 
     console.log(`[GoogleBooksProvider] searchByText START query="${query}"`);
     const startTime = Date.now();
-    const verbose = shouldLogVerbose();
 
     try {
       const results = await this.searchByQuery(query, MAX_RESULTS);

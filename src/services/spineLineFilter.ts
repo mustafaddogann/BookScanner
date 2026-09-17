@@ -205,8 +205,6 @@ const BARCODE_PATTERNS = [
 /** Year-only line pattern */
 const YEAR_ONLY_PATTERN = /^(?:©\s*)?\d{4}$/;
 
-/** All-caps warning (might be publisher/edition) - used for additional scoring */
-const ALL_CAPS_SHORT = /^[A-Z\s]{2,20}$/;
 
 // ============================================================================
 // Configuration

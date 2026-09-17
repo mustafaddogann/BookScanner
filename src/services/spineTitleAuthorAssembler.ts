@@ -106,9 +106,6 @@ const SUBTITLE_INDICATORS = [': ', ' - ', ' – ', ' — '];
 /** Multiple author separators */
 const AUTHOR_SEPARATORS = [' and ', ' & ', ', ', ' with ', ' ve '];
 
-/** Minimum confidence for inclusion */
-const MIN_CONFIDENCE = 0.3;
-
 /** Maximum characters for a name part (first name, last name, etc.) */
 const MAX_NAME_PART_LENGTH = 20;
 
@@ -123,8 +120,7 @@ const MIN_NAME_PART_LENGTH = 2;
  * Try to split a combined line into title and author
  */
 function trySplitCombined(
-  text: string,
-  lineIndex: number
+  text: string
 ): { title: string; author: string; separator: string } | null {
   for (const { sep } of COMBINED_SEPARATORS.sort((a, b) => a.priority - b.priority)) {
     // Skip colon - it's typically Title: Subtitle, not Title: Author
@@ -225,7 +221,6 @@ function extractSubtitle(title: string): { main: string; subtitle?: string } {
  * Parse multiple authors from a string
  */
 function parseMultipleAuthors(authorStr: string): string[] {
-  const authors: string[] = [];
 
   // Check for separators
   for (const sep of AUTHOR_SEPARATORS) {
@@ -398,7 +393,7 @@ function tryPairingFromCombined(
   line: LineLabel
 ): TitleAuthorPairing | null {
   const text = line.filteredLine.line.text.trim();
-  const split = trySplitCombined(text, line.filteredLine.lineIndex);
+  const split = trySplitCombined(text);
 
   if (split) {
     const { main, subtitle } = extractSubtitle(split.title);

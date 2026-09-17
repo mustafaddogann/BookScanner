@@ -103,7 +103,10 @@ export function BookCandidateDetailModal({
   isAccepting,
 }: BookCandidateDetailModalProps) {
   const sessionMeta = useAppStore((state) => state.sessionMeta);
-  const rectificationResults = sessionMeta?.rectificationResults ?? [];
+  const rectificationResults = useMemo(
+    () => sessionMeta?.rectificationResults ?? [],
+    [sessionMeta?.rectificationResults]
+  );
   const [showAlternatives, setShowAlternatives] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);

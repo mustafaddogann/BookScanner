@@ -5,7 +5,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, ScanSession } from '../types';
 import { useAppStore } from '../store/useAppStore';
 import { ensureFileUri } from '../utils/fileUri';
-import { colors, fonts, spacing, radii, shadows } from '../theme';
+import { colors, fonts, spacing, radii } from '../theme';
 import { useFadeIn } from '../hooks/useFadeIn';
 import { AnimatedPressable } from '../components/AnimatedPressable';
 import { useUnreviewedStore } from '../store/useUnreviewedStore';
@@ -102,7 +102,7 @@ export function SessionsScreen(): React.JSX.Element {
             </Text>
           </View>
         ) : (
-          recentSessions.map((session, index) => {
+          recentSessions.map((session) => {
             const isNew = unreviewedIds.has(session.sessionId);
             const statusInfo = isNew
               ? { label: 'NEW', color: colors.primary, bg: colors.primaryMuted }

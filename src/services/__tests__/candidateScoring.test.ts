@@ -3,13 +3,12 @@
  */
 
 import type { ResolvedBook } from '../../types';
-import type { CandidateScore, ScoredCandidate, ResolutionMode } from '../candidateScoring';
+import type { CandidateScore, ScoredCandidate } from '../candidateScoring';
 import {
   scoreCandidate,
   scoreAndRankCandidates,
   buildEvidenceFromLines,
   makeDecisionFromScores,
-  AUTO_ACCEPT_THRESHOLD,
   SUGGESTED_THRESHOLD,
 } from '../candidateScoring';
 

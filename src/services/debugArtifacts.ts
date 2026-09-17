@@ -68,7 +68,7 @@ export function setArtifactWritingEnabled(enabled: boolean): void {
  * Check if artifacts should be written, log skip message if not
  * Returns true if write should proceed, false if it should be skipped
  */
-function shouldWriteArtifact(artifactName: string): boolean {
+function shouldWriteArtifact(): boolean {
   if (!artifactWritingEnabled) {
     // Only log once per unique artifact to reduce noise
     return false;
@@ -295,7 +295,7 @@ export async function writeDebugManifest(
   manifest: DebugManifest
 ): Promise<string> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('debug_manifest.json')) {
+  if (!shouldWriteArtifact()) {
     return '';
   }
 
@@ -320,7 +320,7 @@ export async function writeModelIO(
   modelIO: ModelIOContract
 ): Promise<string> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('model_io.json')) {
+  if (!shouldWriteArtifact()) {
     return '';
   }
 
@@ -345,7 +345,7 @@ export async function writeRawModelOutput(
   rawOutput: RawModelOutput
 ): Promise<string> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('detections_raw.json')) {
+  if (!shouldWriteArtifact()) {
     return '';
   }
 
@@ -454,7 +454,7 @@ export async function writeCoordinateTest(
   testData: object
 ): Promise<string> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('coordinate_test.json')) {
+  if (!shouldWriteArtifact()) {
     return '';
   }
 
@@ -477,7 +477,7 @@ export async function writeAngleTest(
   testData: object
 ): Promise<string> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('angle_test.json')) {
+  if (!shouldWriteArtifact()) {
     return '';
   }
 
@@ -522,7 +522,7 @@ export async function writeTensorStats(
   stats: TensorStats
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('tensor_stats.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -561,7 +561,7 @@ export async function writeRawSampleAnchors(
   data: RawSampleAnchors
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('raw_sample_anchors.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -605,7 +605,7 @@ export async function writeDecodeModeComparison(
   data: DecodeModeComparison
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('decode_mode_comparison.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -1066,7 +1066,7 @@ export async function writeGroupingAssignments(
   assignments: GroupingAssignments
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('grouping_assignments.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -1404,7 +1404,7 @@ export async function writeSourceDecodeStats(
   stats: SourceDecodeStats
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('source_decode_stats.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -1700,7 +1700,7 @@ export async function writeInputTensorStats(
   stats: InputTensorStats
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('input_tensor_stats.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -1732,7 +1732,7 @@ export async function writeLetterboxMeta(
   meta: LetterboxMeta
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('letterbox_meta.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -2136,7 +2136,7 @@ export async function writeScoreSanity(
   stats: ScoreSanityStats
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('score_sanity.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -2381,7 +2381,7 @@ export async function writeNMSWitness(
   witnessData: NMSWitnessData
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('nms_witness.json')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -2483,7 +2483,7 @@ export async function writeModelSpaceOverlay(
   topK: number = 200
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact(outputFilename)) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -2555,7 +2555,7 @@ export async function writeModelSpaceOverlays(
   detectionsAfterNMS: OBBOverlayDetection[]
 ): Promise<{ rawOverlay: WriteResult; nmsOverlay: WriteResult }> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('overlay_modelspace')) {
+  if (!shouldWriteArtifact()) {
     return {
       rawOverlay: SKIPPED_WRITE_RESULT,
       nmsOverlay: SKIPPED_WRITE_RESULT,
@@ -2655,7 +2655,6 @@ export function validateLetterboxConsistency(
 
   const isLandscape = decodedW > decodedH;
   const isPortrait = decodedW < decodedH;
-  const isSquare = decodedW === decodedH;
 
   // Determine actual padding axis
   let actualPaddingAxis: 'X' | 'Y' | 'NONE' = 'NONE';
@@ -2757,7 +2756,7 @@ export async function writeInputTensorArtifacts(
   errors: string[];
 }> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('input_tensor')) {
+  if (!shouldWriteArtifact()) {
     return {
       statsPath: '',
       previewPath: '',
@@ -2833,7 +2832,7 @@ export async function writeRectificationDebugOverlay(
   detections: RectificationOverlayDetection[]
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('rectification_overlay')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 
@@ -2994,7 +2993,7 @@ export async function writeCropQualityAnalysis(
   cropPaths: Array<{ detectionIndex: number; cropUri: string }>
 ): Promise<WriteResult> {
   // GATE: Skip if artifact writing is disabled
-  if (!shouldWriteArtifact('crop_quality')) {
+  if (!shouldWriteArtifact()) {
     return SKIPPED_WRITE_RESULT;
   }
 

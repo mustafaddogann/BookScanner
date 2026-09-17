@@ -18,7 +18,7 @@ import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, FixtureInfo } from '../types';
 import { loadAllFixtures, getDevFixtureInstructions } from '../services/fixtureService';
 import { runPipelineOnFixture } from '../services/pipelineService';
-import { listSessions, getSessionDir, readDebugManifest } from '../services/debugArtifacts';
+import { listSessions, readDebugManifest } from '../services/debugArtifacts';
 import { useAppStore } from '../store/useAppStore';
 import { testBooksCatalogWrite } from '../services/booksCatalogService';
 import { testUserCorrectionsWrite } from '../services/correctionsPersistenceService';

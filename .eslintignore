@@ -1,0 +1,8 @@
+node_modules/
+vendor/
+ml/venv/
+backend/.venv/
+ios/Pods/
+ios/build/
+android/app/build/
+coverage/

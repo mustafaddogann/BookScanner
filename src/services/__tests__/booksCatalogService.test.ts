@@ -12,9 +12,9 @@ const mockUpsert = jest.fn(() => ({ select: mockSelectAfterUpsert }));
 
 // For read operations: from().select().eq().single()
 const mockReadSingle = jest.fn();
-const mockEq = jest.fn(() => ({ eq: mockEq, single: mockReadSingle }));
+const mockEq: jest.Mock = jest.fn(() => ({ eq: mockEq, single: mockReadSingle }));
 const mockSelectForRead = jest.fn(() => ({ eq: mockEq }));
-const mockFrom = jest.fn((table: string) => {
+const mockFrom = jest.fn(() => {
   // Return different chains based on operation
   return {
     upsert: mockUpsert,
@@ -43,8 +43,6 @@ jest.mock('../supabaseCapabilities', () => ({
 
 import {
   upsertResolvedBook,
-  getBookById,
-  getBookByIsbn,
   confirmUserSelection,
   applyUserSelectionToCandidate,
 } from '../booksCatalogService';

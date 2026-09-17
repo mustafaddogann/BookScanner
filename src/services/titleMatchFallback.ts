@@ -15,7 +15,7 @@ import type { ResolvedBook } from '../types';
 import type { MetadataLookupProvider } from './metadataLookupProvider';
 import { OpenLibraryProvider } from './openLibraryProvider';
 import { GoogleBooksProvider } from './googleBooksProvider';
-import { computeAuthorSimilarity, normalizeForApiComparison } from './ocrConfusionMatching';
+import { computeAuthorSimilarity } from './ocrConfusionMatching';
 
 // ============================================================================
 // Title Normalization for Full Match

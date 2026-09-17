@@ -23,7 +23,6 @@ const ImagePreprocessor = NativeModules.ImagePreprocessor;
 
 // Cache for native rectification availability
 let nativeRectificationAvailable: boolean | null = null;
-let nativeRectificationMethod: string | null = null;
 let availabilityCheckLogged = false;
 
 /**
@@ -53,7 +52,6 @@ export async function isNativeRectificationAvailable(): Promise<{
   try {
     const result = await ImagePreprocessor.isRectificationAvailable();
     nativeRectificationAvailable = result.available;
-    nativeRectificationMethod = result.method;
     console.log(`[Rectifier] Native rectification: ${result.available ? 'AVAILABLE' : 'NOT AVAILABLE'} (${result.method})`);
     return result;
   } catch (error: any) {

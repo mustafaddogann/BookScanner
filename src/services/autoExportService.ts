@@ -40,7 +40,7 @@ const MIN_REJECTS_FOR_EXPORT = 1;
 const RESCAN_POLL_INTERVAL_MS = 30000;
 
 // Rescan polling state
-let rescanPollTimer: NodeJS.Timeout | null = null;
+let rescanPollTimer: ReturnType<typeof setInterval> | null = null;
 let rescanCallback: ((imageUri: string) => void) | null = null;
 
 /**

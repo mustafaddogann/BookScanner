@@ -8,7 +8,7 @@ import {
   normalizeText,
   MergeInput,
 } from '../spineEvidenceMerger';
-import type { OCRResult, BookCandidate, BookEvidence } from '../../types';
+import type { OCRResult, BookCandidate } from '../../types';
 
 // Suppress console.log during tests
 beforeAll(() => {

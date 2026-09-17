@@ -52,11 +52,9 @@ import { autoExportRejects } from './autoExportService';
 import {
   OpenLibraryProvider,
   buildResolverKey,
-  type EvidenceSearchResult,
 } from './openLibraryProvider';
-import { executeTitleMatchFallback, executeTitleMatchFallbackWithGoogleBooks } from './titleMatchFallback';
+import { executeTitleMatchFallbackWithGoogleBooks } from './titleMatchFallback';
 import { getQuerySet } from './queryHypotheses';
-import type { ScoredCandidate, ScoringDecision } from './candidateScoring';
 import { shouldAutoPersist, makeDecisionFromScores } from './candidateScoring';
 import { AUTO_BOOST_ENABLED } from '../config/metadataResolutionConfig';
 import { persistResolverAttempts } from './resolverAttemptsService';
@@ -913,7 +911,6 @@ export async function resolveBookCandidateByEvidence(
     const pass1Decision = pass1Result.decision;
 
     let result = pass1Result;
-    let boostTriggered = false;
 
     // AUTO-BOOST: If pass 1 decision is not accept_high/accept_medium, run boost pass
     if (
@@ -922,7 +919,6 @@ export async function resolveBookCandidateByEvidence(
       pass1Decision !== 'accept_medium'
     ) {
       console.log(`[EvidenceResolver] Pass 1 decision=${pass1Decision}, triggering boost pass 2`);
-      boostTriggered = true;
 
       // Get queries already tried in pass 1
       const pass1Queries = getQuerySet(pass1Result.hypotheses.hypotheses);

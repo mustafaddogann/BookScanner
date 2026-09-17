@@ -9,10 +9,10 @@
  * - mixedOrientationMerger
  */
 
-import { filterSpineLines, isOtherLine, type FilteredLine } from '../spineLineFilter';
+import { filterSpineLines, isOtherLine } from '../spineLineFilter';
 import { labelSpineLines, scoreLine, scoreAsName, scoreAsTitle, detectByPattern } from '../spineLineLabeler';
 import { assembleTitleAuthor, quickAssemble } from '../spineTitleAuthorAssembler';
-import { guardSwap, quickSwapCheck, analyzeSwap, validatePairing } from '../spineSwapGuard';
+import { quickSwapCheck, analyzeSwap, validatePairing } from '../spineSwapGuard';
 import { mergeRotationEvidence } from '../mixedOrientationMerger';
 import type { BookEvidenceLine, OCRResult, RotationTrialResult } from '../../types';
 

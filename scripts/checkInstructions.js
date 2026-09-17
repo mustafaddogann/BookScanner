@@ -12,8 +12,6 @@ const { execSync } = require('child_process');
 const os = require('os');
 
 const INSTRUCTIONS_FILE = path.join(os.homedir(), '.claude/clawdbot-instructions/instructions.md');
-const PHOTOS_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/photos');
-const DOCUMENTS_DIR = path.join(os.homedir(), '.claude/clawdbot-instructions/documents');
 const ANALYZE_SCRIPT = path.join(__dirname, 'analyzeRejects.js');
 const WATCH_SCRIPT = path.join(__dirname, 'watchRejects.js');
 

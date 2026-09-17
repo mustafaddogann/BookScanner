@@ -30,7 +30,7 @@ function getSimulatorDataPath() {
         }
       }
     }
-  } catch (e) {
+  } catch {
     console.log('No booted simulator found');
   }
   return null;

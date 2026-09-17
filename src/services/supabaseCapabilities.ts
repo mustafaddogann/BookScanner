@@ -79,7 +79,7 @@ export async function probeResolverKeySupport(): Promise<ProbeResult> {
 
   try {
     // Probe: try to select resolver_key column
-    const { data, error } = await client
+    const { error } = await client
       .from('books_catalog')
       .select('resolver_key')
       .limit(1);

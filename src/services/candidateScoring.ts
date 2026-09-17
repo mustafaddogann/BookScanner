@@ -44,7 +44,6 @@ import {
   GENERIC_TITLE_PENALTY as CONFIG_GENERIC_PENALTY,
   MISSING_AUTHOR_PENALTY as CONFIG_MISSING_AUTHOR_PENALTY,
   MAX_REVIEW_CANDIDATES as CONFIG_MAX_REVIEW,
-  // TITLE_ONLY mode thresholds
   TITLE_ONLY_AUTHOR_THRESHOLD,
   TITLE_ONLY_ACCEPT_MIN,
   TITLE_ONLY_SUGGESTED_MIN,
@@ -52,11 +51,6 @@ import {
   TITLE_ONLY_MAX_CANDIDATES,
   TITLE_ONLY_PUBLISHER_MIN,
   TITLE_ONLY_MIN_TOKENS,
-  TITLE_ONLY_REJECT_BELOW,
-  // FULL_MATCH mode thresholds
-  FULL_MATCH_TITLE_MIN,
-  FULL_MATCH_AUTHOR_MIN,
-  FULL_MATCH_OVERALL_MIN,
 } from '../config/metadataResolutionConfig';
 
 // ============================================================================
@@ -2196,7 +2190,6 @@ function decideFromScores(
   // Get resolution mode from top candidate (with safe access)
   const resolutionMode = top.scoring.resolutionMode;
   const titleScore = top.scoring.titleScore ?? 0;
-  const authorScore = top.scoring.authorScore;
   const titleTokenCount = top.scoring.titleTokenCount ?? 0;
   const publisherScore = top.scoring.publisherScore;
   // Safe access for matchedAuthorTokens

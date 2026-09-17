@@ -6,12 +6,12 @@
  * All subsequent operations should use the FrameGeo instead of re-reading dimensions.
  */
 
-import { Platform, Image } from 'react-native';
+import { Image } from 'react-native';
 import RNFS from 'react-native-fs';
 import type { PhotoFile } from 'react-native-vision-camera';
 import type { ImageMeta, ScanSession } from '../types';
 import { generateSessionId, createSessionDir, copyOriginalImage } from './debugArtifacts';
-import { useAppStore, storage } from '../store/useAppStore';
+import { useAppStore } from '../store/useAppStore';
 import {
   type FrameGeo,
   normalizeFileUri,
@@ -42,21 +42,6 @@ function getOrientationFromMetadata(metadata: any): number {
     return metadata.Orientation;
   }
   return 1; // Default: normal orientation
-}
-
-/**
- * Get corrected dimensions based on EXIF orientation
- */
-function getCorrectedDimensions(
-  width: number,
-  height: number,
-  orientation: number
-): { width: number; height: number } {
-  // Orientations 5, 6, 7, 8 involve 90-degree rotations
-  if (orientation >= 5 && orientation <= 8) {
-    return { width: height, height: width };
-  }
-  return { width, height };
 }
 
 /**

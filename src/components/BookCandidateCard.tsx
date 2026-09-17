@@ -1,9 +1,9 @@
 import React, { memo, useMemo } from 'react';
-import { View, Text, StyleSheet, Animated } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import type { BookCandidate } from '../types';
 import { BookCandidateDiagnosticsRow } from './BookCandidateDiagnosticsRow';
 import { AnimatedPressable } from './AnimatedPressable';
-import { colors, fonts, spacing, radii, shadows } from '../theme';
+import { colors, fonts, spacing, radii } from '../theme';
 
 interface BookCandidateCardProps {
   candidate: BookCandidate;
@@ -64,7 +64,7 @@ function BookCandidateCardBase({
   const isAutoApplied = !!(candidate as { appliedCorrection?: unknown }).appliedCorrection;
   const evidence = candidate.evidence as EvidenceSnapshot | undefined;
   const cropCount = candidate.cropIndices?.length ?? 0;
-  const mergedLines = evidence?.mergedLines ?? [];
+  const mergedLines = useMemo(() => evidence?.mergedLines ?? [], [evidence?.mergedLines]);
   const mergedText = (evidence?.fullText ?? evidence?.mergedTextBlock ?? '').trim();
   const explicitAvg = evidence?.avgConfidence;
 

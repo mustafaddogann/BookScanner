@@ -10,10 +10,7 @@
 
 import {
   getRoleScore,
-  scorePersonLikeness,
-  scoreTitleLikeness,
   buildJoinedTitleCandidates,
-  shouldOverridePersonAsTitle,
   checkPersonOverride,
   shouldRejectAsAuthor,
   findStopwordBridges,

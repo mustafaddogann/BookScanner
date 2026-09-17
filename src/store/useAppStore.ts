@@ -4,7 +4,6 @@ import type {
   ScanSession,
   OBBDetection,
   SerializedFrameGeo,
-  RectifyResult,
   OCRResult,
   OCRSummary,
   MetadataMatch,

@@ -10,11 +10,9 @@
  */
 
 import {
-  scoreCandidate,
   scoreAndRankCandidates,
   buildEvidenceFromLines,
   makeDecisionFromScores,
-  type ScoredCandidate,
 } from '../candidateScoring';
 import { tokenSetFuzzyScore, levenshteinSimilarity } from '../tokenSetFuzzyScoring';
 import type { ResolvedBook } from '../../types';

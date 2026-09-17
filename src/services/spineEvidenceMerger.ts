@@ -301,7 +301,7 @@ function extractFieldHints(
   const authorHints: string[] = [];
 
   // Import helpers for filtering native OCR candidates
-  const { isOrgLikeLine, isPublisherOrMarketing, isAllCapsNameCandidate } = require('./titleAuthorExtraction');
+  const { isOrgLikeLine, isPublisherOrMarketing } = require('./titleAuthorExtraction');
   const { getRoleScore } = require('./roleScoring');
 
   // Extract text lines for advanced processing

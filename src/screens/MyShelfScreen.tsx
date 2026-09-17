@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useRef } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, Animated, Dimensions } from 'react-native';
-import { colors, fonts, spacing, radii } from '../theme';
+import { colors, fonts, spacing } from '../theme';
 import { useFadeIn } from '../hooks/useFadeIn';
 import { useAggregatedBooks } from '../hooks/useAggregatedBooks';
 import { useBackgroundScanStore } from '../store/useBackgroundScanStore';

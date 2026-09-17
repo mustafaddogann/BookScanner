@@ -132,7 +132,7 @@ async function checkStartupRescan(): Promise<void> {
       try {
         const baseUrl = serverUrl.replace(/\/upload$/, '');
         await fetch(`${baseUrl}/clear-rescan`, { method: 'POST' });
-      } catch (e) {
+      } catch {
         // Ignore
       }
       return;

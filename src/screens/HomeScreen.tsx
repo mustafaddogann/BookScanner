@@ -7,7 +7,6 @@ import {
   ScrollView,
   Animated,
   Image,
-  Dimensions,
   Modal,
 } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
@@ -22,7 +21,6 @@ import { StatPill } from '../components/StatPill';
 import { AnimatedPressable } from '../components/AnimatedPressable';
 import { ensureFileUri } from '../utils/fileUri';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
 

@@ -12,7 +12,6 @@
  */
 
 import {
-  normalizeForMatch,
   tokens,
   alphaRatio,
   isOrgLikeLine,
