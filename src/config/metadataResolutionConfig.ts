@@ -47,6 +47,15 @@ export const ACCEPT_MEDIUM_THRESHOLD = 0.88;
 /** Minimum gap between top and second candidate for accept_medium */
 export const ACCEPT_MEDIUM_GAP = 0.12;
 
+/**
+ * Anchored accept: a lower-scoring match is still accepted when an author surname
+ * and most of the title were read from the spine. Tuned on real shelf scans, where
+ * suggestions at or above this score with a surname match were almost always correct.
+ */
+export const ANCHORED_ACCEPT_MIN_SCORE = 0.65;
+export const ANCHORED_ACCEPT_MIN_GAP = 0.06;
+export const ANCHORED_ACCEPT_MIN_TITLE_OVERLAP = 0.5;
+
 /** Minimum overlapping tokens for accept_medium */
 export const ACCEPT_MEDIUM_MIN_OVERLAP = 2;
 

@@ -26,6 +26,9 @@ import {
   ACCEPT_HIGH_THRESHOLD as CONFIG_ACCEPT_HIGH,
   ACCEPT_MEDIUM_THRESHOLD as CONFIG_ACCEPT_MEDIUM,
   ACCEPT_MEDIUM_GAP as CONFIG_ACCEPT_MEDIUM_GAP,
+  ANCHORED_ACCEPT_MIN_SCORE,
+  ANCHORED_ACCEPT_MIN_GAP,
+  ANCHORED_ACCEPT_MIN_TITLE_OVERLAP,
   ACCEPT_MEDIUM_MIN_OVERLAP as CONFIG_MIN_OVERLAP,
   SUGGESTED_THRESHOLD as CONFIG_SUGGESTED,
   SUGGESTED_AUTHOR_THRESHOLD as CONFIG_SUGGESTED_AUTHOR,
@@ -2188,6 +2191,35 @@ export function makeDecisionFromScores(
   // DECISION PATH: Route based on resolution mode
   // ==========================================================================
 
+  // ANCHORED ACCEPT: the spine gave us an author surname and most of the title, and no
+  // different book is close. Below the normal accept score these were almost always right.
+  const matchedAuthorSet = new Set(top.scoring.matchedAuthorTokens ?? []);
+  const surnameMatched = (top.book.authors || []).some((author) => {
+    const tokens = normalizeForScoring(author);
+    return tokens.length > 0 && matchedAuthorSet.has(tokens[tokens.length - 1]);
+  });
+  const isAnchoredMatch =
+    resolutionMode !== 'NO_MATCH' &&
+    !top.scoring.isbnMatched &&
+    top.scoring.score >= ANCHORED_ACCEPT_MIN_SCORE &&
+    surnameMatched &&
+    (top.scoring.titleOverlap ?? 0) >= ANCHORED_ACCEPT_MIN_TITLE_OVERLAP &&
+    !isGenericTitle(top.book.title || '') &&
+    scoreGap >= ANCHORED_ACCEPT_MIN_GAP;
+
+  if (isAnchoredMatch) {
+    logGateDecision('accept_medium', 'anchored_title_surname_match', resolutionMode, top, debugContext);
+    return {
+      decision: 'accept_medium',
+      topCandidate: top,
+      reviewCandidates: [],
+      scoreGap,
+      reason: 'anchored_title_surname_match',
+      resolutionMode,
+      ambiguityMetrics,
+    };
+  }
+
   // FAST PATH: Safety net for cases that should clearly be suggested but might be
   // incorrectly rejected by complex routing logic. Only applies when:
   // - Score is clearly good (>= 0.65) but below accept threshold
@@ -2236,33 +2268,6 @@ export function makeDecisionFromScores(
   if (resolutionMode === 'WEAK_TITLE_STRONG_AUTHOR') {
     // Up-weight author match: if author tokens matched, score is more reliable
     const authorMatchCount = top.scoring.matchedAuthorTokens.length;
-
-    // Short but specific titles ("Think" + "BLACKBURN") are safe to accept when the
-    // whole title and an author's surname both matched and nothing else competes.
-    const matchedAuthorSet = new Set(top.scoring.matchedAuthorTokens);
-    const surnameMatched = (top.book.authors || []).some((author) => {
-      const tokens = normalizeForScoring(author);
-      return tokens.length > 0 && matchedAuthorSet.has(tokens[tokens.length - 1]);
-    });
-    const isSpecificShortTitleMatch =
-      top.scoring.titleOverlap === 1 &&
-      surnameMatched &&
-      !isGenericTitle(top.book.title || '') &&
-      top.scoring.score >= 0.75 &&
-      scoreGap >= ACCEPT_MEDIUM_GAP;
-
-    if (isSpecificShortTitleMatch) {
-      logGateDecision('accept_medium', 'short_title_surname_match', resolutionMode, top, debugContext);
-      return {
-        decision: 'accept_medium',
-        topCandidate: top,
-        reviewCandidates: [],
-        scoreGap,
-        reason: 'short_title_surname_match',
-        resolutionMode,
-        ambiguityMetrics,
-      };
-    }
 
     // If we have both title and author overlap, suggest
     if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1) {

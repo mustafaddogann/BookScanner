@@ -42,7 +42,7 @@ describe('real-scan matches that should be accepted', () => {
       [book('Think', ['Simon Blackburn'])]
     );
     expect(decision.decision).toBe('accept_medium');
-    expect(decision.reason).toBe('short_title_surname_match');
+    expect(decision.reason).toBe('anchored_title_surname_match');
   });
 
   it('keeps a one-word title as suggested when a close competitor exists', () => {
@@ -50,11 +50,27 @@ describe('real-scan matches that should be accepted', () => {
       [book('Think', ['Simon Blackburn'], 'OL1M'), book('Think Again', ['Simon Blackburn'], 'OL2M')],
       buildEvidenceTokens(['BLACKBURN', 'Think'])
     );
-    // Pin the competitor just inside the ambiguity margin
+    // Pin the competitor inside the ambiguity margin
     const [top, competitor] = scored;
-    const close = { ...competitor, scoring: { ...competitor.scoring, score: top.scoring.score - 0.05 } };
+    const close = { ...competitor, scoring: { ...competitor.scoring, score: top.scoring.score - 0.03 } };
 
     const decision = makeDecisionFromScores([top, close]);
+    expect(decision.decision).not.toBe('accept_medium');
+  });
+
+  it('does not accept a same-title match when the spine names a different author', () => {
+    const decision = decide(
+      ['WOMEN OF COLOR AND FEMINISM MATTICE ROUS PHO'],
+      [book('Women of color', ['Darlene Mathis'])]
+    );
+    expect(decision.decision).not.toBe('accept_medium');
+  });
+
+  it('does not accept a partial title match whose author was not read', () => {
+    const decision = decide(
+      ['Harper Lee •Bülbülü Öldürmek'],
+      [book('Kumandanı Öldürmek', ['村上春樹'])]
+    );
     expect(decision.decision).not.toBe('accept_medium');
   });
 

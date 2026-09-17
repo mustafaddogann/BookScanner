@@ -287,7 +287,8 @@ describe('candidateScoring', () => {
             titleOverlap: 0.6,
             authorOverlap: 0.5,
             matchedTitleTokens: ['shining'],
-            matchedAuthorTokens: ['stephen', 'king'],
+            // First name only: without a surname anchor a moderate score stays suggested
+            matchedAuthorTokens: ['stephen'],
             precision: 0.5,
             recall: 0.6,
             f1: 0.55,
@@ -353,7 +354,8 @@ describe('candidateScoring', () => {
             titleOverlap: 0.7,
             authorOverlap: 0.6,
             matchedTitleTokens: ['shining'],
-            matchedAuthorTokens: ['stephen', 'king'],
+            // First name only: without a surname anchor a moderate score stays suggested
+            matchedAuthorTokens: ['stephen'],
             precision: 0.6,
             recall: 0.7,
             f1: 0.65,
@@ -964,7 +966,7 @@ describe('candidateScoring', () => {
   // Example: "The Guardians" (1 token after filtering "The") + "John Grisham" (2 tokens, high confidence)
   // ===========================================================================
   describe('WEAK_TITLE_STRONG_AUTHOR resolution mode', () => {
-    it('single-token title + strong author match -> SUGGESTED', () => {
+    it('single-token title + surname match -> ACCEPT (anchored)', () => {
       // "The Guardians" by "John Grisham" case:
       // - Title: "The Guardians" → ["guardians"] (1 token after filtering "The")
       // - Author: "John Grisham" → ["john", "grisham"] (2 tokens)
@@ -993,12 +995,10 @@ describe('candidateScoring', () => {
 
       const result = makeDecisionFromScores(scoredCandidates);
 
-      // Should NOT reject - author evidence is strong
-      expect(result.decision).not.toBe('reject');
-      // Should be SUGGESTED (conservative for weak title)
-      expect(result.decision).toBe('suggested');
+      // Whole title and the author's surname were read, with no competitor
+      expect(result.decision).toBe('accept_medium');
       expect(result.resolutionMode).toBe('WEAK_TITLE_STRONG_AUTHOR');
-      expect(result.reason).toBe('weak_title_strong_author_proceeded');
+      expect(result.reason).toBe('anchored_title_surname_match');
     });
 
     it('single-token title + weak author match -> SUGGESTED_WEAK', () => {
