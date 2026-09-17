@@ -1,29 +1,70 @@
+# macOS
+.DS_Store
+
+# Xcode
+build/
+*.pbxuser
+!default.pbxuser
+*.mode1v3
+!default.mode1v3
+*.mode2v3
+!default.mode2v3
+*.perspectivev3
+!default.perspectivev3
+xcuserdata
+*.xccheckout
+*.moved-aside
+DerivedData
+*.hmap
+*.ipa
+*.xcuserstate
+**/.xcode.env.local
+
+# Android / IntelliJ
+.idea
+.gradle
+local.properties
+*.iml
+*.hprof
+.cxx/
+*.keystore
+!debug.keystore
+.kotlin/
+
+# Editors
+.vscode/
+
 # Node
 node_modules/
+npm-debug.log
+yarn-error.log
 
-# React Native
-android/app/build/
-ios/Pods/
-ios/build/
+# Metro / bundles
+*.jsbundle
+.metro-health-check*
+
+# Ruby / CocoaPods
+**/Pods/
+/vendor/bundle/
+
+# Logs
+*.log
+
+# Tests
+/coverage
 
 # Python virtualenvs
 ml/venv/
 venv/
+__pycache__/
+
+# Environment and local API keys
 .env
+src/config/secrets.ts
 
-# macOS
-.DS_Store
-
-# Editors
-.vscode/
-.idea/
-
-# Xcode user state
-*.xcuserstate
+# Generated debug output from tools/*.py and on-device runs
+/debug/
 
 # Auto-fix runtime state
 scripts/.autofix_daemon_state.json
 scripts/.autofix_state.json
-
-# Local API keys
-src/config/secrets.ts
