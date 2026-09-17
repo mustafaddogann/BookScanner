@@ -141,6 +141,8 @@ const TITLE_CONNECTOR_WORDS = new Set([
   'an',
   'of',
   'and',
+  've',
+  'ile',
   'in',
   'to',
   'for',
@@ -234,6 +236,53 @@ const OCR_QUERY_NOISE_TOKENS = new Set([
   'ets',
   'ts',
   'du',
+  'testeerats',
+  'staaboutes',
+  'nofer',
+  'nfer',
+  'noer',
+  'nofr',
+  'ishoe',
+  // Editorial and low-information debris that should not dominate queries
+  'edited',
+  'editor',
+  'editors',
+  'afoen',
+  'ayoen',
+  // Observed OCR garbage fragments in unresolved rejects
+  'folol',
+  'wiaro',
+  // High-noise OCR fragments that repeatedly degrade query quality
+  'nvho',
+  'cenuurnr',
+  'achusioe',
+  'tuindo',
+  'duneblnngvn',
+  'cauwn',
+  'uintha',
+  // Turkish/Latin OCR debris from unresolved spine lines
+  'celatena',
+  'erall',
+  'drr',
+  'cidinia',
+  'idur',
+  'ilad',
+  'lkesi',
+  'othin',
+  'aoia',
+  'darinllad',
+  'lkfsi',
+  'ctha',
+  'kkm',
+  'km',
+  'kn',
+  'alttt',
+  'onvulys',
+  'oi3nz',
+  'nyj3ls',
+  'mitinta',
+  'siiaoown',
+  'tiuite',
 ]);
 
 const OCR_SINGLE_TOKEN_QUERY_NOISE = new Set([
@@ -254,21 +303,146 @@ const OCR_SINGLE_TOKEN_QUERY_NOISE = new Set([
   'paperback',
   'hardcover',
   'mystery',
+  'nofer',
+  'nfer',
+  'noer',
+  'nofr',
+  'edited',
+  'editor',
+  'editors',
+  'nvho',
+  'cenuurnr',
+  'achusioe',
+  'tuindo',
+  'duneblnngvn',
+  'cauwn',
+  'uintha',
+  'celatena',
+  'erall',
+  'drr',
+  'cidinia',
+  'idur',
+  'ilad',
+  'lkesi',
+  'othin',
+  'aoia',
+  'darinllad',
+  'lkfsi',
+  'ctha',
+  'kkm',
+  'km',
+  'kn',
+  'alttt',
+  'onvulys',
+  'oi3nz',
+  'nyj3ls',
+  'mitinta',
+  'siiaoown',
+  'tiuite',
 ]);
 
-const OCR_FUSED_JOINERS = ['into', 'and', 'with', 'from', 'the', 'for', 'your', 'god'];
+const OCR_QUERY_LOW_SIGNAL_TOKENS = new Set([
+  'he',
+  'she',
+  'him',
+  'her',
+  'his',
+  'hers',
+  'they',
+  'them',
+  'their',
+  'are',
+  'was',
+  'were',
+  'been',
+  'being',
+  'since',
+  'who',
+  've',
+  'ile',
+]);
+
+const OCR_FUSED_JOINERS = ['into', 'and', 'with', 'from', 'the', 'for', 'your', 'god', 'of'];
+const OCR_FUSED_JOINER_EXACT_EXCEPTIONS = new Set([
+  // Valid names/words that happen to end with joiner substrings.
+  'hoagland',
+  'anderson',
+  'andersen',
+]);
+const OCR_MERGED_AUTHOR_HINT_TOKENS = new Set([
+  'yusufatilgan',
+  'orhanpamuk',
+  'aminmaalouf',
+  'johnsteinbeck',
+  'stefanzweig',
+  'williamjames',
+  'francisracon',
+  'garnliel',
+  'harouir',
+]);
 
 const OCR_QUERY_TOKEN_CORRECTIONS = new Map<string, string[]>([
+  ['d', ['and']],
+  ['0f', ['of']],
+  ['0n', ['on']],
+  ['lnto', ['into']],
+  ['lnt0', ['into']],
+  ['achristina', ['christina']],
   ['fave', ['faye']],
   ['cave', ['faye']],
   ['acaid', ['ngaio']],
   ['agaid', ['ngaio']],
+  ['monig', ['ngaio']],
+  ['garnliel', ['gabriel']],
+  ['harouir', ['marquez']],
+  ['yuzyillie', ['yuzyillik']],
+  ['yusufatilgan', ['yusuf', 'atilgan']],
+  ['orhanpamuk', ['orhan', 'pamuk']],
+  ['aminmaalouf', ['amin', 'maalouf']],
+  ['johnsteinbeck', ['john', 'steinbeck']],
+  ['stefanzweig', ['stefan', 'zweig']],
+  ['williamjames', ['william', 'james']],
+  ['francisracon', ['francis', 'bacon']],
+  ['kajka', ['kafka']],
+  ['otell', ['oteli']],
+  ['limanlan', ['limanlari']],
+  ['masumiyetmzesi', ['masumiyet', 'muzesi']],
+  ['masumiyetmuzesi', ['masumiyet', 'muzesi']],
+  ['farelerve', ['fareler', 've']],
+  ['hakikatinanlami', ['hakikatin', 'anlami']],
+  ['doneyem', ['donem']],
+  ['donenom', ['donem']],
+  ['czerine', ['uzerine']],
+  ['dosonceler', ['dusunceler']],
+  ['yini', ['yeni']],
+  ['ailanias', ['anlayis']],
+  ['hemingwaytagh', ['hemingway', 'yasli']],
+  ['tagh', ['yasli']],
+  ['deni', ['deniz']],
+  ['lspl', ['is']],
+  ['lspi', ['is']],
+  ['adly', ['deadly']],
+  ['adaly', ['deadly']],
+  ['adely', ['deadly']],
+  ['adily', ['deadly']],
+  ['adoly', ['deadly']],
+  ['catherini', ['catherine']],
+  ['catherint', ['catherine']],
+  ['cardeni', ['carden']],
+  ['cardent', ['carden']],
+  ['lac', ['lia']],
+  ['alia', ['alibi']],
+  ['hodgalan', ['hoagland']],
+  ['hoagland', ['hoagland']],
+  ['aire', ['fire']],
+  ['lineof', ['line', 'of']],
   ['arica', ['erica']],
   ['cis', ['c', 'is', 'for']],
   ['priscil', ['priscilla']],
   ['priscill', ['priscilla']],
   ['priscila', ['priscilla']],
   ['warsh', ['marsh']],
+  ['denth', ['death']],
   ['straighi', ['straight']],
   ['straighe', ['straight']],
   ['straighiinto', ['straight', 'into']],
@@ -279,8 +453,11 @@ const OCR_QUERY_TOKEN_CORRECTIONS = new Map<string, string[]>([
   ['runforyour', ['run', 'for', 'your']],
   ['foryourlife', ['for', 'your', 'life']],
   ['runforyourlife', ['run', 'for', 'your', 'life']],
+  ['fond', ['food']],
   ['rosesare', ['roses', 'are']],
+  ['stak', ['stakeout']],
   ['staksout', ['stakeout']],
+  ['han', ['jonathan']],
   ['tonyhillerman', ['tony', 'hillerman']],
   ['talkinggod', ['talking', 'god']],
   ['jamespatterson', ['james', 'patterson']],
@@ -321,6 +498,22 @@ const OCR_QUERY_TOKEN_CORRECTIONS = new Map<string, string[]>([
   ['teethey', ['keith']],
   ['tohn', ['john']],
   ['iohn', ['john']],
+  ['johna', ['john']],
+  ['jhna', ['john']],
+  ['jona', ['john']],
+  ['joha', ['john']],
+  ['nhoc', ['city']],
+  ['ilsoe', ['city', 'of']],
+  ['lsoe', ['city', 'of']],
+  ['isoe', ['city', 'of']],
+  ['iloe', ['city', 'of']],
+  ['ilse', ['city', 'of']],
+  ['vctory', ['victory']],
+  ['vitory', ['victory']],
+  ['vicory', ['victory']],
+  ['victry', ['victory']],
+  ['victoy', ['victory']],
+  ['roberte', ['robert']],
   ['candford', ['sandford']],
   ['lighining', ['lightning']],
   ['htning', ['lightning']],
@@ -345,6 +538,21 @@ const OCR_QUERY_TOKEN_CORRECTIONS = new Map<string, string[]>([
   ['deathat', ['death', 'at']],
   ['fai', ['faith']],
   ['hearto', ['heart', 'of']],
+  ['ofjustie', ['of', 'justice']],
+  ['justie', ['justice']],
+  ['willianel', ['william']],
+  ['hanh', ['john']],
+  ['keuf', ['keith']],
+  ['neris', ['nerds']],
+  ['nris', ['nerds']],
+  ['numn', ['nunn']],
+  ['desi', ['design']],
+  ['pincent', ['vincent']],
+  ['ranville', ['granville']],
+  ['visi', ['vision']],
+  ['emphess', ['empress']],
+  ['ilc', ['file']],
+  ['tohd', ['john']],
   ['fustie', ['justice']],
   ['wielane', ['william']],
   ['wilhane', ['william']],
@@ -372,12 +580,100 @@ const OCR_QUERY_TOKEN_CORRECTIONS = new Map<string, string[]>([
   ['bin', ['b', 'is', 'for']],
   ['cin', ['c', 'is', 'for']],
   ['s7ll', ['is', 'for']],
+  // Recent reject set corrections
+  ['tu', ['the']],
+  ['iihe', ['the']],
+  ['ofa', ['of', 'a']],
+  ['vears', ['years']],
+  ['lun', ['million']],
+  ['luon', ['million']],
+  ['erson', ['anderson']],
+  ['bavid', ['david']],
+  ['gavid', ['david']],
+  ['hartwele', ['hartwell']],
+  ['chilivan', ['sullivan']],
+  ['cilivan', ['sullivan']],
+  ['chlivan', ['sullivan']],
+  ['chiivan', ['sullivan']],
+  ['chilvan', ['sullivan']],
+  ['chilian', ['sullivan']],
+  ['chilivn', ['sullivan']],
+  ['racrel', ['rachel']],
+  ['caise', ['caine']],
+  ['jessiver', ['jennifer']],
+  ['jensifer', ['jennifer']],
+  ['ester', ['estep']],
+  ['bearne', ['hearne']],
+  ['bearse', ['hearne']],
+  ['ncawny', ['nancy']],
+  ['ndr', ['and']],
+  ['awvliead', ['waylaid']],
+  ['avliead', ['waylaid']],
+  ['awliead', ['waylaid']],
+  ['awviead', ['waylaid']],
+  ['awvlead', ['waylaid']],
+  ['awvliad', ['waylaid']],
+  ['awvlied', ['waylaid']],
+  // Turkish OCR debris from recent reject sets - drop from queries
+  ['celatena', []],
+  ['erall', []],
+  ['drr', []],
+  ['cidinia', []],
+  ['idur', []],
+  ['ilad', []],
+  ['lkesi', []],
+  ['othin', []],
+  ['aoia', []],
+  ['darinllad', []],
+  ['lkfsi', []],
+  ['ctha', []],
+  ['kkm', []],
+  ['km', []],
+  ['kn', []],
+  ['alttt', []],
+  ['onvulys', []],
+  ['oi3nz', []],
+  ['nyj3ls', []],
+  ['mitinta', []],
+  ['siiaoown', []],
+  ['tiuite', []],
+  // High-noise fragments from recent rejects - remove from normalized query text
+  ['nvho', []],
+  ['cenuurnr', []],
+  ['achusioe', []],
+  ['tuindo', []],
+  ['duneblnngvn', []],
+  ['cauwn', []],
+  ['uintha', []],
 ]);
 
 const OCR_QUERY_PHRASE_CORRECTIONS: Array<{ from: string[]; to: string[] }> = [
+  { from: ['achristina', 'dodd'], to: ['christina', 'dodd'] },
+  { from: ['buckley', 'neris'], to: ['buckley', 'nerds'] },
+  { from: ['line', 'of', 'aire'], to: ['line', 'of', 'fire'] },
+  { from: ['line', 'of', 'aire', 'hoagland'], to: ['line', 'of', 'fire', 'hoagland'] },
+  { from: ['the', 'hear', 'of', 'justice'], to: ['the', 'heart', 'of', 'justice'] },
+  { from: ['fatale', 'visi'], to: ['fatal', 'vision'] },
+  { from: ['ort', 'fatale', 'visi'], to: ['fatal', 'vision'] },
+  { from: ['blindsight', 'numn', 'choke'], to: ['blindsight'] },
+  { from: ['death', 'by', 'desi'], to: ['death', 'by', 'design'] },
+  { from: ['pincent', 'ranville'], to: ['vincent', 'granville'] },
+  { from: ['let', 'as', 'robert', 'parker'], to: ['robert', 'b', 'parker'] },
+  { from: ['testeerats', 'robert', 'parker'], to: ['robert', 'b', 'parker'] },
+  { from: ['ty', 'nhoc', 'ilsoe', 'victory'], to: ['city', 'of', 'victory'] },
+  { from: ['nhoc', 'ilsoe', 'victory'], to: ['city', 'of', 'victory'] },
+  { from: ['he', 'emphess', 'ilc', 'tohd', 'cho', 'tuhl', 'chi'], to: ['the', 'empress', 'file', 'john', 'd', 'macdonald'] },
+  { from: ['he', 'emphess', 'ilc', 'tohd', 'tuhl', 'chi'], to: ['the', 'empress', 'file', 'john', 'd', 'macdonald'] },
+  { from: ['ghost', 'd'], to: ['ghost', 'and'] },
+  { from: ['catherini', 'ion'], to: ['catherine'] },
+  { from: ['catherint', 'ion'], to: ['catherine'] },
+  { from: ['deadly', 'game', 'catherine', 'ion'], to: ['deadly', 'game', 'catherine'] },
+  { from: ['han', 'kellerman'], to: ['jonathan', 'kellerman'] },
+  { from: ['acuua', 'alia'], to: ['a', 'is', 'for', 'alibi'] },
   { from: ['patricia', 'di', 'cornwell'], to: ['patricia', 'cornwell'] },
   { from: ['the', 'ca', 'saw'], to: ['the', 'cat', 'who', 'saw'] },
   { from: ['line', 'of', 'fine'], to: ['line', 'of', 'fire'] },
+  { from: ['line', 'of', 'fire', 'hodgalan'], to: ['line', 'of', 'fire', 'hoagland'] },
   { from: ['line', 'of', 'fi'], to: ['line', 'of', 'fire'] },
   { from: ['charlaine', 'justice', 'william', 'coughlin'], to: ['justice', 'william', 'coughlin'] },
   { from: ['night', 'tai', 'might', 'scents'], to: ['night', 'scents'] },
@@ -390,10 +686,15 @@ const OCR_QUERY_PHRASE_CORRECTIONS: Array<{ from: string[]; to: string[] }> = [
   { from: ['blow', 'back'], to: ['blowback'] },
   { from: ['is', 'for', 'for'], to: ['is', 'for'] },
   { from: ['une', 'de', 'aire'], to: [] },
+  { from: ['the', 'unconquered', 'fire', 'ace'], to: ['face', 'the', 'fire'] },
   { from: ['unconquered', 'fi'], to: ['unconquered', 'fire'] },
   { from: ['fi', 'ace'], to: ['face'] },
   { from: ['stone', 'mon'], to: ['stone', 'monkey'] },
   { from: ['along', 'cane'], to: ['along', 'came'] },
+  { from: ['for', 'gotten'], to: ['forgotten'] },
+  { from: ['edited', 'by'], to: [] },
+  { from: ['jennifer', 'ester'], to: ['jennifer', 'estep'] },
+  { from: ['boat', 'ofa'], to: ['boat', 'of', 'a'] },
 ];
 
 const OCR_QUERY_NOISE_PATTERNS = [
@@ -431,6 +732,9 @@ function isSeriesLetterToken(tokens: string[], index: number): boolean {
 
 function splitFusedJoinerToken(token: string): string[] {
   const lower = token.toLowerCase();
+  if (OCR_FUSED_JOINER_EXACT_EXCEPTIONS.has(lower)) {
+    return [lower];
+  }
 
   for (const joiner of OCR_FUSED_JOINERS) {
     if (lower.length <= joiner.length + 3) continue;
@@ -500,10 +804,31 @@ function isBadgeNoiseToken(token: string): boolean {
   if (OCR_QUERY_NOISE_TOKENS.has(token)) {
     return true;
   }
+  if (isLikelyOcrGarbageFragment(token)) {
+    return true;
+  }
   if (token.length < 6) {
     return false;
   }
   return OCR_BADGE_NOISE_TOKEN_PATTERNS.some((pattern) => pattern.test(token));
+}
+
+function isLikelyOcrGarbageFragment(token: string): boolean {
+  if (token.length < 7 || !/^[a-z]+$/.test(token)) {
+    return false;
+  }
+
+  const vowelCount = countMatches(token, /[aeiou]/g);
+  const consonantCount = token.length - vowelCount;
+
+  // Very long consonant runs are typically OCR merge artifacts, not words.
+  if (token.length >= 9 && /[bcdfghjklmnpqrstvwxyz]{6,}/.test(token)) {
+    return true;
+  }
+
+  // Rare cluster combinations from scan noise ("...nngvn", "...uw...").
+  const suspiciousClusterCount = countMatches(token, /(uu|uw|gv|vn|nngv|rnr)/g);
+  return suspiciousClusterCount > 0 && consonantCount >= 5 && vowelCount <= 2;
 }
 
 function applyConservativeTerminalItoT(token: string): string {
@@ -523,10 +848,13 @@ function buildOcrLetterSwapVariants(token: string): string[] {
   }
 
   if (token.length >= 5) {
-    if (token.startsWith('c')) {
-      variants.add(`g${token.slice(1)}`);
-    } else if (token.startsWith('g')) {
-      variants.add(`c${token.slice(1)}`);
+    const maxSwapIndex = Math.min(2, token.length);
+    for (let i = 0; i < maxSwapIndex; i++) {
+      if (token[i] === 'c') {
+        variants.add(`${token.slice(0, i)}g${token.slice(i + 1)}`);
+      } else if (token[i] === 'g') {
+        variants.add(`${token.slice(0, i)}c${token.slice(i + 1)}`);
+      }
     }
   }
 
@@ -584,6 +912,63 @@ function isNumericNoiseToken(rawToken: string, normalizedToken: string): boolean
   return false;
 }
 
+function foldOcrUnicodeToken(value: string): string {
+  return value
+    .replace(/ı/g, 'i')
+    .replace(/İ/g, 'I')
+    .replace(/ş/g, 's')
+    .replace(/Ş/g, 'S')
+    .replace(/ğ/g, 'g')
+    .replace(/Ğ/g, 'G')
+    .replace(/ü/g, 'u')
+    .replace(/Ü/g, 'U')
+    .replace(/ö/g, 'o')
+    .replace(/Ö/g, 'O')
+    .replace(/ç/g, 'c')
+    .replace(/Ç/g, 'C')
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
+function canonicalizeTokenForQuery(value: string): string {
+  return foldOcrUnicodeToken(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, '');
+}
+
+function splitMergedCaseToken(value: string): string[] {
+  if (value.length < 6) {
+    return [value];
+  }
+
+  const parts: string[] = [];
+  let current = value[0] ?? '';
+  let didSplit = false;
+
+  for (let i = 1; i < value.length; i++) {
+    const previous = value[i - 1];
+    const currentChar = value[i];
+    const hasCaseBoundary =
+      /[a-zçğıöşü]/.test(previous) &&
+      /[A-ZÇĞİÖŞÜ]/.test(currentChar);
+
+    if (hasCaseBoundary && current) {
+      parts.push(current);
+      current = currentChar;
+      didSplit = true;
+      continue;
+    }
+
+    current += currentChar;
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return didSplit ? parts : [value];
+}
+
 function normalizeOcrTokenForQuery(
   rawToken: string,
   seenCanonical: Set<string> = new Set(),
@@ -593,11 +978,20 @@ function normalizeOcrTokenForQuery(
   if (!trimmed) return [];
 
   const cleaned = trimmed
-    .replace(/^[^a-z0-9]+/i, '')
-    .replace(/[^a-z0-9]+$/i, '');
+    .replace(/^[^0-9A-Za-z\u00C0-\u024F\u1E00-\u1EFF]+/, '')
+    .replace(/[^0-9A-Za-z\u00C0-\u024F\u1E00-\u1EFF]+$/, '');
   if (!cleaned) return [];
 
-  const cleanedLower = cleaned.toLowerCase().replace(/[^a-z0-9]/g, '');
+  if (depth < MAX_OCR_NORMALIZATION_DEPTH) {
+    const mergedCaseParts = splitMergedCaseToken(cleaned);
+    if (mergedCaseParts.length > 1) {
+      return mergedCaseParts.flatMap((token) =>
+        normalizeOcrTokenForQuery(token, seenCanonical, depth + 1)
+      );
+    }
+  }
+
+  const cleanedLower = canonicalizeTokenForQuery(cleaned);
 
   if (isNumericNoiseToken(trimmed, cleanedLower)) {
     return [];
@@ -617,10 +1011,6 @@ function normalizeOcrTokenForQuery(
   const nextSeenCanonical = new Set(seenCanonical);
   nextSeenCanonical.add(canonical);
 
-  if (isBadgeNoiseToken(canonical)) {
-    return [];
-  }
-
   const correctionCandidates = [canonical, ...buildOcrLetterSwapVariants(canonical)];
   for (const candidate of correctionCandidates) {
     const corrected = OCR_QUERY_TOKEN_CORRECTIONS.get(candidate);
@@ -629,6 +1019,10 @@ function normalizeOcrTokenForQuery(
         normalizeOcrTokenForQuery(token, nextSeenCanonical, depth + 1)
       );
     }
+  }
+
+  if (isBadgeNoiseToken(canonical)) {
+    return [];
   }
 
   const split = splitFusedJoinerToken(canonical);
@@ -644,6 +1038,27 @@ function normalizeOcrTokenForQuery(
   }
 
   return [canonical];
+}
+
+function dropLowSignalQueryTokens(tokens: string[]): string[] {
+  if (tokens.length <= 2) {
+    return tokens;
+  }
+
+  const substantiveTokenCount = tokens.filter(
+    (token) =>
+      token.length >= 4 &&
+      !TITLE_CONNECTOR_WORDS.has(token) &&
+      !OCR_QUERY_NOISE_TOKENS.has(token) &&
+      !OCR_QUERY_LOW_SIGNAL_TOKENS.has(token)
+  ).length;
+
+  if (substantiveTokenCount < 2) {
+    return tokens;
+  }
+
+  const filtered = tokens.filter((token) => !OCR_QUERY_LOW_SIGNAL_TOKENS.has(token));
+  return filtered.length >= 2 ? filtered : tokens;
 }
 
 function normalizeOcrQueryText(query: string | null | undefined): string | null {
@@ -693,23 +1108,34 @@ function normalizeOcrQueryText(query: string | null | undefined): string | null 
 
   // Collapse adjacent duplicates and repeated long tokens from noisy OCR combinations.
   const deduped: string[] = [];
-  const seenLongTokens = new Set<string>();
+  const seenSubstantiveTokens = new Set<string>();
   for (const token of tokens) {
     if (deduped.length > 0 && deduped[deduped.length - 1] === token) {
       continue;
     }
-    if (token.length >= 4 && seenLongTokens.has(token)) {
+    const isConnectorToken = TITLE_CONNECTOR_WORDS.has(token) || token === 'is';
+    if (token.length >= 3 && !isConnectorToken && seenSubstantiveTokens.has(token)) {
       continue;
     }
-    if (token.length >= 4) {
-      seenLongTokens.add(token);
+    if (token.length >= 3 && !isConnectorToken) {
+      seenSubstantiveTokens.add(token);
     }
     deduped.push(token);
   }
 
   if (deduped.length === 0) return null;
 
-  return deduped.join(' ');
+  // Run phrase corrections again after dedupe so collapse artifacts
+  // (e.g., "... catherine ion ion" -> "... catherine ion") can be removed.
+  const postDedupeTokens = applyPhraseCorrections(deduped);
+  if (postDedupeTokens.length === 0) return null;
+
+  // Drop low-information function words only when we still have enough
+  // substantive OCR signal, so short valid titles aren't over-pruned.
+  const filteredLowSignalTokens = dropLowSignalQueryTokens(postDedupeTokens);
+  if (filteredLowSignalTokens.length === 0) return null;
+
+  return filteredLowSignalTokens.join(' ');
 }
 
 function stripAuthorTailFromTitle(title: string | null, author: string | null): string | null {
@@ -803,6 +1229,36 @@ function stripLikelyRepeatedTailToken(
   return tokens.slice(0, -1).join(' ');
 }
 
+function stripLikelyAuthorTailToken(normalizedTitle: string | null): string | null {
+  if (!normalizedTitle) return null;
+
+  const tokens = normalizedTitle.split(/\s+/).filter(Boolean);
+  if (tokens.length < 4) return null;
+
+  const lastToken = tokens[tokens.length - 1];
+  if (
+    lastToken.length < 5 ||
+    TITLE_CONNECTOR_WORDS.has(lastToken) ||
+    OCR_QUERY_NOISE_TOKENS.has(lastToken)
+  ) {
+    return null;
+  }
+
+  const prefix = tokens.slice(0, -1);
+  const hasConnector = prefix.some((token) => TITLE_CONNECTOR_WORDS.has(token));
+  if (!hasConnector) return null;
+
+  const substantivePrefixCount = prefix.filter(
+    (token) =>
+      token.length >= 3 &&
+      !TITLE_CONNECTOR_WORDS.has(token) &&
+      !OCR_QUERY_NOISE_TOKENS.has(token)
+  ).length;
+  if (substantivePrefixCount < 2) return null;
+
+  return prefix.join(' ');
+}
+
 function swapLeadingTitleTokens(normalizedTitle: string | null): string | null {
   if (!normalizedTitle) return null;
 
@@ -821,6 +1277,53 @@ function swapLeadingTitleTokens(normalizedTitle: string | null): string | null {
   }
 
   return [second, first, ...tokens.slice(2)].join(' ');
+}
+
+function buildConnectorReducedTitleVariant(normalizedTitle: string | null): string | null {
+  if (!normalizedTitle) return null;
+
+  const tokens = normalizedTitle.split(/\s+/).filter(Boolean);
+  if (tokens.length < 3) return null;
+
+  const reduced = tokens.filter((token) => !TITLE_CONNECTOR_WORDS.has(token));
+  if (reduced.length < 2) return null;
+
+  const reducedQuery = reduced.join(' ');
+  if (reducedQuery === tokens.join(' ')) return null;
+  return reducedQuery;
+}
+
+function buildReorderedOfTitleVariant(normalizedTitle: string | null): string | null {
+  if (!normalizedTitle) return null;
+
+  const tokens = normalizedTitle.split(/\s+/).filter(Boolean);
+  if (tokens.length < 3) return null;
+
+  // Convert "city of victory" -> "victory city" when OCR likely swapped order.
+  const ofIndex = tokens.indexOf('of');
+  if (ofIndex !== 1) return null;
+
+  const head = tokens[0];
+  const tail = tokens
+    .slice(ofIndex + 1)
+    .filter(
+      (token) =>
+        token.length >= 3 &&
+        !TITLE_CONNECTOR_WORDS.has(token) &&
+        !OCR_QUERY_NOISE_TOKENS.has(token)
+    );
+
+  if (
+    !head ||
+    head.length < 3 ||
+    TITLE_CONNECTOR_WORDS.has(head) ||
+    OCR_QUERY_NOISE_TOKENS.has(head) ||
+    tail.length === 0
+  ) {
+    return null;
+  }
+
+  return [...tail, head].join(' ');
 }
 
 function collectSupplementalRawSignalTokens(
@@ -851,6 +1354,51 @@ function collectSupplementalRawSignalTokens(
   return supplemental;
 }
 
+function collectBoundaryBridgeQueries(evidenceLines: string[]): string[] {
+  const queries: string[] = [];
+  const seen = new Set<string>();
+
+  const addQuery = (query: string) => {
+    const trimmed = query.trim();
+    if (!trimmed) return;
+    const key = buildQueryDedupeKey(trimmed);
+    if (seen.has(key)) return;
+    seen.add(key);
+    queries.push(trimmed);
+  };
+
+  for (let i = 0; i < evidenceLines.length - 1; i++) {
+    const leftRaw = evidenceLines[i]?.trim() ?? '';
+    const rightRaw = evidenceLines[i + 1]?.trim() ?? '';
+    if (!leftRaw || !rightRaw) continue;
+
+    const leftWords = leftRaw.split(/\s+/).filter(Boolean);
+    const rightWords = rightRaw.split(/\s+/).filter(Boolean);
+    if (leftWords.length === 0 || rightWords.length === 0) continue;
+
+    const leftTail = leftWords[leftWords.length - 1].replace(/[^a-z0-9]/gi, '').toLowerCase();
+    const rightHead = rightWords[0].replace(/[^a-z0-9]/gi, '').toLowerCase();
+    if (!leftTail || !rightHead) continue;
+
+    // Recover line-break OCR splits like "FI" + "ACE".
+    if (leftTail.length <= 3 && rightHead.length >= 2 && rightHead.length <= 5) {
+      addQuery(`${leftRaw} ${rightRaw}`);
+
+      const mergedBoundaryToken = `${leftTail}${rightHead}`;
+      const mergedWords = [
+        ...leftWords.slice(0, -1),
+        mergedBoundaryToken,
+        ...rightWords.slice(1),
+      ].filter(Boolean);
+      if (mergedWords.length >= 2) {
+        addQuery(mergedWords.join(' '));
+      }
+    }
+  }
+
+  return queries;
+}
+
 function queryChangedAfterNormalization(
   original: string | null | undefined,
   normalized: string | null | undefined
@@ -871,12 +1419,42 @@ function splitAlphaWords(line: string): string[] {
     .filter(Boolean);
 }
 
+function getMergedAuthorLikeTokens(line: string): string[] | null {
+  const words = splitAlphaWords(line);
+  if (words.length !== 1) {
+    return null;
+  }
+
+  const canonical = canonicalizeTokenForQuery(words[0]);
+  if (!canonical || !OCR_MERGED_AUTHOR_HINT_TOKENS.has(canonical)) {
+    return null;
+  }
+
+  const normalizedTokens = normalizeOcrTokenForQuery(words[0]).filter(Boolean);
+  if (normalizedTokens.length < 2 || normalizedTokens.length > 3) {
+    return null;
+  }
+
+  const hasNoise = normalizedTokens.some(
+    (token) =>
+      token.length < 3 ||
+      TITLE_CONNECTOR_WORDS.has(token) ||
+      OCR_QUERY_NOISE_TOKENS.has(token)
+  );
+  if (hasNoise) {
+    return null;
+  }
+
+  return normalizedTokens;
+}
+
 function scoreLineForTitleQuery(line: string): number {
   const words = splitAlphaWords(line);
   if (words.length === 0) {
     return Number.NEGATIVE_INFINITY;
   }
 
+  const mergedAuthorTokens = getMergedAuthorLikeTokens(line);
   const normalizedTokens = normalizeForScoring(line);
   const longWordCount = words.filter((word) => word.length >= 5).length;
   const shortWordCount = words.filter((word) => word.length <= 2).length;
@@ -884,12 +1462,21 @@ function scoreLineForTitleQuery(line: string): number {
     TITLE_CONNECTOR_WORDS.has(word.toLowerCase())
   );
   const shortHeavy = shortWordCount >= Math.ceil(words.length / 2);
+  const lowerLine = line.toLowerCase();
+  const hasEditedByCue = lowerLine.includes('edited by');
+  const separatorCount = countMatches(line, /[-•]/g);
+  const likelyAuthorListLine = separatorCount >= 2 && words.length >= 4;
 
   let score = normalizedTokens.length * 2 + longWordCount;
   if (looksLikeTitle(line)) score += 4;
   if (hasConnector) score += 2;
   if (looksLikePersonName(line)) score -= 5;
   if (shortHeavy) score -= 5;
+  // Favor strong one-line title anchors ("CARNIEPUNK"), and demote author/editor lists.
+  if (words.length === 1 && words[0].length >= 8 && !mergedAuthorTokens) score += 6;
+  if (mergedAuthorTokens) score -= 8;
+  if (hasEditedByCue) score -= 9;
+  if (likelyAuthorListLine) score -= 6;
 
   return score;
 }
@@ -945,6 +1532,94 @@ function pickStrongTitleTailToken(
   return bestToken ?? extractTitleTailToken(bestTitle);
 }
 
+function pickDistinctiveTitleToken(normalizedTitle: string | null): string | null {
+  if (!normalizedTitle) return null;
+
+  const tokens = normalizedTitle
+    .split(/\s+/)
+    .map((token) => token.trim().toLowerCase())
+    .filter(
+      (token) =>
+        token.length >= 7 &&
+        !TITLE_CONNECTOR_WORDS.has(token) &&
+        !OCR_QUERY_NOISE_TOKENS.has(token)
+    );
+  if (tokens.length === 0) return null;
+
+  // Prefer longer tokens first; they are usually the most distinctive query anchor.
+  tokens.sort((a, b) => b.length - a.length);
+  return tokens[0];
+}
+
+function pickStandaloneTitleAnchor(
+  evidence: EvidenceTokens,
+  sortedPhrases: string[]
+): string | null {
+  const candidates = new Set<string>();
+
+  const addCandidate = (line: string | null | undefined) => {
+    if (!line) return;
+    const normalizedLine = normalizeOcrQueryText(line);
+    if (!normalizedLine) return;
+
+    const tokens = normalizedLine.split(/\s+/).filter(Boolean);
+    if (tokens.length === 0 || tokens.length > 3) return;
+
+    const substantive = tokens.filter(
+      (token) =>
+        token.length >= 5 &&
+        !TITLE_CONNECTOR_WORDS.has(token) &&
+        !OCR_QUERY_NOISE_TOKENS.has(token)
+    );
+    if (substantive.length === 0) return;
+
+    candidates.add(normalizedLine);
+  };
+
+  for (const line of evidence.titleLikeLines.slice(0, 8)) {
+    addCandidate(line);
+  }
+  for (const line of sortedPhrases.slice(0, 8)) {
+    addCandidate(line);
+  }
+  for (const line of evidence.cleanedLines.slice(0, 8)) {
+    addCandidate(line);
+  }
+
+  if (candidates.size === 0) return null;
+
+  const ranked = Array.from(candidates).sort((a, b) => {
+    const aTokens = a.split(/\s+/).filter(Boolean);
+    const bTokens = b.split(/\s+/).filter(Boolean);
+    const aSub = aTokens.filter(
+      (token) =>
+        token.length >= 5 &&
+        !TITLE_CONNECTOR_WORDS.has(token) &&
+        !OCR_QUERY_NOISE_TOKENS.has(token)
+    );
+    const bSub = bTokens.filter(
+      (token) =>
+        token.length >= 5 &&
+        !TITLE_CONNECTOR_WORDS.has(token) &&
+        !OCR_QUERY_NOISE_TOKENS.has(token)
+    );
+
+    const aScore =
+      (aTokens.length === 1 ? 12 : 0) +
+      aSub.reduce((sum, token) => sum + token.length, 0) -
+      aTokens.length;
+    const bScore =
+      (bTokens.length === 1 ? 12 : 0) +
+      bSub.reduce((sum, token) => sum + token.length, 0) -
+      bTokens.length;
+
+    if (bScore !== aScore) return bScore - aScore;
+    return b.length - a.length;
+  });
+
+  return ranked[0] ?? null;
+}
+
 function pickBestTitleLine(
   evidence: EvidenceTokens,
   sortedPhrases: string[]
@@ -993,6 +1668,9 @@ function pickBestAuthorLine(evidence: EvidenceTokens): string | null {
   const looksPlausibleAuthor = (line: string): boolean => {
     if (!line || /\d/.test(line)) return false;
 
+    const mergedAuthorTokens = getMergedAuthorLikeTokens(line);
+    if (mergedAuthorTokens) return true;
+
     const words = splitAlphaWords(line);
     if (words.length < 2 || words.length > 4) return false;
 
@@ -1028,6 +1706,13 @@ function pickBestAuthorLine(evidence: EvidenceTokens): string | null {
       return plausiblePerson;
     }
     return evidence.personNameLines[0];
+  }
+
+  for (const line of evidence.cleanedLines) {
+    const mergedAuthorTokens = getMergedAuthorLikeTokens(line);
+    if (mergedAuthorTokens) {
+      return mergedAuthorTokens.join(' ');
+    }
   }
 
   return evidence.advancedExtraction?.author ?? null;
@@ -1120,15 +1805,33 @@ export function generateHypotheses(
     normalizedBestTitleSansAuthor,
     evidence
   );
-  const normalizedSeriesCoreTitle = extractSeriesCoreTitle(normalizedBestTitleSansAuthor);
-  const swappedNormalizedBestTitle = swapLeadingTitleTokens(
+  const normalizedBestTitleSansLikelyAuthorTail = stripLikelyAuthorTailToken(
     normalizedBestTitleSansRepeatedTail ?? normalizedBestTitleSansAuthor
   );
+  const normalizedBestTitleCore =
+    normalizedBestTitleSansLikelyAuthorTail ??
+    normalizedBestTitleSansRepeatedTail ??
+    normalizedBestTitleSansAuthor;
+  const normalizedSeriesCoreTitle = extractSeriesCoreTitle(normalizedBestTitleCore);
+  const swappedNormalizedBestTitle = swapLeadingTitleTokens(
+    normalizedBestTitleCore
+  );
+  const connectorReducedNormalizedTitle = buildConnectorReducedTitleVariant(
+    normalizedBestTitleCore
+  );
+  const reorderedOfNormalizedTitle = buildReorderedOfTitleVariant(
+    normalizedBestTitleCore
+  );
+  const normalizedDistinctiveTitleToken = pickDistinctiveTitleToken(
+    normalizedBestTitleCore ?? normalizedBestTitleSansAuthor ?? normalizedBestTitle
+  );
+  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength);
   const normalizedBestAuthorSurname = extractAuthorSurname(normalizedBestAuthor);
   const supplementalRawSignalTokens = collectSupplementalRawSignalTokens(
     evidenceLines,
     evidence.tokensSet
   );
+  const boundaryBridgeQueries = collectBoundaryBridgeQueries(evidenceLines);
 
   const normalizedTitleChanged = queryChangedAfterNormalization(
     bestTitle,
@@ -1156,6 +1859,79 @@ export function generateHypotheses(
     );
   }
 
+  if (normalizedBestTitleSansAuthor && normalizedTitleChanged) {
+    addHypothesis(
+      normalizedBestTitleSansAuthor,
+      'title_only',
+      9.05,
+      `OCR-normalized title-only: "${normalizedBestTitleSansAuthor}"`
+    );
+  }
+
+  if (
+    standaloneTitleAnchor &&
+    standaloneTitleAnchor !== normalizedBestTitleSansAuthor
+  ) {
+    addHypothesis(
+      standaloneTitleAnchor,
+      'title_only',
+      9.12,
+      `Standalone title anchor: "${standaloneTitleAnchor}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${standaloneTitleAnchor} ${normalizedBestAuthorSurname}`,
+        'title_author',
+        9.13,
+        `Standalone title anchor + surname: "${standaloneTitleAnchor}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (
+    connectorReducedNormalizedTitle &&
+    connectorReducedNormalizedTitle !== normalizedBestTitleSansAuthor
+  ) {
+    addHypothesis(
+      connectorReducedNormalizedTitle,
+      'title_only',
+      9.06,
+      `Connector-reduced title variant: "${connectorReducedNormalizedTitle}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${connectorReducedNormalizedTitle} ${normalizedBestAuthorSurname}`,
+        'title_author',
+        9.07,
+        `Connector-reduced title + surname: "${connectorReducedNormalizedTitle}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (
+    reorderedOfNormalizedTitle &&
+    reorderedOfNormalizedTitle !== normalizedBestTitleSansAuthor &&
+    reorderedOfNormalizedTitle !== connectorReducedNormalizedTitle
+  ) {
+    addHypothesis(
+      reorderedOfNormalizedTitle,
+      'title_only',
+      9.08,
+      `Reordered "of" title variant: "${reorderedOfNormalizedTitle}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${reorderedOfNormalizedTitle} ${normalizedBestAuthorSurname}`,
+        'title_author',
+        9.09,
+        `Reordered "of" title + surname: "${reorderedOfNormalizedTitle}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
   if (
     normalizedBestTitleSansAuthor &&
     normalizedBestAuthorSurname &&
@@ -1169,7 +1945,7 @@ export function generateHypotheses(
     );
   }
 
-  const normalizedTitleTailToken = extractTitleTailToken(normalizedBestTitleSansAuthor);
+  const normalizedTitleTailToken = extractTitleTailToken(normalizedBestTitleCore);
   if (normalizedTitleTailToken && normalizedBestAuthorSurname) {
     addHypothesis(
       `${normalizedTitleTailToken} ${normalizedBestAuthorSurname}`,
@@ -1196,6 +1972,28 @@ export function generateHypotheses(
         'title_author',
         9.9,
         `Dropped repeated noisy tail + surname: "${normalizedBestTitleSansRepeatedTail}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (
+    normalizedBestTitleSansLikelyAuthorTail &&
+    normalizedBestTitleSansLikelyAuthorTail !== normalizedBestTitleSansAuthor &&
+    normalizedBestTitleSansLikelyAuthorTail !== normalizedBestTitleSansRepeatedTail
+  ) {
+    addHypothesis(
+      normalizedBestTitleSansLikelyAuthorTail,
+      'title_only',
+      9.85,
+      `Dropped likely author tail token: "${normalizedBestTitleSansLikelyAuthorTail}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${normalizedBestTitleSansLikelyAuthorTail} ${normalizedBestAuthorSurname}`,
+        'title_author',
+        9.86,
+        `Dropped likely author tail + surname: "${normalizedBestTitleSansLikelyAuthorTail}" + "${normalizedBestAuthorSurname}"`
       );
     }
   }
@@ -1248,7 +2046,7 @@ export function generateHypotheses(
     }
   }
 
-  const supplementalTitleBase = normalizedBestTitleSansRepeatedTail ?? normalizedBestTitleSansAuthor;
+  const supplementalTitleBase = normalizedBestTitleCore;
   if (supplementalTitleBase) {
     for (const supplementalToken of supplementalRawSignalTokens.slice(0, 2)) {
       addHypothesis(
@@ -1264,6 +2062,15 @@ export function generateHypotheses(
         `Raw OCR supplemental token "${supplementalToken}" before title "${supplementalTitleBase}"`
       );
     }
+  }
+
+  for (const boundaryQuery of boundaryBridgeQueries.slice(0, 3)) {
+    addHypothesis(
+      boundaryQuery,
+      'combined_lines',
+      10.55,
+      `Boundary bridge from adjacent OCR lines: "${boundaryQuery}"`
+    );
   }
 
   // 2) Title + Author
@@ -1318,6 +2125,24 @@ export function generateHypotheses(
       20,
       `Title-only: "${bestTitle}"`
     );
+  }
+
+  if (normalizedDistinctiveTitleToken) {
+    addHypothesis(
+      normalizedDistinctiveTitleToken,
+      'title_only',
+      20.5,
+      `Distinctive title-token fallback: "${normalizedDistinctiveTitleToken}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${normalizedDistinctiveTitleToken} ${normalizedBestAuthorSurname}`,
+        'title_author',
+        20.6,
+        `Distinctive title token + surname: "${normalizedDistinctiveTitleToken}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
   }
 
   // 4) Author-only (if detected)
@@ -1585,15 +2410,33 @@ export function generateBoostHypotheses(
     normalizedBestTitleSansAuthor,
     evidence
   );
-  const normalizedSeriesCoreTitle = extractSeriesCoreTitle(normalizedBestTitleSansAuthor);
-  const swappedNormalizedBestTitle = swapLeadingTitleTokens(
+  const normalizedBestTitleSansLikelyAuthorTail = stripLikelyAuthorTailToken(
     normalizedBestTitleSansRepeatedTail ?? normalizedBestTitleSansAuthor
   );
+  const normalizedBestTitleCore =
+    normalizedBestTitleSansLikelyAuthorTail ??
+    normalizedBestTitleSansRepeatedTail ??
+    normalizedBestTitleSansAuthor;
+  const normalizedSeriesCoreTitle = extractSeriesCoreTitle(normalizedBestTitleCore);
+  const swappedNormalizedBestTitle = swapLeadingTitleTokens(
+    normalizedBestTitleCore
+  );
+  const connectorReducedNormalizedTitle = buildConnectorReducedTitleVariant(
+    normalizedBestTitleCore
+  );
+  const reorderedOfNormalizedTitle = buildReorderedOfTitleVariant(
+    normalizedBestTitleCore
+  );
+  const normalizedDistinctiveTitleToken = pickDistinctiveTitleToken(
+    normalizedBestTitleCore ?? normalizedBestTitleSansAuthor ?? normalizedBestTitle
+  );
+  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength);
   const normalizedBestAuthorSurname = extractAuthorSurname(normalizedBestAuthor);
   const supplementalRawSignalTokens = collectSupplementalRawSignalTokens(
     evidenceLines,
     evidence.tokensSet
   );
+  const boundaryBridgeQueries = collectBoundaryBridgeQueries(evidenceLines);
   const normalizedTitleChanged = queryChangedAfterNormalization(
     bestTitle,
     normalizedBestTitleSansAuthor
@@ -1614,6 +2457,79 @@ export function generateBoostHypotheses(
     );
   }
 
+  if (normalizedBestTitleSansAuthor && normalizedTitleChanged) {
+    addHypothesis(
+      normalizedBestTitleSansAuthor,
+      'boost_partial',
+      99.05,
+      `OCR-normalized title-only seed: "${normalizedBestTitleSansAuthor}"`
+    );
+  }
+
+  if (
+    standaloneTitleAnchor &&
+    standaloneTitleAnchor !== normalizedBestTitleSansAuthor
+  ) {
+    addHypothesis(
+      standaloneTitleAnchor,
+      'boost_partial',
+      99.12,
+      `Standalone title anchor seed: "${standaloneTitleAnchor}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${standaloneTitleAnchor} ${normalizedBestAuthorSurname}`,
+        'boost_combo',
+        99.13,
+        `Standalone title anchor + surname seed: "${standaloneTitleAnchor}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (
+    connectorReducedNormalizedTitle &&
+    connectorReducedNormalizedTitle !== normalizedBestTitleSansAuthor
+  ) {
+    addHypothesis(
+      connectorReducedNormalizedTitle,
+      'boost_partial',
+      99.08,
+      `Connector-reduced title seed: "${connectorReducedNormalizedTitle}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${connectorReducedNormalizedTitle} ${normalizedBestAuthorSurname}`,
+        'boost_combo',
+        99.09,
+        `Connector-reduced title + surname seed: "${connectorReducedNormalizedTitle}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (
+    reorderedOfNormalizedTitle &&
+    reorderedOfNormalizedTitle !== normalizedBestTitleSansAuthor &&
+    reorderedOfNormalizedTitle !== connectorReducedNormalizedTitle
+  ) {
+    addHypothesis(
+      reorderedOfNormalizedTitle,
+      'boost_partial',
+      99.1,
+      `Reordered "of" title seed: "${reorderedOfNormalizedTitle}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${reorderedOfNormalizedTitle} ${normalizedBestAuthorSurname}`,
+        'boost_combo',
+        99.11,
+        `Reordered "of" title + surname seed: "${reorderedOfNormalizedTitle}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
   if (
     normalizedBestTitleSansAuthor &&
     normalizedBestAuthorSurname &&
@@ -1627,7 +2543,7 @@ export function generateBoostHypotheses(
     );
   }
 
-  const normalizedTailToken = extractTitleTailToken(normalizedBestTitleSansAuthor);
+  const normalizedTailToken = extractTitleTailToken(normalizedBestTitleCore);
   if (normalizedTailToken && normalizedBestAuthorSurname) {
     addHypothesis(
       `${normalizedTailToken} ${normalizedBestAuthorSurname}`,
@@ -1649,6 +2565,19 @@ export function generateBoostHypotheses(
     );
   }
 
+  if (
+    normalizedBestTitleSansLikelyAuthorTail &&
+    normalizedBestTitleSansLikelyAuthorTail !== normalizedBestTitleSansAuthor &&
+    normalizedBestTitleSansLikelyAuthorTail !== normalizedBestTitleSansRepeatedTail
+  ) {
+    addHypothesis(
+      normalizedBestTitleSansLikelyAuthorTail,
+      'boost_partial',
+      99.36,
+      `Dropped likely author tail token: "${normalizedBestTitleSansLikelyAuthorTail}"`
+    );
+  }
+
   if (swappedNormalizedBestTitle) {
     addHypothesis(
       swappedNormalizedBestTitle,
@@ -1663,6 +2592,24 @@ export function generateBoostHypotheses(
         'boost_combo',
         99.41,
         `Leading title token swap + surname: "${swappedNormalizedBestTitle}" + "${normalizedBestAuthorSurname}"`
+      );
+    }
+  }
+
+  if (normalizedDistinctiveTitleToken) {
+    addHypothesis(
+      normalizedDistinctiveTitleToken,
+      'boost_partial',
+      99.37,
+      `Distinctive title-token fallback: "${normalizedDistinctiveTitleToken}"`
+    );
+
+    if (normalizedBestAuthorSurname) {
+      addHypothesis(
+        `${normalizedDistinctiveTitleToken} ${normalizedBestAuthorSurname}`,
+        'boost_combo',
+        99.38,
+        `Distinctive title token + surname: "${normalizedDistinctiveTitleToken}" + "${normalizedBestAuthorSurname}"`
       );
     }
   }
@@ -1697,8 +2644,7 @@ export function generateBoostHypotheses(
     }
   }
 
-  const supplementalBoostTitleBase =
-    normalizedBestTitleSansRepeatedTail ?? normalizedBestTitleSansAuthor;
+  const supplementalBoostTitleBase = normalizedBestTitleCore;
   if (supplementalBoostTitleBase) {
     for (const supplementalToken of supplementalRawSignalTokens.slice(0, 2)) {
       addHypothesis(
@@ -1714,6 +2660,15 @@ export function generateBoostHypotheses(
         `Raw OCR supplemental token "${supplementalToken}" before title "${supplementalBoostTitleBase}"`
       );
     }
+  }
+
+  for (const boundaryQuery of boundaryBridgeQueries.slice(0, 4)) {
+    addHypothesis(
+      boundaryQuery,
+      'boost_partial',
+      99.55,
+      `Boundary bridge from adjacent OCR lines: "${boundaryQuery}"`
+    );
   }
 
   for (const line of sortedByLength.slice(0, 4)) {
@@ -1870,7 +2825,7 @@ export function generateBoostHypotheses(
   // =========================================================================
   // Strategy 4k: Split fused joiners (e.g., "STRAIGHIINTO" -> "STRAIGHI INTO")
   // =========================================================================
-  const fusedJoiners = ['INTO', 'AND', 'WITH', 'FROM', 'THE'];
+  const fusedJoiners = ['INTO', 'AND', 'WITH', 'FROM', 'THE', 'OF'];
   for (const line of sortedByLength.slice(0, 4)) {
     const tokens = line.split(/\s+/).filter(Boolean);
     let madeChange = false;

@@ -11,6 +11,7 @@
 import type { ResolvedBook } from '../types';
 import type { MetadataLookupProvider } from './metadataLookupProvider';
 import { useDebugStore } from '../store/useDebugStore';
+import { GOOGLE_BOOKS_HEADERS, withGoogleBooksKey } from '../config/googleBooks';
 
 // API endpoint
 const GOOGLE_BOOKS_SEARCH = 'https://www.googleapis.com/books/v1/volumes';
@@ -37,7 +38,10 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(withGoogleBooksKey(url), {
+      signal: controller.signal,
+      headers: GOOGLE_BOOKS_HEADERS,
+    });
     return response;
   } finally {
     clearTimeout(timeoutId);

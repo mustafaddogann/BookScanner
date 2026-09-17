@@ -86,8 +86,8 @@ export function HomeScreen({ onOpenSettings }: HomeScreenProps): React.JSX.Eleme
     return () => loop.stop();
   }, [glowAnim]);
 
-  // Primary button press
-  const scanPress = usePressScale(0.96);
+  // Keep this JS-driven to avoid mixing with glowAnim (shadowOpacity is JS-only).
+  const scanPress = usePressScale(0.96, false);
 
   const recentSessions = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => {

@@ -167,6 +167,34 @@ describe('candidateScoring', () => {
       const genericPenalty = score.penalties.find((p) => p.type === 'generic_title');
       expect(genericPenalty).toBeUndefined(); // No penalty when author signal exists
     });
+
+    it('matches OCR-corrupted CITY/VICTORY tokens without lowering gates', () => {
+      // Regression test for scan_1772056794675_pwyvrs_book_84
+      const evidence = buildEvidenceFromLines([
+        'TY NHOC',
+        'ILSOE VICTORY',
+        'MASON COLLI',
+        '1103 NOFER',
+        'NA NOVEL',
+        'JOHNA.',
+      ]);
+
+      const candidate: ResolvedBook = {
+        title: 'Victory City',
+        authors: ['Salman Rushdie'],
+        source: 'openLibrary',
+        sourceId: 'OLVC1M',
+      };
+
+      const score = scoreCandidate(candidate, evidence);
+
+      // "ILSOE/nhoc" family should resolve into title anchors.
+      expect(score.matchedTitleTokens).toContain('victory');
+      expect(score.matchedTitleTokens).toContain('city');
+
+      // Keep this in viable-range without changing decision thresholds.
+      expect(score.score).toBeGreaterThanOrEqual(0.3);
+    });
   });
 
   describe('scoreAndRankCandidates', () => {

@@ -29,15 +29,15 @@
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = BookScanner/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = BookScanner/Info.plist; sourceTree = "<group>"; };
 		13B07FB81A68108700A75B9A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = PrivacyInfo.xcprivacy; path = BookScanner/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
-		1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Regular.ttf"; path = "../assets/fonts/PlayfairDisplay-Regular.ttf"; sourceTree = "<group>"; };
+		1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = 521824397737; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Regular.ttf"; path = "../assets/fonts/PlayfairDisplay-Regular.ttf"; sourceTree = "<group>"; };
 		2D1573D2E85263DE734D38DB /* libPods-BookScanner.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-BookScanner.a"; sourceTree = BUILT_PRODUCTS_DIR; };
-		3B6F31440D1842449395B2B4 /* PlayfairDisplay-SemiBold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-SemiBold.ttf"; path = "../assets/fonts/PlayfairDisplay-SemiBold.ttf"; sourceTree = "<group>"; };
+		3B6F31440D1842449395B2B4 /* PlayfairDisplay-SemiBold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = 521824397737; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-SemiBold.ttf"; path = "../assets/fonts/PlayfairDisplay-SemiBold.ttf"; sourceTree = "<group>"; };
 		58C2049831933FBD8F86CF5E /* Pods-BookScanner.debug.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-BookScanner.debug.xcconfig"; path = "Target Support Files/Pods-BookScanner/Pods-BookScanner.debug.xcconfig"; sourceTree = "<group>"; };
 		5DB9851E2F18EA11000B11F1 /* ModelPathResolver.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ModelPathResolver.m; sourceTree = "<group>"; };
 		5DB9851F2F18EA11000B11F1 /* yolov8_obb.tflite */ = {isa = PBXFileReference; lastKnownFileType = file; path = yolov8_obb.tflite; sourceTree = "<group>"; };
 		5DB985222F1ABE6E000B11F1 /* ImagePreprocessor.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = ImagePreprocessor.m; sourceTree = "<group>"; };
 		5DB985242F1ABE70000B11F2 /* TextRecognizer.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = TextRecognizer.m; sourceTree = "<group>"; };
-		6590D86F12304352B03ADF41 /* PlayfairDisplay-Bold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = undefined; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Bold.ttf"; path = "../assets/fonts/PlayfairDisplay-Bold.ttf"; sourceTree = "<group>"; };
+		6590D86F12304352B03ADF41 /* PlayfairDisplay-Bold.ttf */ = {isa = PBXFileReference; explicitFileType = undefined; fileEncoding = 521824397737; includeInIndex = 0; lastKnownFileType = unknown; name = "PlayfairDisplay-Bold.ttf"; path = "../assets/fonts/PlayfairDisplay-Bold.ttf"; sourceTree = "<group>"; };
 		761780EC2CA45674006654EE /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = AppDelegate.swift; path = BookScanner/AppDelegate.swift; sourceTree = "<group>"; };
 		761780EE2CA45675006654F0 /* SceneDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = SceneDelegate.swift; path = BookScanner/SceneDelegate.swift; sourceTree = "<group>"; };
 		81AB9BB72411601600AC10FF /* LaunchScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = LaunchScreen.storyboard; path = BookScanner/LaunchScreen.storyboard; sourceTree = "<group>"; };
@@ -143,7 +143,6 @@
 				1F6B4B64EBD14362A7FEE3D7 /* PlayfairDisplay-Regular.ttf */,
 			);
 			name = Resources;
-			path = "";
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -318,7 +317,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7W4X8R6Q4S;
+				DEVELOPMENT_TEAM = GGTKNQ2576;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = BookScanner/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
@@ -347,7 +346,7 @@
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = 7W4X8R6Q4S;
+				DEVELOPMENT_TEAM = GGTKNQ2576;
 				INFOPLIST_FILE = BookScanner/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (

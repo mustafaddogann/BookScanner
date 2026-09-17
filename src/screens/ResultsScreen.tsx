@@ -28,7 +28,7 @@ import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, OBBDetection, OBBCorners, ScreenMapping, SerializedFrameGeo, OCRResult, BookCandidate, ResolvedBook, AcceptanceDecision, VerificationFlag } from '../types';
 import { obbToCorners, mapCornersToScreen, calculateScreenMapping } from '../utils/letterbox';
-import { useAppStore, type SessionMeta, type DetectionRectifyInfo } from '../store/useAppStore';
+import { useAppStore, storage, type SessionMeta, type DetectionRectifyInfo } from '../store/useAppStore';
 import { readDebugManifest, getSessionDir } from '../services/debugArtifacts';
 import { recognizeCropText, isTextRecognitionAvailable } from '../services/textRecognitionService';
 import { ensureFileUri, getFilename } from '../utils/fileUri';
@@ -172,6 +172,21 @@ export function ResultsScreen(): React.JSX.Element {
 
   // Track if fallback was already attempted for this sessionId to prevent infinite loops
   const fallbackAttemptedRef = useRef<string | null>(null);
+
+  // Hydrate from MMKV when navigating to a background-completed session
+  useEffect(() => {
+    if (currentSession?.sessionId === sessionId) return;
+    const savedMeta = storage.getString(`session_meta_${sessionId}`);
+    const savedDetections = storage.getString(`session_detections_${sessionId}`);
+    if (savedMeta && savedDetections) {
+      const store = useAppStore.getState();
+      store.setSessionMeta(null);
+      store.setSessionMeta(JSON.parse(savedMeta));
+      store.setDetections(JSON.parse(savedDetections));
+      const session = store.sessions.find((s) => s.sessionId === sessionId);
+      if (session) store.setCurrentSession(session);
+    }
+  }, [sessionId, currentSession?.sessionId]);
 
   // Check OCR availability on mount
   useEffect(() => {

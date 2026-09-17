@@ -48,6 +48,14 @@ target 'BookScanner' do
 
         # Fix pods with old deployment targets (react-native-image-picker etc.)
         bc.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+
+        # Xcode 27 fix: newer Apple Clang has a consteval regression that breaks
+        # fmt's basic_format_string compile-time checks ("call to consteval
+        # function is not a constant expression"). Force fmt to skip consteval.
+        defs = bc.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] || ['$(inherited)']
+        defs = [defs] if defs.is_a?(String)
+        defs << 'FMT_USE_CONSTEVAL=0' unless defs.include?('FMT_USE_CONSTEVAL=0')
+        bc.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] = defs
       end
 
       # Fix RCTSwiftUI/RCTSwiftUIWrapper Swift toolchain stalls
@@ -87,6 +95,24 @@ target 'BookScanner' do
 
           phase.shell_script = arch_guard + original_script
         end
+      end
+    end
+
+    # Xcode 27 fix: Apple Clang 21 (Xcode 27) has a consteval regression that
+    # breaks fmt's basic_format_string compile-time checks. fmt's own header
+    # unconditionally re-defines FMT_USE_CONSTEVAL based on __apple_build_version__,
+    # so a command-line -D override gets silently clobbered. Patch the version
+    # guard directly so it treats all current Apple Clang builds as broken,
+    # same as it already does for old ones.
+    fmt_header = File.join(installer.sandbox.pod_dir('fmt'), 'include', 'fmt', 'base.h')
+    if File.exist?(fmt_header)
+      contents = File.read(fmt_header)
+      needle = '__apple_build_version__ < 14000029L'
+      if contents.include?(needle)
+        patched = contents.sub(needle, 'defined(__apple_build_version__)')
+        File.chmod(0644, fmt_header)
+        File.write(fmt_header, patched)
+        Pod::UI.puts "[Podfile patch] Disabled fmt FMT_USE_CONSTEVAL for all Apple Clang builds (Xcode 27 regression workaround)".yellow
       end
     end
 

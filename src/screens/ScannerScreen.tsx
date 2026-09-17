@@ -21,10 +21,9 @@ import {
   Text,
   TouchableOpacity,
   Alert,
-  Image,
   Platform,
   Animated,
-  Dimensions,
+  ActivityIndicator,
 } from 'react-native';
 import {
   Camera,
@@ -36,33 +35,23 @@ import {
 import { useNavigation, useRoute, RouteProp } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList } from '../types';
-import { runPipelineOnCapture } from '../services/pipelineService';
-import { setLastScannedImageUri } from '../services/autoExportService';
+import { runPipelineBackground } from '../services/pipelineService';
 import { useAppStore } from '../store/useAppStore';
+import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 import { normalizeFileUri } from '../utils/frameGeo';
 import { colors, fonts, spacing, radii, shadows } from '../theme';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const ORIENTATION_DEBOUNCE_MS = 300;
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList, 'Scanner'>;
 type ScannerRouteProp = RouteProp<RootStackParamList, 'Scanner'>;
 type UIOrientation = Orientation;
 
-const STAGES = [
-  { key: 'detect', label: 'Detecting spines', icon: '\u{1F50D}' },
-  { key: 'rectify', label: 'Cropping & aligning', icon: '\u{1F4D0}' },
-  { key: 'ocr', label: 'Reading text', icon: '\u{1F4D6}' },
-  { key: 'group', label: 'Identifying books', icon: '\u{1F4DA}' },
-  { key: 'resolve', label: 'Matching metadata', icon: '\u2728' },
-];
-
 export function ScannerScreen(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
   const route = useRoute<ScannerRouteProp>();
   const camera = useRef<Camera>(null);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [capturedImageUri, setCapturedImageUri] = useState<string | null>(null);
   const [scanMode, setScanMode] = useState<'shelf' | 'single'>('shelf');
   const [railExpanded, setRailExpanded] = useState(false);
   const [qualityMode, setQualityMode] = useState<'speed' | 'accuracy'>('accuracy');
@@ -71,14 +60,21 @@ export function ScannerScreen(): React.JSX.Element {
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
 
-  const { isProcessing, processingStage, error, setError } = useAppStore();
+  const { error, setError } = useAppStore();
+  const backgroundActiveCount = useBackgroundScanStore(
+    (s) => Object.keys(s.scans).length
+  );
+  const captureDisabled = backgroundActiveCount >= 3;
 
   // === Animations ===
+
+  // Shutter flash overlay
+  const flashOpacity = useRef(new Animated.Value(0)).current;
 
   // Capture button breathing glow
   const glowAnim = useRef(new Animated.Value(0.1)).current;
   useEffect(() => {
-    if (isCapturing || isProcessing) return;
+    if (isCapturing) return;
     const loop = Animated.loop(
       Animated.sequence([
         Animated.timing(glowAnim, { toValue: 0.35, duration: 2000, useNativeDriver: false }),
@@ -87,30 +83,16 @@ export function ScannerScreen(): React.JSX.Element {
     );
     loop.start();
     return () => loop.stop();
-  }, [glowAnim, isCapturing, isProcessing]);
+  }, [glowAnim, isCapturing]);
 
-  // Capture press spring
+  // Capture press spring (JS driver to match glowAnim on same view tree)
   const captureScale = useRef(new Animated.Value(1)).current;
   const handleCaptureIn = useCallback(() => {
-    Animated.spring(captureScale, { toValue: 0.92, useNativeDriver: true, tension: 120, friction: 8 }).start();
+    Animated.spring(captureScale, { toValue: 0.92, useNativeDriver: false, tension: 120, friction: 8 }).start();
   }, [captureScale]);
   const handleCaptureOut = useCallback(() => {
-    Animated.spring(captureScale, { toValue: 1, useNativeDriver: true, tension: 80, friction: 6 }).start();
+    Animated.spring(captureScale, { toValue: 1, useNativeDriver: false, tension: 80, friction: 6 }).start();
   }, [captureScale]);
-
-  // Processing overlay fade
-  const overlayOpacity = useRef(new Animated.Value(0)).current;
-  useEffect(() => {
-    if (isCapturing || isProcessing) {
-      Animated.timing(overlayOpacity, { toValue: 1, duration: 300, useNativeDriver: true }).start();
-    } else {
-      Animated.timing(overlayOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
-    }
-  }, [isCapturing, isProcessing, overlayOpacity]);
-
-  // Stage progress bars
-  const progressAnims = useRef(STAGES.map(() => new Animated.Value(0))).current;
-  const stageOpacity = useRef(STAGES.map(() => new Animated.Value(0.4))).current;
 
   // Orientation
   const [uiOrientation, setUIOrientation] = useState<UIOrientation>('portrait');
@@ -143,79 +125,35 @@ export function ScannerScreen(): React.JSX.Element {
     };
   }, []);
 
-  // === Stage mapping ===
-  const [uiStageIndex, setUiStageIndex] = useState(0);
-
-  const mapProcessingStage = useCallback((stage: string | null): number => {
-    if (!stage) return 0;
-    const normalized = stage.toLowerCase();
-    if (normalized.includes('rectification')) return 1;
-    if (normalized.includes('ocr')) return 2;
-    if (normalized.includes('grouping')) return 3;
-    if (normalized.includes('metadata')) return 4;
-    return 0;
-  }, []);
-
-  useEffect(() => {
-    if (!isCapturing && !isProcessing) {
-      setUiStageIndex(0);
-      progressAnims.forEach((a) => a.setValue(0));
-      stageOpacity.forEach((a) => a.setValue(0.4));
-      return;
-    }
-    const mapped = mapProcessingStage(processingStage);
-    setUiStageIndex((prev) => Math.max(prev, mapped));
-  }, [isCapturing, isProcessing, processingStage, mapProcessingStage, progressAnims, stageOpacity]);
-
-  useEffect(() => {
-    progressAnims.forEach((anim, idx) => {
-      if (idx < uiStageIndex) {
-        // Completed stages
-        Animated.timing(anim, { toValue: 1, duration: 300, useNativeDriver: false }).start();
-        Animated.timing(stageOpacity[idx], { toValue: 0.5, duration: 300, useNativeDriver: false }).start();
-      } else if (idx === uiStageIndex && (isCapturing || isProcessing)) {
-        // Current stage - animate to partial fill
-        Animated.timing(anim, { toValue: 0.65, duration: 1000, useNativeDriver: false }).start();
-        Animated.timing(stageOpacity[idx], { toValue: 1, duration: 200, useNativeDriver: false }).start();
-      }
-    });
-  }, [uiStageIndex, isCapturing, isProcessing, progressAnims, stageOpacity]);
-
-  // Fallback stage advancement when no explicit stage signal
-  useEffect(() => {
-    if (!isCapturing && !isProcessing) return undefined;
-    if (processingStage) return undefined;
-    const intervalId = setInterval(() => {
-      setUiStageIndex((prev) => Math.min(prev + 1, STAGES.length - 1));
-    }, 900);
-    return () => clearInterval(intervalId);
-  }, [isCapturing, isProcessing, processingStage]);
-
   // === Handlers ===
 
   const handleCapture = useCallback(async () => {
-    if (!camera.current || isCapturing || isProcessing) return;
-    setIsCapturing(true);
-    setError(null);
+    if (!camera.current || isCapturing || captureDisabled) return;
+
     try {
+      setIsCapturing(true);
       const photo: PhotoFile = await camera.current.takePhoto({
         flash: 'off',
         enableShutterSound: true,
       });
       const imageUri = `file://${photo.path}`;
-      setCapturedImageUri(imageUri);
-      const result = await runPipelineOnCapture(imageUri);
-      setLastScannedImageUri(imageUri);
-      navigation.navigate('Results', { sessionId: result.session.sessionId });
+
+      // Shutter flash feedback
+      flashOpacity.setValue(1);
+      Animated.timing(flashOpacity, { toValue: 0, duration: 200, useNativeDriver: true }).start();
+
+      // Fire-and-forget background scan
+      runPipelineBackground(imageUri).catch((err) => {
+        const message = err instanceof Error ? err.message : String(err);
+        Alert.alert('Background Scan', message);
+      });
     } catch (err: unknown) {
-      setCapturedImageUri(null);
       const message = err instanceof Error ? err.message : String(err);
       Alert.alert('Capture Error', message);
     } finally {
       setIsCapturing(false);
-      setCapturedImageUri(null);
     }
-  }, [isCapturing, isProcessing, navigation, setError, uiOrientation]);
+  }, [isCapturing, captureDisabled, flashOpacity]);
 
   const importRunRef = useRef<string | null>(null);
 
@@ -225,28 +163,14 @@ export function ScannerScreen(): React.JSX.Element {
     importRunRef.current = importUri;
     navigation.setParams({ importUri: undefined });
 
-    const runImport = async () => {
-      setIsCapturing(true);
-      setError(null);
-      try {
-        const normalizedUri = importUri.startsWith('content://')
-          ? importUri
-          : normalizeFileUri(importUri);
-        setCapturedImageUri(normalizedUri);
-        const result = await runPipelineOnCapture(normalizedUri);
-        setLastScannedImageUri(normalizedUri);
-        navigation.navigate('Results', { sessionId: result.session.sessionId });
-      } catch (err: unknown) {
-        setCapturedImageUri(null);
-        const message = err instanceof Error ? err.message : String(err);
-        setError(message || 'Import failed');
-      } finally {
-        setIsCapturing(false);
-        setCapturedImageUri(null);
-      }
-    };
+    const normalizedUri = importUri.startsWith('content://')
+      ? importUri
+      : normalizeFileUri(importUri);
 
-    runImport();
+    runPipelineBackground(normalizedUri).catch((err) => {
+      const message = err instanceof Error ? err.message : String(err);
+      setError(message || 'Import failed');
+    });
   }, [importUri, navigation, setError]);
 
   const handleDebug = useCallback(() => {
@@ -297,27 +221,25 @@ export function ScannerScreen(): React.JSX.Element {
 
   return (
     <View style={styles.container}>
-      {/* Camera / captured image */}
-      {capturedImageUri ? (
-        <Image
-          source={{ uri: capturedImageUri }}
-          style={[StyleSheet.absoluteFill, { resizeMode: 'contain' }]}
-          onError={() => setCapturedImageUri(null)}
+      {/* Camera */}
+      {!importUri && device && (
+        <Camera
+          ref={camera}
+          style={StyleSheet.absoluteFill}
+          device={device}
+          isActive={true}
+          photo={true}
+          enableZoomGesture={!isCapturing}
+          outputOrientation="preview"
+          onOutputOrientationChanged={handleOrientationChange}
         />
-      ) : (
-        !importUri && device && (
-          <Camera
-            ref={camera}
-            style={StyleSheet.absoluteFill}
-            device={device}
-            isActive={true}
-            photo={true}
-            enableZoomGesture={!isCapturing}
-            outputOrientation="preview"
-            onOutputOrientationChanged={handleOrientationChange}
-          />
-        )
       )}
+
+      {/* Shutter flash overlay */}
+      <Animated.View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, { backgroundColor: '#FFFFFF', opacity: flashOpacity }]}
+      />
 
       {/* Grid overlay */}
       {gridEnabled && (
@@ -329,59 +251,15 @@ export function ScannerScreen(): React.JSX.Element {
         </View>
       )}
 
-      {/* Processing overlay — cinematic stages */}
-      <Animated.View
-        style={[styles.processingOverlay, { opacity: overlayOpacity }]}
-        pointerEvents={isCapturing || isProcessing ? 'auto' : 'none'}
-      >
-        <View style={styles.processingContent}>
-          <Text style={styles.processingTitle}>Analyzing your shelf</Text>
-          <Text style={styles.processingSubtitle}>This takes a few seconds</Text>
-
-          <View style={styles.stagesList}>
-            {STAGES.map((stage, index) => {
-              const isComplete = index < uiStageIndex;
-              const isCurrent = index === uiStageIndex && (isCapturing || isProcessing);
-              return (
-                <Animated.View
-                  key={stage.key}
-                  style={[styles.stageRow, { opacity: stageOpacity[index] }]}
-                >
-                  <View style={styles.stageLeft}>
-                    <Text style={[
-                      styles.stageIcon,
-                      isComplete && styles.stageIconComplete,
-                    ]}>
-                      {isComplete ? '\u2713' : stage.icon}
-                    </Text>
-                    <Text style={[
-                      styles.stageLabel,
-                      isComplete && styles.stageLabelComplete,
-                      isCurrent && styles.stageLabelCurrent,
-                    ]}>
-                      {stage.label}
-                    </Text>
-                  </View>
-                  <View style={styles.stageBarBg}>
-                    <Animated.View
-                      style={[
-                        styles.stageBarFill,
-                        isComplete && styles.stageBarComplete,
-                        {
-                          width: progressAnims[index].interpolate({
-                            inputRange: [0, 1],
-                            outputRange: ['0%', '100%'],
-                          }),
-                        },
-                      ]}
-                    />
-                  </View>
-                </Animated.View>
-              );
-            })}
-          </View>
+      {/* Background scan indicator */}
+      {backgroundActiveCount > 0 && (
+        <View style={styles.bgIndicator}>
+          <ActivityIndicator size="small" color={colors.primary} />
+          <Text style={styles.bgIndicatorText}>
+            Processing {backgroundActiveCount} scan{backgroundActiveCount > 1 ? 's' : ''}...
+          </Text>
         </View>
-      </Animated.View>
+      )}
 
       {/* Error banner */}
       {error && (
@@ -394,7 +272,7 @@ export function ScannerScreen(): React.JSX.Element {
       )}
 
       {/* Bottom controls — minimal when not expanded */}
-      {!isCapturing && !isProcessing && (
+      {!isCapturing && (
         <View style={styles.bottomControls}>
           {/* Mode + options row */}
           <View style={styles.controlsTopRow}>
@@ -426,7 +304,7 @@ export function ScannerScreen(): React.JSX.Element {
           {/* Capture button — the hero */}
           <View style={styles.captureRow}>
             <Animated.View style={[
-              { transform: [{ scale: captureScale }] },
+              { transform: [{ scale: captureScale }], opacity: captureDisabled ? 0.4 : 1 },
               { shadowOpacity: glowAnim, shadowColor: colors.primary, shadowOffset: { width: 0, height: 0 }, shadowRadius: 24 },
             ]}>
               <TouchableOpacity
@@ -435,6 +313,7 @@ export function ScannerScreen(): React.JSX.Element {
                 onPressIn={handleCaptureIn}
                 onPressOut={handleCaptureOut}
                 activeOpacity={1}
+                disabled={captureDisabled}
               >
                 <View style={styles.captureButtonInner} />
               </TouchableOpacity>
@@ -556,75 +435,23 @@ const styles = StyleSheet.create({
     width: 1,
   },
 
-  // Processing overlay
-  processingOverlay: {
-    ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(12, 10, 9, 0.88)',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  processingContent: {
-    width: SCREEN_WIDTH - 64,
-    maxWidth: 320,
-  },
-  processingTitle: {
-    color: colors.textPrimary,
-    fontSize: 22,
-    fontFamily: fonts.display.semiBold,
-    textAlign: 'center',
-    marginBottom: 4,
-  },
-  processingSubtitle: {
-    color: colors.textTertiary,
-    fontSize: 13,
-    textAlign: 'center',
-    marginBottom: spacing.xxxl,
-  },
-  stagesList: {
-    gap: 16,
-  },
-  stageRow: {
-    gap: 6,
-  },
-  stageLeft: {
+  // Background indicator
+  bgIndicator: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 56 : 36,
+    alignSelf: 'center',
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    backgroundColor: 'rgba(12, 10, 9, 0.8)',
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+    borderRadius: radii.pill,
   },
-  stageIcon: {
-    fontSize: 14,
-    width: 20,
-    textAlign: 'center',
-  },
-  stageIconComplete: {
-    color: colors.verified,
-  },
-  stageLabel: {
-    color: colors.textTertiary,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-  stageLabelComplete: {
-    color: colors.textSecondary,
-  },
-  stageLabelCurrent: {
+  bgIndicatorText: {
     color: colors.textPrimary,
+    fontSize: 13,
     fontWeight: '600',
-  },
-  stageBarBg: {
-    height: 3,
-    backgroundColor: colors.bgNested,
-    borderRadius: 2,
-    marginLeft: 28,
-    overflow: 'hidden',
-  },
-  stageBarFill: {
-    height: 3,
-    backgroundColor: colors.primary,
-    borderRadius: 2,
-  },
-  stageBarComplete: {
-    backgroundColor: colors.verified,
   },
 
   // Error

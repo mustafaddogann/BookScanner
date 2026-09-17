@@ -394,6 +394,13 @@ describe('titleAuthorExtraction', () => {
         expect(result.confidence).toBeGreaterThanOrEqual(0.5);
       });
 
+      it('should split hyphen-collapsed title/author "POISON IN THE PEN-Patricia Wentworth"', () => {
+        const result = splitInlineTitleAuthor('POISON IN THE PEN-Patricia Wentworth');
+        expect(result.didSplit).toBe(true);
+        expect(result.title?.toUpperCase()).toBe('POISON IN THE PEN');
+        expect(result.author).toBe('Patricia Wentworth');
+      });
+
       it('should split "THE GUARDIANS JOHN GRISHAM"', () => {
         const result = splitInlineTitleAuthor('THE GUARDIANS JOHN GRISHAM');
         expect(result.didSplit).toBe(true);
@@ -562,6 +569,12 @@ describe('titleAuthorExtraction', () => {
     describe('sanitizeTitleForSearch', () => {
       it('should strip embedded author from title', () => {
         const result = sanitizeTitleForSearch('POISON IN THE PEN Patricia Wentworth');
+        expect(result.title.toUpperCase()).toBe('POISON IN THE PEN');
+        expect(result.extractedAuthor).toBe('Patricia Wentworth');
+      });
+
+      it('should strip embedded author from hyphen-collapsed title', () => {
+        const result = sanitizeTitleForSearch('POISON IN THE PEN-Patricia Wentworth');
         expect(result.title.toUpperCase()).toBe('POISON IN THE PEN');
         expect(result.extractedAuthor).toBe('Patricia Wentworth');
       });

@@ -242,6 +242,34 @@ describe('queryHypotheses', () => {
       );
       expect(darknessKellerman).toBeDefined();
     });
+
+    it('normalizes CITY/VICTORY OCR corruption into usable title queries', () => {
+      // Regression test for scan_1772056794675_pwyvrs_book_84
+      const lines = [
+        'TY NHOC',
+        'ILSOE VICTORY',
+        'MASON COLLI',
+        '1103 NOFER',
+        'NA NOVEL',
+        'JOHNA.',
+      ];
+
+      const result = generateHypotheses(lines);
+      const queries = result.hypotheses.map((h) => h.query.toLowerCase());
+
+      // Ensure title-only normalization is emitted (not just title+author combos).
+      expect(
+        queries.some(
+          (q) =>
+            q === 'city of victory' ||
+            q === 'city victory' ||
+            q === 'victory city'
+        )
+      ).toBe(true);
+
+      // Ensure NOFER mutation fragments are not treated as standalone signal.
+      expect(queries.some((q) => /\b(?:nfer|noer|nofr)\b/.test(q))).toBe(false);
+    });
   });
 
   describe('generateSimpleHypotheses', () => {

@@ -32,6 +32,7 @@ import {
 import RNFS from 'react-native-fs';
 import { useDebugStore } from './src/store/useDebugStore';
 import type { RootStackParamList } from './src/types';
+import { useBackgroundScanHaptic } from './src/hooks/useBackgroundScanToast';
 
 // Navigation ref for programmatic navigation from outside components
 const navigationRef = createNavigationContainerRef<RootStackParamList>();
@@ -155,6 +156,15 @@ async function checkStartupRescan(): Promise<void> {
   }
 }
 
+/**
+ * Mounts inside NavigationContainer to get access to navigation context.
+ * Watches for completed background scans and vibrates as feedback.
+ */
+function BackgroundScanWatcher() {
+  useBackgroundScanHaptic();
+  return null;
+}
+
 function App(): React.JSX.Element {
   // Load sessions on app start
   const loadSessions = useAppStore((state) => state.loadSessions);
@@ -187,6 +197,7 @@ function App(): React.JSX.Element {
       <SafeAreaProvider>
         <StatusBar barStyle="light-content" backgroundColor="#0C0A09" />
         <NavigationContainer ref={navigationRef} onReady={handleNavigationReady}>
+          <BackgroundScanWatcher />
           <Stack.Navigator
             initialRouteName="Home"
             screenOptions={{

@@ -66,22 +66,27 @@ export interface PostprocessConfig {
   minScore: number;
   /** Maximum detections to keep after NMS (0 = unlimited) */
   topK?: number;
+  /** NMS method: 'hard' (standard greedy) or 'soft' (Gaussian decay) */
+  nmsMethod?: 'hard' | 'soft';
+  /** Sigma for Gaussian soft-NMS score decay (default 0.5) */
+  softNmsSigma?: number;
+  /** Score threshold for pruning after soft-NMS decay (default 0.001) */
+  softNmsScoreThr?: number;
 }
 
 /**
  * Spine preset - optimized for book spine detection
- * Higher threshold (0.60) reduces false positives
- * OBB NMS for accurate rotated box suppression
- * Aspect ratio 3.0+ for spine-shaped detections
+ * Retrained model (491 imgs) with sweep-optimal params:
+ * thr=0.45, nms_iou=0.35, min_aspect=2.5, hard NMS (F1=0.7881)
  */
 export const SPINE_PRESET: PostprocessConfig = {
-  thr: 0.60,           // Higher threshold reduces noise
-  nmsIou: 0.45,        // Lower IoU = more aggressive suppression
+  thr: 0.45,           // Sweep-optimal for retrained model
+  nmsIou: 0.35,        // Tighter NMS removes more duplicates
   nmsMode: 'obb',      // Use OBB NMS for rotated boxes
-  minAspect: 3.0,      // Spine aspect ratio (w/h after canonicalization)
+  minAspect: 2.5,      // Sweep-optimal for retrained model
   minAreaRatio: 0.002, // Filter tiny noise (0.2% of image)
   maxAreaRatio: 0.40,  // Max 40% of image area
-  minScore: 0.60,      // Match threshold for consistency
+  minScore: 0.45,      // Match thr for consistency
   topK: 100,           // Max 100 detections
 };
 
@@ -89,43 +94,43 @@ export const SPINE_PRESET: PostprocessConfig = {
  * General preset - for non-spine detection
  */
 export const GENERAL_PRESET: PostprocessConfig = {
-  thr: 0.50,
+  thr: 0.40,
   nmsIou: 0.50,
   nmsMode: 'obb',
   minAspect: 1.0,
   minAreaRatio: 0.001,
   maxAreaRatio: 0.50,
-  minScore: 0.50,
+  minScore: 0.40,
   topK: 100,
 };
 
 /**
  * Live preview preset - fast processing for responsive UI
- * Uses AABB NMS for speed but still aggressive IoU
+ * Uses AABB hard NMS for speed; slightly higher thr than capture
  */
 export const LIVE_PREVIEW_PRESET: PostprocessConfig = {
-  thr: 0.60,
+  thr: 0.50,           // Slightly higher than capture for responsive UI
   nmsIou: 0.45,        // Aggressive suppression
   nmsMode: 'aabb',     // AABB for speed in live preview
-  minAspect: 3.0,      // Spine aspect ratio
+  minAspect: 2.5,      // Match spine preset
   minAreaRatio: 0.002,
   maxAreaRatio: 0.40,  // Max 40% of image area
-  minScore: 0.60,      // High confidence
+  minScore: 0.50,      // Match thr
   topK: 50,            // Fewer for live preview
 };
 
 /**
  * Capture preset - accurate processing for final output
- * Uses OBB NMS for accuracy
+ * Same tuned values as SPINE_PRESET (hard OBB NMS)
  */
 export const CAPTURE_PRESET: PostprocessConfig = {
-  thr: 0.60,
-  nmsIou: 0.45,
+  thr: 0.45,
+  nmsIou: 0.35,
   nmsMode: 'obb',      // OBB NMS for accurate capture
-  minAspect: 3.0,      // Spine aspect ratio
+  minAspect: 2.5,      // Match spine preset
   minAreaRatio: 0.002,
   maxAreaRatio: 0.40,  // Max 40% of image area
-  minScore: 0.60,      // High confidence
+  minScore: 0.45,      // Match thr
   topK: 100,
 };
 
@@ -1723,6 +1728,7 @@ function computeAABBIoU(a: OBBModelSpace, b: OBBModelSpace): number {
 /**
  * Apply Non-Maximum Suppression
  * Uses OBB or AABB IoU based on config.nmsMode
+ * Dispatches to soft-NMS if config.nmsMethod === 'soft'
  */
 export function applyNMS(
   detections: OBBModelSpace[],
@@ -1730,7 +1736,11 @@ export function applyNMS(
 ): OBBModelSpace[] {
   if (detections.length === 0) return [];
 
-  // Sort by score descending
+  if (config.nmsMethod === 'soft') {
+    return applySoftNMS(detections, config);
+  }
+
+  // Hard NMS (default)
   const sorted = [...detections].sort((a, b) => b.score - a.score);
   const kept: OBBModelSpace[] = [];
 
@@ -1753,7 +1763,60 @@ export function applyNMS(
     }
   }
 
-  console.log(`[InferenceService] NMS (${config.nmsMode}, iou=${config.nmsIou}): ${detections.length} -> ${kept.length}`);
+  console.log(`[InferenceService] NMS (hard/${config.nmsMode}, iou=${config.nmsIou}): ${detections.length} -> ${kept.length}`);
+  return kept;
+}
+
+/**
+ * Gaussian Soft-NMS: instead of suppressing overlapping detections entirely,
+ * decay their scores by exp(-IoU²/σ). Prune below softNmsScoreThr.
+ * Better for densely packed book spines where adjacent OBBs partially overlap.
+ */
+function applySoftNMS(
+  detections: OBBModelSpace[],
+  config: PostprocessConfig
+): OBBModelSpace[] {
+  const sigma = config.softNmsSigma ?? 0.5;
+  const scoreThr = config.softNmsScoreThr ?? 0.001;
+  const computeIoU = config.nmsMode === 'obb' ? computeOBBIoU : computeAABBIoU;
+
+  // Work on copies so we can mutate scores
+  const dets = detections.map(d => ({ ...d }));
+
+  const kept: OBBModelSpace[] = [];
+
+  for (let iter = 0; iter < dets.length; iter++) {
+    // Find detection with highest current score
+    let bestIdx = -1;
+    let bestScore = -1;
+    for (let i = 0; i < dets.length; i++) {
+      if (dets[i].score > bestScore) {
+        bestScore = dets[i].score;
+        bestIdx = i;
+      }
+    }
+
+    if (bestIdx < 0 || bestScore < scoreThr) break;
+
+    // Save with original score before zeroing the working copy
+    kept.push({ ...dets[bestIdx] });
+
+    // Remove selected detection from pool
+    dets[bestIdx].score = 0;
+
+    // Decay overlapping scores (geometry of bestIdx still valid, only score zeroed)
+    const bestDet = dets[bestIdx];
+    for (let i = 0; i < dets.length; i++) {
+      if (dets[i].score <= 0) continue;
+      const iou = computeIoU(bestDet, dets[i]);
+      dets[i].score *= Math.exp(-(iou * iou) / sigma);
+      if (dets[i].score < scoreThr) {
+        dets[i].score = 0;
+      }
+    }
+  }
+
+  console.log(`[InferenceService] NMS (soft/${config.nmsMode}, σ=${sigma}, iou=${config.nmsIou}): ${detections.length} -> ${kept.length}`);
   return kept;
 }
 

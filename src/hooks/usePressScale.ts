@@ -6,8 +6,9 @@ import { Animated } from 'react-native';
  * Returns scale animated value + onPressIn/onPressOut handlers.
  *
  * @param scaleDown - scale factor when pressed (default 0.97)
+ * @param useNativeDriver - set false when combining with JS-only animated props (e.g. shadowOpacity)
  */
-export function usePressScale(scaleDown = 0.97) {
+export function usePressScale(scaleDown = 0.97, useNativeDriver = true) {
   const scale = useRef(new Animated.Value(1)).current;
 
   const onPressIn = useCallback(() => {
@@ -15,18 +16,18 @@ export function usePressScale(scaleDown = 0.97) {
       toValue: scaleDown,
       tension: 100,
       friction: 8,
-      useNativeDriver: true,
+      useNativeDriver,
     }).start();
-  }, [scale, scaleDown]);
+  }, [scale, scaleDown, useNativeDriver]);
 
   const onPressOut = useCallback(() => {
     Animated.spring(scale, {
       toValue: 1,
       tension: 80,
       friction: 6,
-      useNativeDriver: true,
+      useNativeDriver,
     }).start();
-  }, [scale]);
+  }, [scale, useNativeDriver]);
 
   return {
     scale,

@@ -12,6 +12,7 @@ import RNFS from 'react-native-fs';
 import type { MetadataMatch } from '../types';
 import { isMetadataLookupEnabled } from '../config/debug';
 import { isArtifactWritingEnabled, getSessionDir } from './debugArtifacts';
+import { GOOGLE_BOOKS_HEADERS, withGoogleBooksKey } from '../config/googleBooks';
 
 // API endpoints
 const OPEN_LIBRARY_SEARCH = 'https://openlibrary.org/search.json';
@@ -49,12 +50,16 @@ export function isMetadataLookupAvailable(): boolean {
 /**
  * Fetch with timeout wrapper
  */
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
+async function fetchWithTimeout(
+  url: string,
+  timeoutMs: number,
+  headers?: Record<string, string>,
+): Promise<Response> {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   try {
-    const response = await fetch(url, { signal: controller.signal });
+    const response = await fetch(url, { signal: controller.signal, headers });
     return response;
   } finally {
     clearTimeout(timeoutId);
@@ -157,7 +162,11 @@ async function searchGoogleBooks(params: SearchParams): Promise<MetadataMatch[]>
   console.log(`[MetadataLookup] Google Books query: ${url}`);
 
   try {
-    const response = await fetchWithTimeout(url, FETCH_TIMEOUT);
+    const response = await fetchWithTimeout(
+      withGoogleBooksKey(url),
+      FETCH_TIMEOUT,
+      GOOGLE_BOOKS_HEADERS,
+    );
 
     if (!response.ok) {
       console.warn(`[MetadataLookup] Google Books error: ${response.status}`);

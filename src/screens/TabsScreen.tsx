@@ -1,11 +1,13 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import { StyleSheet, View, Text, TouchableOpacity, Animated, Dimensions } from 'react-native';
 import { HomeScreen } from './HomeScreen';
-import { SessionsScreen } from './SessionsScreen';
+import { MyShelfScreen } from './MyShelfScreen';
 import { SettingsScreen } from './SettingsScreen';
 import { colors, spacing, radii, shadows } from '../theme';
+import { useUnreviewedStore } from '../store/useUnreviewedStore';
+import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 
-type TabKey = 'Scan' | 'Sessions' | 'Settings';
+type TabKey = 'Scan' | 'MyShelf' | 'Settings';
 
 const TAB_BAR_HEIGHT = 72;
 const TAB_BAR_MARGIN = 20;
@@ -15,14 +17,16 @@ const TAB_COUNT = 3;
 const TAB_WIDTH = TAB_BAR_WIDTH / TAB_COUNT;
 
 const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'Scan', label: 'Scan', icon: '\u25CE' },        // ◎
-  { key: 'Sessions', label: 'Library', icon: '\u2630' },  // ☰
-  { key: 'Settings', label: 'Settings', icon: '\u2699' }, // ⚙
+  { key: 'Scan', label: 'Scan', icon: '\u25CE' },            // ◎
+  { key: 'MyShelf', label: 'My Shelf', icon: '\u{1F4DA}' },  // 📚
+  { key: 'Settings', label: 'Settings', icon: '\u2699' },    // ⚙
 ];
 
 export function TabsScreen(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<TabKey>('Scan');
   const indicatorX = useRef(new Animated.Value(0)).current;
+  const unreviewedCount = useUnreviewedStore((s) => s.unreviewedIds.size);
+  const activeScanCount = useBackgroundScanStore((s) => Object.keys(s.scans).length);
 
   const handleSelectTab = useCallback((tab: TabKey) => {
     setActiveTab(tab);
@@ -41,7 +45,7 @@ export function TabsScreen(): React.JSX.Element {
         {activeTab === 'Scan' && (
           <HomeScreen onOpenSettings={() => handleSelectTab('Settings')} />
         )}
-        {activeTab === 'Sessions' && <SessionsScreen />}
+        {activeTab === 'MyShelf' && <MyShelfScreen />}
         {activeTab === 'Settings' && (
           <SettingsScreen onBack={() => handleSelectTab('Scan')} />
         )}
@@ -69,9 +73,24 @@ export function TabsScreen(): React.JSX.Element {
                 onPress={() => handleSelectTab(tab.key)}
                 activeOpacity={0.7}
               >
-                <Text style={[styles.tabIcon, isActive && styles.tabIconActive]}>
-                  {tab.icon}
-                </Text>
+                <View style={styles.tabIconWrapper}>
+                  <Text style={[styles.tabIcon, isActive && styles.tabIconActive]}>
+                    {tab.icon}
+                  </Text>
+                  {tab.key === 'MyShelf' && (activeScanCount > 0 ? (
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {activeScanCount > 99 ? '99+' : activeScanCount}
+                      </Text>
+                    </View>
+                  ) : unreviewedCount > 0 ? (
+                    <View style={styles.badge}>
+                      <Text style={styles.badgeText}>
+                        {unreviewedCount > 99 ? '99+' : unreviewedCount}
+                      </Text>
+                    </View>
+                  ) : null)}
+                </View>
                 <Text style={[styles.tabText, isActive && styles.tabTextActive]}>
                   {tab.label}
                 </Text>
@@ -132,10 +151,30 @@ const styles = StyleSheet.create({
     paddingVertical: spacing.sm,
     zIndex: 1,
   },
+  tabIconWrapper: {
+    position: 'relative' as const,
+  },
   tabIcon: {
     color: colors.textMuted,
     fontSize: 18,
     marginBottom: 3,
+  },
+  badge: {
+    position: 'absolute' as const,
+    top: -4,
+    right: -10,
+    backgroundColor: colors.primary,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+    paddingHorizontal: 4,
+  },
+  badgeText: {
+    color: colors.bgDeep,
+    fontSize: 10,
+    fontWeight: '700' as const,
   },
   tabIconActive: {
     color: colors.primary,

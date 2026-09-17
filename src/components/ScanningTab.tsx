@@ -1,23 +1,15 @@
 import React, { useMemo, useCallback } from 'react';
-import { StyleSheet, View, Text, ScrollView, Image, Animated } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, Image, ActivityIndicator } from 'react-native';
 import { useNavigation } from '@react-navigation/native';
 import type { NativeStackNavigationProp } from '@react-navigation/native-stack';
 import type { RootStackParamList, ScanSession } from '../types';
 import { useAppStore } from '../store/useAppStore';
+import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 import { ensureFileUri } from '../utils/fileUri';
 import { colors, fonts, spacing, radii, shadows } from '../theme';
-import { useFadeIn } from '../hooks/useFadeIn';
-import { AnimatedPressable } from '../components/AnimatedPressable';
-import { useUnreviewedStore } from '../store/useUnreviewedStore';
+import { AnimatedPressable } from './AnimatedPressable';
 
 type NavigationProp = NativeStackNavigationProp<RootStackParamList>;
-
-function formatSessionLabel(session: ScanSession): string {
-  if (session.source === 'fixture') {
-    return session.fixtureName ? `Fixture: ${session.fixtureName}` : 'Fixture scan';
-  }
-  return 'Camera scan';
-}
 
 function formatRelativeDate(createdAt: string): string {
   const date = new Date(createdAt);
@@ -34,6 +26,13 @@ function formatRelativeDate(createdAt: string): string {
   return date.toLocaleDateString();
 }
 
+function formatSessionLabel(session: ScanSession): string {
+  if (session.source === 'fixture') {
+    return session.fixtureName ? `Fixture: ${session.fixtureName}` : 'Fixture scan';
+  }
+  return 'Camera scan';
+}
+
 function getStatusInfo(status: string): { label: string; color: string; bg: string } {
   switch (status) {
     case 'completed':
@@ -47,73 +46,92 @@ function getStatusInfo(status: string): { label: string; color: string; bg: stri
   }
 }
 
-export function SessionsScreen(): React.JSX.Element {
+export function ScanningTab(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
-  const sessions = useAppStore((state) => state.sessions);
-  const unreviewedIds = useUnreviewedStore((s) => s.unreviewedIds);
-  const markReviewed = useUnreviewedStore((s) => s.markReviewed);
-  const headerAnim = useFadeIn(0, 16);
+  const sessions = useAppStore((s) => s.sessions);
+  const scans = useBackgroundScanStore((s) => s.scans);
 
-  const recentSessions = useMemo(() => {
+  const activeScans = useMemo(() => Object.values(scans), [scans]);
+
+  const completedSessions = useMemo(() => {
     const sorted = [...sessions].sort((a, b) => {
       const timeA = new Date(a.createdAt).getTime();
       const timeB = new Date(b.createdAt).getTime();
       return timeB - timeA;
     });
-    return sorted;
+    return sorted.slice(0, 20);
   }, [sessions]);
 
-  const totalBooks = useMemo(() => {
-    return sessions.reduce((sum, s) => sum + (s.detectionCount || 0), 0);
-  }, [sessions]);
+  const handleOpenSession = useCallback(
+    (sessionId: string) => {
+      navigation.navigate('Results', { sessionId });
+    },
+    [navigation],
+  );
 
-  const handleOpenSession = useCallback((sessionId: string) => {
-    markReviewed(sessionId);
-    navigation.navigate('Results', { sessionId });
-  }, [navigation, markReviewed]);
+  const hasActive = activeScans.length > 0;
+  const hasCompleted = completedSessions.length > 0;
 
-  return (
-    <View style={styles.container}>
-      <Animated.View style={[styles.header, headerAnim]}>
-        <Text style={styles.title}>My Library</Text>
-        <View style={styles.headerStats}>
-          <Text style={styles.headerStat}>
-            <Text style={styles.headerStatValue}>{sessions.length}</Text> scans
-          </Text>
-          <View style={styles.headerStatDivider} />
-          <Text style={styles.headerStat}>
-            <Text style={styles.headerStatValue}>{totalBooks}</Text> books
+  if (!hasActive && !hasCompleted) {
+    return (
+      <View style={styles.emptyContainer}>
+        <View style={styles.emptyState}>
+          <View style={styles.emptyIconBg}>
+            <Text style={styles.emptyIcon}>{'\u{1F4F7}'}</Text>
+          </View>
+          <Text style={styles.emptyTitle}>No scans yet</Text>
+          <Text style={styles.emptySubtext}>
+            Scan a bookshelf to see your scanning activity here.
           </Text>
         </View>
-      </Animated.View>
+      </View>
+    );
+  }
 
-      <ScrollView
-        contentContainerStyle={styles.content}
-        showsVerticalScrollIndicator={false}
-      >
-        {recentSessions.length === 0 ? (
-          <View style={styles.emptyState}>
-            <View style={styles.emptyIconBg}>
-              <Text style={styles.emptyIcon}>{'\u{1F4DA}'}</Text>
+  return (
+    <ScrollView
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+    >
+      {/* Active Scans */}
+      {hasActive && (
+        <>
+          <Text style={styles.sectionLabel}>ACTIVE</Text>
+          {activeScans.map((scan) => (
+            <View key={scan.sessionId} style={styles.activeCard}>
+              <View style={styles.activeLeftBorder} />
+              <View style={styles.activeContent}>
+                <View style={styles.activeRow}>
+                  <Text style={styles.activeStage} numberOfLines={1}>
+                    {scan.stage ?? 'Processing...'}
+                  </Text>
+                  <ActivityIndicator size="small" color={colors.primary} />
+                </View>
+                {scan.error && (
+                  <Text style={styles.activeError} numberOfLines={1}>
+                    {scan.error}
+                  </Text>
+                )}
+              </View>
             </View>
-            <Text style={styles.emptyTitle}>No sessions yet</Text>
-            <Text style={styles.emptySubtext}>
-              Your scanned shelves will appear here.
-            </Text>
-          </View>
-        ) : (
-          recentSessions.map((session, index) => {
-            const isNew = unreviewedIds.has(session.sessionId);
-            const statusInfo = isNew
-              ? { label: 'NEW', color: colors.primary, bg: colors.primaryMuted }
-              : getStatusInfo(session.status);
+          ))}
+        </>
+      )}
+
+      {/* Completed Sessions */}
+      {hasCompleted && (
+        <>
+          <Text style={[styles.sectionLabel, hasActive && styles.sectionLabelSpaced]}>
+            COMPLETED
+          </Text>
+          {completedSessions.map((session) => {
+            const statusInfo = getStatusInfo(session.status);
             return (
               <AnimatedPressable
                 key={session.sessionId}
-                style={[styles.sessionCard, isNew && styles.sessionCardNew]}
+                style={styles.sessionCard}
                 onPress={() => handleOpenSession(session.sessionId)}
               >
-                {/* Thumbnail */}
                 <View style={styles.thumbnail}>
                   {session.imagePath ? (
                     <Image
@@ -127,8 +145,6 @@ export function SessionsScreen(): React.JSX.Element {
                     </View>
                   )}
                 </View>
-
-                {/* Content */}
                 <View style={styles.sessionInfo}>
                   <Text style={styles.sessionTitle} numberOfLines={1}>
                     {formatSessionLabel(session)}
@@ -147,98 +163,75 @@ export function SessionsScreen(): React.JSX.Element {
                     )}
                   </View>
                 </View>
-
-                {/* Status */}
                 <View style={[styles.statusPill, { backgroundColor: statusInfo.bg }]}>
-                  <View style={[styles.statusDotSmall, { backgroundColor: statusInfo.color }]} />
+                  <View style={[styles.statusDot, { backgroundColor: statusInfo.color }]} />
                   <Text style={[styles.statusLabel, { color: statusInfo.color }]}>
                     {statusInfo.label}
                   </Text>
                 </View>
               </AnimatedPressable>
             );
-          })
-        )}
-      </ScrollView>
-    </View>
+          })}
+        </>
+      )}
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: colors.bgDeep,
-  },
-  header: {
-    paddingTop: 64,
-    paddingHorizontal: spacing.xxl,
-    paddingBottom: spacing.xl,
-  },
-  title: {
-    color: colors.textPrimary,
-    fontSize: 28,
-    fontFamily: fonts.display.bold,
-    letterSpacing: -0.3,
-  },
-  headerStats: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginTop: spacing.sm,
-  },
-  headerStat: {
-    color: colors.textTertiary,
-    fontSize: 13,
-  },
-  headerStatValue: {
-    color: colors.textSecondary,
-    fontWeight: '700',
-  },
-  headerStatDivider: {
-    width: 1,
-    height: 12,
-    backgroundColor: colors.bgOverlay,
-    marginHorizontal: spacing.md,
-  },
   content: {
     paddingHorizontal: spacing.xxl,
     paddingBottom: spacing.xxxxl,
   },
+  sectionLabel: {
+    color: colors.textTertiary,
+    fontSize: 11,
+    fontWeight: '600',
+    letterSpacing: 1,
+    textTransform: 'uppercase',
+    marginBottom: spacing.md,
+  },
+  sectionLabelSpaced: {
+    marginTop: spacing.xxl,
+  },
 
-  // Empty State
-  emptyState: {
+  // Active scan cards
+  activeCard: {
     backgroundColor: colors.bgElevated,
-    borderRadius: radii.xxl,
-    padding: spacing.xxxl,
-    alignItems: 'center',
+    borderRadius: radii.xl,
     borderWidth: 1,
     borderColor: colors.glassBorder,
+    flexDirection: 'row',
+    overflow: 'hidden',
+    marginBottom: spacing.md,
   },
-  emptyIconBg: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
-    backgroundColor: colors.primaryMuted,
-    justifyContent: 'center',
+  activeLeftBorder: {
+    width: 3,
+    backgroundColor: colors.primary,
+  },
+  activeContent: {
+    flex: 1,
+    padding: spacing.lg,
+  },
+  activeRow: {
+    flexDirection: 'row',
     alignItems: 'center',
-    marginBottom: spacing.lg,
+    justifyContent: 'space-between',
   },
-  emptyIcon: {
-    fontSize: 24,
-  },
-  emptyTitle: {
+  activeStage: {
     color: colors.textPrimary,
-    fontSize: 16,
-    fontFamily: fonts.display.semiBold,
-    marginBottom: spacing.xs,
+    fontSize: 14,
+    fontWeight: '600',
+    flex: 1,
+    marginRight: spacing.md,
   },
-  emptySubtext: {
-    color: colors.textTertiary,
-    fontSize: 13,
-    lineHeight: 18,
-    textAlign: 'center',
+  activeError: {
+    color: colors.rejected,
+    fontSize: 12,
+    marginTop: spacing.xs,
   },
 
-  // Session Card
+  // Session cards (completed)
   sessionCard: {
     backgroundColor: colors.bgElevated,
     borderRadius: radii.xl,
@@ -249,13 +242,9 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: colors.glassBorder,
   },
-  sessionCardNew: {
-    borderLeftWidth: 3,
-    borderLeftColor: colors.primary,
-  },
   thumbnail: {
-    width: 56,
-    height: 56,
+    width: 48,
+    height: 48,
     borderRadius: radii.md,
     overflow: 'hidden',
     backgroundColor: colors.bgNested,
@@ -270,7 +259,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   thumbnailPlaceholderText: {
-    fontSize: 20,
+    fontSize: 18,
   },
   sessionInfo: {
     flex: 1,
@@ -311,7 +300,7 @@ const styles = StyleSheet.create({
     borderRadius: radii.pill,
     gap: 5,
   },
-  statusDotSmall: {
+  statusDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
@@ -319,5 +308,44 @@ const styles = StyleSheet.create({
   statusLabel: {
     fontSize: 11,
     fontWeight: '600',
+  },
+
+  // Empty state
+  emptyContainer: {
+    flex: 1,
+    paddingHorizontal: spacing.xxl,
+    paddingTop: spacing.xxl,
+  },
+  emptyState: {
+    backgroundColor: colors.bgElevated,
+    borderRadius: radii.xxl,
+    padding: spacing.xxxl,
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: colors.glassBorder,
+  },
+  emptyIconBg: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: colors.primaryMuted,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: spacing.lg,
+  },
+  emptyIcon: {
+    fontSize: 24,
+  },
+  emptyTitle: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontFamily: fonts.display.semiBold,
+    marginBottom: spacing.xs,
+  },
+  emptySubtext: {
+    color: colors.textTertiary,
+    fontSize: 13,
+    lineHeight: 18,
+    textAlign: 'center',
   },
 });

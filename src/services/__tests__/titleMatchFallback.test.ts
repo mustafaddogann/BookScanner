@@ -216,6 +216,23 @@ describe('Title Match Fallback', () => {
       expect(result.reason).toBe('no_title_for_fallback');
     });
 
+    it('should skip low-signal single-token titles without author support', async () => {
+      mockProvider.searchByText = jest.fn().mockResolvedValue([
+        {
+          title: 'Daini',
+          authors: ['Unknown'],
+          source: 'openLibrary' as const,
+          sourceId: 'OL999',
+        },
+      ]);
+
+      const result = await executeTitleMatchFallback('Daini', null, mockProvider);
+
+      expect(result.triggered).toBe(false);
+      expect(result.reason).toBe('low_signal_single_token_for_fallback');
+      expect(mockProvider.searchByText).not.toHaveBeenCalled();
+    });
+
     it('should handle API error gracefully', async () => {
       mockProvider.searchByText = jest.fn().mockRejectedValue(new Error('Network error'));
 

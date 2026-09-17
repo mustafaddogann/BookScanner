@@ -354,6 +354,47 @@ def nms_aabb(boxes, scores, iou_threshold, topk):
     return keep
 
 
+def nms_soft_rotated(boxes, scores, iou_threshold, sigma=0.5, score_thr=0.001, topk=300):
+    """Apply Gaussian soft-NMS using rotated bounding box IoU.
+    Instead of hard suppression, decay overlapping scores by exp(-IoU^2/sigma).
+    boxes: Nx5 array of [cx, cy, w, h, angle]
+    scores: N array of confidence scores
+    Returns indices of kept boxes.
+    """
+    if len(scores) == 0:
+        return []
+
+    order = np.argsort(-scores)
+    if topk > 0:
+        order = order[:topk]
+
+    scores_work = scores.copy().astype(np.float64)
+    keep = []
+
+    for _ in range(len(order)):
+        # Find current max score among remaining candidates
+        best = -1
+        best_score = -1.0
+        for idx in order:
+            if scores_work[idx] > best_score:
+                best_score = scores_work[idx]
+                best = idx
+        if best < 0 or best_score < score_thr:
+            break
+        keep.append(best)
+        scores_work[best] = 0  # remove from future consideration
+        # Decay overlapping scores
+        for idx in order:
+            if scores_work[idx] <= 0:
+                continue
+            iou = obb_iou(boxes[best], boxes[idx])
+            scores_work[idx] *= np.exp(-(iou ** 2) / sigma)
+            if scores_work[idx] < score_thr:
+                scores_work[idx] = 0
+
+    return keep
+
+
 def check_dataset_classes():
     """Check dataset YAML for class count and warn if multi-class."""
     patterns = [
@@ -398,25 +439,28 @@ def check_dataset_classes():
 def main():
     import time
 
-    # Preset configurations
+    # Preset configurations (synced with inferenceService.ts)
     PRESETS = {
         "spine": {
-            "thr": 0.50,
-            "nms_iou": 0.90,
+            "thr": 0.45,
+            "nms_iou": 0.35,
             "nms_mode": "obb",
+            "nms_method": "hard",
             "topk": 300,
-            "min_aspect": 6.0,
-            "max_area_ratio": 0.08,
-            "min_score": 0.60,
+            "min_aspect": 2.5,
+            "max_area_ratio": 0.40,
+            "min_score": 0.45,
         },
         "general": {
-            "thr": 0.50,
+            "thr": 0.40,
             "nms_iou": 0.50,
             "nms_mode": "obb",
+            "nms_method": "hard",
+            "soft_sigma": 0.5,
             "topk": 300,
             "min_aspect": 1.0,
             "max_area_ratio": 0.50,
-            "min_score": 0.50,
+            "min_score": 0.40,
         },
     }
 
@@ -426,6 +470,8 @@ def main():
     parser.add_argument("--thr", type=float, help="Confidence threshold (spine: 0.50)")
     parser.add_argument("--nms_iou", type=float, help="NMS IoU threshold (spine: 0.90)")
     parser.add_argument("--nms_mode", choices=["obb", "aabb"], help="NMS mode (spine: obb)")
+    parser.add_argument("--nms_method", choices=["hard", "soft"], help="NMS method (spine: soft)")
+    parser.add_argument("--soft_sigma", type=float, help="Sigma for soft-NMS Gaussian decay (default: 0.5)")
     parser.add_argument("--nms_debug", action="store_true", help="Print IoU stats before NMS")
     parser.add_argument("--topk", type=int, help="Top-K candidates before NMS (default: 300)")
     parser.add_argument("--min_aspect", type=float, help="Min aspect ratio w/h (spine: 6.0)")
@@ -439,6 +485,8 @@ def main():
     args.thr = args.thr if args.thr is not None else preset["thr"]
     args.nms_iou = args.nms_iou if args.nms_iou is not None else preset["nms_iou"]
     args.nms_mode = args.nms_mode if args.nms_mode is not None else preset["nms_mode"]
+    args.nms_method = args.nms_method if args.nms_method is not None else preset.get("nms_method", "hard")
+    args.soft_sigma = args.soft_sigma if args.soft_sigma is not None else preset.get("soft_sigma", 0.5)
     args.topk = args.topk if args.topk is not None else preset["topk"]
     args.min_aspect = args.min_aspect if args.min_aspect is not None else preset["min_aspect"]
     args.max_area_ratio = args.max_area_ratio if args.max_area_ratio is not None else preset["max_area_ratio"]
@@ -497,6 +545,9 @@ def main():
     print(f"Threshold: {args.thr}")
     print(f"NMS IoU: {args.nms_iou}")
     print(f"NMS mode: {args.nms_mode}")
+    print(f"NMS method: {args.nms_method}")
+    if args.nms_method == "soft":
+        print(f"Soft-NMS sigma: {args.soft_sigma}")
     print(f"Top-K: {args.topk}")
     print(f"Min aspect ratio: {args.min_aspect}")
     print(f"Max area ratio: {args.max_area_ratio}")
@@ -580,7 +631,10 @@ def main():
 
     # NMS
     t_nms_start = time.time()
-    if args.nms_mode == "obb":
+    if args.nms_method == "soft":
+        nms_indices = nms_soft_rotated(boxes, score_thr, args.nms_iou,
+                                       sigma=args.soft_sigma, topk=args.topk)
+    elif args.nms_mode == "obb":
         nms_indices = nms_rotated(boxes, score_thr, args.nms_iou, args.topk)
     else:  # aabb
         nms_indices = nms_aabb(boxes, score_thr, args.nms_iou, args.topk)
@@ -652,6 +706,8 @@ def main():
         "thr": args.thr,
         "nms_iou": args.nms_iou,
         "nms_mode": args.nms_mode,
+        "nms_method": args.nms_method,
+        "soft_sigma": args.soft_sigma if args.nms_method == "soft" else None,
         "topk": args.topk,
         "min_aspect": args.min_aspect,
         "max_area_ratio": args.max_area_ratio,
@@ -679,7 +735,7 @@ def main():
     print("=" * 50)
     print(f"  Raw detections:           {num_raw}")
     print(f"  After threshold (>{args.thr}):  {num_before_nms}")
-    print(f"  After NMS ({args.nms_mode}):          {num_after_nms}")
+    print(f"  After NMS ({args.nms_method}/{args.nms_mode}):    {num_after_nms}")
     print(f"  After geometric filters:  {num_after_geom}")
     print("=" * 50)
 
@@ -697,15 +753,15 @@ def main():
         print(f"  Preprocess:          {timings['preprocess']*1000:7.2f}")
         print(f"  Inference:           {timings['inference']*1000:7.2f}")
         print(f"  Decode+Canonicalize: {timings['decode_canonicalize']*1000:7.2f}")
-        print(f"  NMS ({args.nms_mode}):           {timings['nms']*1000:7.2f}")
+        print(f"  NMS ({args.nms_method}/{args.nms_mode}):      {timings['nms']*1000:7.2f}")
         print(f"  Geometric filters:   {timings['geom_filters']*1000:7.2f}")
         print(f"  ---")
         print(f"  Total:               {timings['total']*1000:7.2f}")
         print("=" * 50)
 
         # Warn if NMS is slow (> 100ms for spine preset could affect UX)
-        if timings['nms'] > 0.1 and args.nms_mode == "obb":
-            print("\nWARNING: OBB NMS took >100ms. Consider using --nms_mode aabb")
+        if timings['nms'] > 0.1 and (args.nms_mode == "obb" or args.nms_method == "soft"):
+            print("\nWARNING: NMS took >100ms. Consider using --nms_method hard --nms_mode aabb")
             print("         for device builds if latency is critical.")
 
 if __name__ == "__main__":

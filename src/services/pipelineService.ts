@@ -135,7 +135,13 @@ import {
   type RectificationOverlayDetection,
 } from './debugArtifacts';
 import { buildImageMetaFromUri } from './imageService';
-import { useAppStore } from '../store/useAppStore';
+import { useAppStore, storage, type SessionMeta } from '../store/useAppStore';
+import {
+  type PipelineStoreAdapter,
+  createForegroundAdapter,
+  createBackgroundAdapter,
+} from './pipelineStoreAdapter';
+import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 import { generateCoordinateTestArtifact } from '../utils/letterbox';
 
 // DEBUG FLAG: Set to true ONLY to bypass model requirement during UI development
@@ -184,13 +190,16 @@ interface PipelineResult {
   errors: string[];
 }
 
+let activeForegroundSessionId: string | null = null;
+
 /**
  * Run the full detection pipeline on an image
  */
 export async function runPipeline(
   imageUri: string,
   source: 'camera' | 'fixture',
-  fixtureName?: string
+  fixtureName?: string,
+  storeAdapter?: PipelineStoreAdapter
 ): Promise<PipelineResult> {
   const timer = new PipelineTimer();
   const errors: string[] = [];
@@ -199,9 +208,15 @@ export async function runPipeline(
   console.log(`[Pipeline] Starting pipeline for session ${sessionId}`);
   console.log(`[Pipeline] Source: ${source}, Image: ${imageUri}`);
 
-  // Update store
-  const store = useAppStore.getState();
+  // Update store via adapter (foreground by default)
+  const store = storeAdapter ?? createForegroundAdapter();
   store.setProcessing(true, 'initialization');
+  // setSessionMeta merges, so without this a new scan inherits the previous
+  // scan's bookCandidates/metadataResolution and results get attached to the wrong spines.
+  store.setSessionMeta(null);
+  if (!storeAdapter) {
+    activeForegroundSessionId = sessionId;
+  }
 
   // Track raw output and diagnostic results for artifacts
   let rawOutput: RawModelOutput | undefined;
@@ -1085,7 +1100,7 @@ export async function runPipeline(
     // Group detections into book candidates and merge OCR evidence
     // IMPORTANT: Read FRESH state to get rectificationResults and ocrResults
     // that were just stored (the 'store' variable from getState() is stale)
-    const freshMeta = useAppStore.getState().sessionMeta;
+    const freshMeta = store.getSessionMeta();
     if (freshMeta && detections.length > 0 && !isDebugAlignmentMode) {
       try {
         const rectResults = freshMeta.rectificationResults || [];
@@ -1156,7 +1171,7 @@ export async function runPipeline(
       store.setProcessing(true, 'hypothesis');
 
       // Get fresh state to access book candidates from grouping
-      const hypothesisMeta = useAppStore.getState().sessionMeta;
+      const hypothesisMeta = store.getSessionMeta();
       const hypothesisCandidates = hypothesisMeta?.bookCandidates || [];
 
       if (hypothesisCandidates.length > 0) {
@@ -1206,7 +1221,7 @@ export async function runPipeline(
       timer.startStage('corrections');
       store.setProcessing(true, 'corrections');
 
-      const correctionsMeta = useAppStore.getState().sessionMeta;
+      const correctionsMeta = store.getSessionMeta();
       const candidatesForCorrections = correctionsMeta?.bookCandidates || [];
 
       if (candidatesForCorrections.length > 0) {
@@ -1241,7 +1256,7 @@ export async function runPipeline(
     // =========================================================================
     if (isMetadataResolutionEnabled() && !isDebugAlignmentMode) {
       // Get FRESH state to access OCR and grouping results
-      const metaMeta = useAppStore.getState().sessionMeta;
+      const metaMeta = store.getSessionMeta();
       const metaRectResults = metaMeta?.rectificationResults || [];
       const metaOcrResults = metaMeta?.ocrResultsByCropIndex || {};
       const metaBookCandidates = metaMeta?.bookCandidates || [];
@@ -1275,17 +1290,52 @@ export async function runPipeline(
             // Extract resolved candidates from result (with updated resolverDecision)
             const resolvedCandidates = metadataResult.resolutionState.resolvedCandidates;
 
-            // Store results in sessionMeta (MERGE semantics)
-            // CRITICAL: Also update bookCandidates with resolved status
-            store.setSessionMeta({
+            const resolvedMeta: Partial<SessionMeta> = {
               evidenceSummary: metadataResult.evidenceSummary,
               metadataResolution: metadataResult.resolutionState,
               metadataQueuedForOffline: metadataResult.queuedForOffline,
-              // Update bookCandidates with resolver results if available
               ...(resolvedCandidates && resolvedCandidates.length > 0
                 ? { bookCandidates: resolvedCandidates }
                 : {}),
-            });
+            };
+
+            // Resolution can take minutes. Only touch the UI store if it still shows
+            // this scan; otherwise these results would land on a newer scan.
+            const ui = useAppStore.getState();
+            if (storeAdapter) {
+              store.setSessionMeta(resolvedMeta);
+              if (ui.currentSession?.sessionId === sessionId && !ui.isProcessing) {
+                ui.setSessionMeta(resolvedMeta);
+              }
+            } else if (activeForegroundSessionId === sessionId) {
+              store.setSessionMeta(resolvedMeta);
+            }
+
+            // Persist resolved sessionMeta to MMKV so aggregated reads pick it up.
+            // NOTE: For background scans, the scan slot may already be removed from
+            // useBackgroundScanStore by completeScan(), so store.getSessionMeta()
+            // returns null. Instead, merge directly into the existing MMKV data.
+            try {
+              const mmkvKey = `session_meta_${sessionId}`;
+              const existing = storage.getString(mmkvKey);
+              if (existing) {
+                const parsed = JSON.parse(existing);
+                const updated = {
+                  ...parsed,
+                  evidenceSummary: metadataResult.evidenceSummary,
+                  metadataResolution: metadataResult.resolutionState,
+                  metadataQueuedForOffline: metadataResult.queuedForOffline,
+                  ...(resolvedCandidates && resolvedCandidates.length > 0
+                    ? { bookCandidates: resolvedCandidates }
+                    : {}),
+                };
+                storage.set(mmkvKey, JSON.stringify(updated));
+                console.log(`[MetadataResolution] Persisted resolved meta to MMKV for ${sessionId}`);
+              }
+            } catch (e: any) {
+              console.warn(`[MetadataResolution] MMKV persist failed: ${e.message}`);
+            }
+
           })
           .catch((metadataError: any) => {
             // ALWAYS-ON: Log resolution error
@@ -1297,14 +1347,34 @@ export async function runPipeline(
               resolverDecision: 'reject' as const,
             }));
 
-            store.setSessionMeta({
+            const errorMeta: Partial<SessionMeta> = {
               metadataResolution: {
                 evidenceTier: 'unusable',
                 decision: { action: 'no-match', fallback: 'ocr-only' },
                 resolvedAt: new Date().toISOString(),
               },
               bookCandidates: errorCandidates,
-            });
+            };
+            const ui = useAppStore.getState();
+            if (storeAdapter) {
+              store.setSessionMeta(errorMeta);
+              if (ui.currentSession?.sessionId === sessionId && !ui.isProcessing) {
+                ui.setSessionMeta(errorMeta);
+              }
+            } else if (activeForegroundSessionId === sessionId) {
+              store.setSessionMeta(errorMeta);
+            }
+
+            // Persist error state to MMKV (merge into existing)
+            try {
+              const mmkvKey = `session_meta_${sessionId}`;
+              const existing = storage.getString(mmkvKey);
+              if (existing) {
+                const parsed = JSON.parse(existing);
+                const updated = { ...parsed, bookCandidates: errorCandidates };
+                storage.set(mmkvKey, JSON.stringify(updated));
+              }
+            } catch (_e) { /* best-effort */ }
           });
 
         if (isMetadataVerboseDebug()) {
@@ -1313,7 +1383,7 @@ export async function runPipeline(
       } else {
         console.log('[Pipeline] Metadata resolution skipped: no OCR results');
         // Mark candidates as 'pending' since we have no OCR to work with
-        const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+        const currentCandidates = store.getSessionMeta()?.bookCandidates || [];
         if (currentCandidates.length > 0) {
           const pendingCandidates = currentCandidates.map((c) => ({
             ...c,
@@ -1325,7 +1395,7 @@ export async function runPipeline(
     } else if (!isMetadataResolutionEnabled()) {
       // Feature flag is OFF - set all candidates to 'disabled' status
       console.log('[Pipeline] Metadata resolution disabled by feature flag');
-      const currentCandidates = useAppStore.getState().sessionMeta?.bookCandidates || [];
+      const currentCandidates = store.getSessionMeta()?.bookCandidates || [];
       if (currentCandidates.length > 0) {
         const disabledCandidates = currentCandidates.map((c) => ({
           ...c,
@@ -1553,6 +1623,43 @@ export async function runPipelineOnFixture(
  */
 export async function runPipelineOnCapture(imageUri: string): Promise<PipelineResult> {
   return runPipeline(imageUri, 'camera');
+}
+
+/**
+ * Run pipeline in the background (fire-and-forget).
+ * Uses an isolated background store adapter so it doesn't stomp on
+ * the foreground UI. Up to 3 concurrent background scans allowed.
+ */
+export async function runPipelineBackground(imageUri: string): Promise<void> {
+  const bgStore = useBackgroundScanStore.getState();
+
+  if (bgStore.activeCount() >= 3) {
+    throw new Error('Maximum background scans reached (3). Wait for one to finish.');
+  }
+
+  const sessionId = `scan_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  bgStore.startScan(sessionId);
+  const adapter = createBackgroundAdapter(sessionId);
+
+  try {
+    const result = await runPipeline(imageUri, 'camera', undefined, adapter);
+
+    // Persist sessionMeta + detections to MMKV for later hydration
+    const scan = useBackgroundScanStore.getState().scans[sessionId];
+    if (scan?.sessionMeta) {
+      storage.set(`session_meta_${result.session.sessionId}`, JSON.stringify(scan.sessionMeta));
+    }
+    if (scan?.detections) {
+      storage.set(`session_detections_${result.session.sessionId}`, JSON.stringify(scan.detections));
+    }
+
+    bgStore.completeScan(sessionId, result.session);
+  } catch (error: any) {
+    useBackgroundScanStore.getState().updateScan(sessionId, {
+      error: error.message,
+      isProcessing: false,
+    });
+  }
 }
 
 // ============================================================================

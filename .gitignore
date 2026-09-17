@@ -24,3 +24,6 @@ venv/
 # Auto-fix runtime state
 scripts/.autofix_daemon_state.json
 scripts/.autofix_state.json
+
+# Local API keys
+src/config/secrets.ts

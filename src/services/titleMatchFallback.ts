@@ -29,6 +29,9 @@ const TITLE_COMPARISON_STOPWORDS = new Set([
   'the', 'a', 'an', 'of', 'to', 'in', 'on', 'and',
 ]);
 
+const MIN_FALLBACK_TITLE_ALNUM = 5;
+const MIN_FALLBACK_SINGLE_TOKEN_LENGTH = 6;
+
 /**
  * Normalize a title for full-match comparison
  * - Uppercase
@@ -59,6 +62,53 @@ export function getTitleTokens(title: string): Set<string> {
   const tokens = normalized.split(/\s+/).filter(t => t.length > 0);
   // Remove stopwords
   return new Set(tokens.filter(t => !TITLE_COMPARISON_STOPWORDS.has(t.toLowerCase())));
+}
+
+function hasStrongAuthorHint(author: string | null): boolean {
+  if (!author) return false;
+  const cleaned = author.trim();
+  if (!cleaned) return false;
+
+  const words = cleaned.split(/\s+/).filter(Boolean);
+  if (words.length < 2 || words.length > 4) return false;
+
+  const letterCount = (cleaned.match(/[A-Za-z]/g) || []).length;
+  const nonSpaceLength = cleaned.replace(/\s/g, '').length;
+  return nonSpaceLength > 0 && letterCount / nonSpaceLength >= 0.85;
+}
+
+function validateFallbackQuerySignal(
+  queryTitle: string,
+  extractedAuthor: string | null
+): { ok: boolean; reason: string } {
+  const normalized = normalizeTitle(queryTitle);
+  if (!normalized) {
+    return { ok: false, reason: 'no_title_for_fallback' };
+  }
+
+  const rawTokens = normalized.split(/\s+/).filter(Boolean);
+  const informativeTokens = rawTokens.filter(
+    (token) => token.length > 0 && !TITLE_COMPARISON_STOPWORDS.has(token.toLowerCase())
+  );
+  const alphaNumCount = (normalized.match(/[A-Z0-9]/g) || []).length;
+
+  if (informativeTokens.length === 0 || alphaNumCount < MIN_FALLBACK_TITLE_ALNUM) {
+    return { ok: false, reason: 'low_signal_title_for_fallback' };
+  }
+
+  // Single-word titles are extremely ambiguous in fallback mode.
+  // Require strong author evidence so we do not over-suggest random one-word matches.
+  if (rawTokens.length === 1 && informativeTokens.length === 1) {
+    const token = informativeTokens[0];
+    if (
+      token.length < MIN_FALLBACK_SINGLE_TOKEN_LENGTH ||
+      !hasStrongAuthorHint(extractedAuthor)
+    ) {
+      return { ok: false, reason: 'low_signal_single_token_for_fallback' };
+    }
+  }
+
+  return { ok: true, reason: 'ok' };
 }
 
 /**
@@ -254,6 +304,12 @@ export async function executeTitleMatchFallback(
   const queryTitle = extractedTitle.trim();
   debug.queryTitle = queryTitle;
 
+  const signalCheck = validateFallbackQuerySignal(queryTitle, extractedAuthor);
+  if (!signalCheck.ok) {
+    result.reason = signalCheck.reason;
+    return result;
+  }
+
   console.log(`[TitleMatchFallback] Searching for title: "${queryTitle}"`);
 
   try {
@@ -439,6 +495,12 @@ export async function executeTitleMatchFallbackWithProvider(
   // Sanitize query title
   const queryTitle = extractedTitle.trim();
   debug.queryTitle = queryTitle;
+
+  const signalCheck = validateFallbackQuerySignal(queryTitle, extractedAuthor);
+  if (!signalCheck.ok) {
+    result.reason = signalCheck.reason;
+    return result;
+  }
 
   console.log(`[TitleMatchFallback:${provider.name}] Searching for title: "${queryTitle}"`);
 

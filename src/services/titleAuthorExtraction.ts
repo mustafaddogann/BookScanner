@@ -703,8 +703,14 @@ export function splitInlineTitleAuthor(line: string): InlineSplitResult {
     return { didSplit: false, title: null, author: null, confidence: 0, reason: 'too_short' };
   }
 
+  // OCR sometimes fuses title and author with a hyphen and no surrounding spaces
+  // (e.g., "POISON IN THE PEN-Patricia Wentworth"). Split those boundaries first.
+  const splitReady = trimmed
+    .replace(/\b([A-Z]{2,})[-–—](?=[A-Z][a-z]{2,}\b)/g, '$1 ')
+    .replace(/\b([A-Z]{2,})[-–—](?=[A-Z]{2,}\b)/g, '$1 ');
+
   // Pattern 1: Explicit " by " separator (case-insensitive)
-  const byMatch = trimmed.match(/^(.+?)\s+by\s+(.+)$/i);
+  const byMatch = splitReady.match(/^(.+?)\s+by\s+(.+)$/i);
   if (byMatch) {
     const titlePart = byMatch[1].trim();
     const authorPart = cleanupPossessiveNoise(byMatch[2].trim());
@@ -729,7 +735,7 @@ export function splitInlineTitleAuthor(line: string): InlineSplitResult {
 
   // Pattern 2: Title-like prefix + person-like suffix
   // Look for transition from title words to name words
-  const words = trimmed.split(/\s+/);
+  const words = splitReady.split(/\s+/);
 
   if (words.length < 3) {
     return { didSplit: false, title: null, author: null, confidence: 0, reason: 'insufficient_words' };
