@@ -1334,8 +1334,11 @@ export function scoreCandidate(
     }
   }
 
-  const titleTokenSet = new Set(titleTokens);
   const authorTokenSet = new Set(authorTokens);
+  // A title word that is also the author's name ("The live Albom" by Mitch Albom) is
+  // already explained by the author line, so it can't also count as title evidence.
+  const titleOnlyTokens = titleTokens.filter((token) => !authorTokenSet.has(token));
+  const titleTokenSet = new Set(titleOnlyTokens.length > 0 ? titleOnlyTokens : titleTokens);
   const candidateTokenSet = new Set([...titleTokenSet, ...authorTokenSet]);
   const candidateTokens = Array.from(candidateTokenSet);
   const matchingEvidenceTokenSet = buildMatchingEvidenceTokenSet(evidenceTokens);

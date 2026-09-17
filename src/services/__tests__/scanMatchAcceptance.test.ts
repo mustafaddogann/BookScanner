@@ -90,6 +90,20 @@ describe('real-scan matches that should be accepted', () => {
     expect(decision.decision).not.toBe('accept_medium');
   });
 
+  it('does not count an author-name word in a candidate title as title evidence', () => {
+    // Real scan: only "Mitch Albom" was readable; the wrong record "The live Albom" was auto-accepted
+    const decision = decide(
+      ['Mitch Albom', 'the ine', 'the for the'],
+      [
+        book('The live Albom', ['Mitch Albom'], 'OL1M'),
+        book('The Stranger in the Lifeboat', ['Mitch Albom'], 'OL2M'),
+        book('Tuesdays with Morrie', ['Mitch Albom'], 'OL3M'),
+      ]
+    );
+    expect(decision.decision).not.toBe('accept_medium');
+    expect(decision.decision).not.toBe('accept_high');
+  });
+
   it('shows the correctly spelled record when a typo record scores highest', () => {
     const decision = decide(
       ['THINKING,', 'FAST AND SLOW', 'DANIEL', 'KAHNEMAN'],
