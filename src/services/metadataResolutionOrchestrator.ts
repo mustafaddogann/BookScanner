@@ -966,7 +966,7 @@ export async function resolveBookCandidateByEvidence(
         manualReview: mergedDecisionResult.manualReview,
         reviewCandidates: mergedDecisionResult.reviewCandidates,
         scoredCandidates: mergedCandidates,
-        topCandidate: mergedCandidates[0] || null,
+        topCandidate: mergedDecisionResult.topCandidate ?? mergedCandidates[0] ?? null,
         pass1Decision,
         boostTriggered: true,
         queriesTriedCount: pass1Result.queriesTriedCount + pass2Result.queriesTriedCount,

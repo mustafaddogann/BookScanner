@@ -1436,11 +1436,25 @@ export function scoreCandidate(
   const authorTokenCount = authorTokenSet.size;
   let authorScore: number | null = null;
   if (authorTokenCount > 0) {
-    const authorPrecision =
-      effectiveEvidenceTokenCount > 0
-        ? authorOnlyResult.overlapCount / effectiveEvidenceTokenCount
-        : 0;
-    const authorRecall = authorOnlyResult.overlapCount / authorTokenCount;
+    // Measure author evidence against the tokens the title didn't explain, and per author:
+    // spines usually print only a surname, and multi-author books list one or two names.
+    const titleMatchedEvidenceCount = titleOnlyResult.matchedPairs.length;
+    const evidenceLeftForAuthor = Math.max(
+      1,
+      effectiveEvidenceTokenCount - titleMatchedEvidenceCount - nonLexicalEvidenceCount
+    );
+    const authorPrecision = Math.min(1, authorOnlyResult.overlapCount / evidenceLeftForAuthor);
+    const matchedAuthorTokenSet = new Set(authorOnlyResult.matched);
+    let authorRecall = 0;
+    for (const author of candidate.authors || []) {
+      const tokens = normalizeForScoring(author);
+      if (tokens.length === 0) continue;
+      const surname = tokens[tokens.length - 1];
+      const recallForAuthor = matchedAuthorTokenSet.has(surname)
+        ? 1
+        : tokens.filter((t) => matchedAuthorTokenSet.has(t)).length / tokens.length;
+      authorRecall = Math.max(authorRecall, recallForAuthor);
+    }
     authorScore =
       authorPrecision + authorRecall > 0
         ? (2 * authorPrecision * authorRecall) / (authorPrecision + authorRecall)
@@ -1918,8 +1932,14 @@ export interface DecisionResult {
  * Used to find distinct second candidate for gap computation.
  */
 function isSameBook(a: ScoredCandidate, b: ScoredCandidate): boolean {
+  // Bracketed edition notes ("[adaptation]", "(Penguin Classics)") don't make a different work.
   const normalizeTitle = (t: string) =>
-    t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    t
+      .replace(/\s*[[(][^\])]*[\])]\s*/g, ' ')
+      .normalize('NFD')
+      .replace(/[̀-ͯ]/g, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]/g, '');
   const titleA = normalizeTitle(a.book.title || '');
   const titleB = normalizeTitle(b.book.title || '');
   if (titleA.length === 0 || titleB.length === 0) return false;
@@ -1971,6 +1991,38 @@ function isDerivativeOf(candidate: ScoredCandidate, work: ScoredCandidate): bool
     workSurnames.some((s) => candidateTitle.includes(s)) ||
     DERIVATIVE_TITLE_PATTERN.test(rawTitle)
   );
+}
+
+// The top-scoring record can be a typo'd catalog entry ("thiking fast and slow").
+// Among records of the same work, show the spelling most other results agree with,
+// keeping the top record's score.
+function withBestSpelledRecord(candidates: ScoredCandidate[]): ScoredCandidate {
+  const top = candidates[0];
+  const normalize = (t: string) =>
+    t.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const sameWork: ScoredCandidate[] = [top];
+  for (let i = 1; i < candidates.length; i++) {
+    if (sameWork.some((member) => isSameBook(member, candidates[i]))) {
+      sameWork.push(candidates[i]);
+    }
+  }
+  if (sameWork.length === 1) return top;
+
+  const allTitles = candidates.map((c) => normalize(c.book.title || ''));
+  const support = (member: ScoredCandidate) => {
+    const title = normalize(member.book.title || '');
+    return allTitles.filter((t) => t.includes(title)).length;
+  };
+  let best = top;
+  let bestSupport = support(top);
+  for (const member of sameWork.slice(1)) {
+    const memberSupport = support(member);
+    if (memberSupport > bestSupport) {
+      best = member;
+      bestSupport = memberSupport;
+    }
+  }
+  return best === top ? top : { ...top, book: best.book };
 }
 
 function findDistinctSecond(
@@ -2070,7 +2122,7 @@ export function makeDecisionFromScores(
     };
   }
 
-  const top = scoredCandidates[0];
+  const top = withBestSpelledRecord(scoredCandidates);
   // Find distinct second candidate (different book, not just different edition)
   const distinctSecond = findDistinctSecond(top, scoredCandidates);
   // Gap = 1.0 if no distinct competitor (dominant by default)
@@ -2184,6 +2236,33 @@ export function makeDecisionFromScores(
   if (resolutionMode === 'WEAK_TITLE_STRONG_AUTHOR') {
     // Up-weight author match: if author tokens matched, score is more reliable
     const authorMatchCount = top.scoring.matchedAuthorTokens.length;
+
+    // Short but specific titles ("Think" + "BLACKBURN") are safe to accept when the
+    // whole title and an author's surname both matched and nothing else competes.
+    const matchedAuthorSet = new Set(top.scoring.matchedAuthorTokens);
+    const surnameMatched = (top.book.authors || []).some((author) => {
+      const tokens = normalizeForScoring(author);
+      return tokens.length > 0 && matchedAuthorSet.has(tokens[tokens.length - 1]);
+    });
+    const isSpecificShortTitleMatch =
+      top.scoring.titleOverlap === 1 &&
+      surnameMatched &&
+      !isGenericTitle(top.book.title || '') &&
+      top.scoring.score >= 0.75 &&
+      scoreGap >= ACCEPT_MEDIUM_GAP;
+
+    if (isSpecificShortTitleMatch) {
+      logGateDecision('accept_medium', 'short_title_surname_match', resolutionMode, top, debugContext);
+      return {
+        decision: 'accept_medium',
+        topCandidate: top,
+        reviewCandidates: [],
+        scoreGap,
+        reason: 'short_title_surname_match',
+        resolutionMode,
+        ambiguityMetrics,
+      };
+    }
 
     // If we have both title and author overlap, suggest
     if (top.scoring.overlapCount >= 2 && authorMatchCount >= 1) {

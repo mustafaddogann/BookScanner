@@ -407,9 +407,25 @@ export function extractIsbn(line: string): string | null {
  *
  * Returns wasWrapped: true if the line was fully wrapped in brackets (high-confidence author signal)
  */
+export function foldDiacritics(text: string): string {
+  // JS \w is ASCII-only, so unfolded letters split or drop words ("Ünal" -> "nal").
+  // ı/İ and the letters below have no NFD decomposition and need explicit mapping.
+  return text
+    .replace(/ı/g, 'i')
+    .replace(/İ/g, 'I')
+    .replace(/ß/g, 'ss')
+    .replace(/[øØ]/g, (c) => (c === 'ø' ? 'o' : 'O'))
+    .replace(/[łŁ]/g, (c) => (c === 'ł' ? 'l' : 'L'))
+    .replace(/[đĐ]/g, (c) => (c === 'đ' ? 'd' : 'D'))
+    .replace(/æ/g, 'ae')
+    .replace(/Æ/g, 'AE')
+    .normalize('NFD')
+    .replace(/[̀-ͯ]/g, '');
+}
+
 export function normalizeLine(line: string): { original: string; normalized: string; wasWrapped: boolean } {
   // Trim and collapse spaces
-  let cleaned = line.trim().replace(/\s+/g, ' ');
+  let cleaned = foldDiacritics(line).trim().replace(/\s+/g, ' ');
 
   // Check if entire line is wrapped in brackets/parens (e.g., "[NICHOLAS SPARKS]")
   // This is a strong signal for author names on spines

@@ -42,6 +42,17 @@ describe('ambiguity ignores other records of the same work', () => {
     expect(decision.scoreGap).toBe(1);
   });
 
+  it('treats bracketed edition notes as the same work (Five People scan)', () => {
+    const decision = decide(
+      ['the five people', 'you meet in heaven', 'Mitch Albom'],
+      [
+        book('The Five People You Meet in Heaven', 'Mitch Albom', 'OL1M'),
+        book('The Five People You Meet in Heaven [adaptation]', 'Mitch Albom', 'OL2M'),
+      ]
+    );
+    expect(decision.scoreGap).toBe(1);
+  });
+
   it('still flags two different books by the same author as ambiguous candidates', () => {
     const decision = decide(
       ['ISAAC ASIMOV', 'FOUNDATION'],
