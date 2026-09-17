@@ -70,7 +70,7 @@ describe('queryHypotheses', () => {
       const result = generateHypotheses(lines);
 
       const stripped = result.hypotheses.find(
-        (h) => h.type === 'stripped' && h.query.includes('GUARDIAN')
+        (h) => h.type === 'stripped' && h.query.toUpperCase().includes('GUARDIAN')
       );
       expect(stripped).toBeDefined();
     });
@@ -113,7 +113,8 @@ describe('queryHypotheses', () => {
 
       const fallback = result.hypotheses.find((h) => h.type === 'fallback');
       expect(fallback).toBeDefined();
-      expect(fallback?.query).toContain('The Shining');
+      // Queries are normalized to lowercase before searching
+      expect(fallback?.query.toLowerCase()).toContain('the shining');
     });
 
     it('limits number of hypotheses to max 5', () => {
@@ -171,7 +172,7 @@ describe('queryHypotheses', () => {
 
       // Should have stripped variant (without "THE")
       const stripped = result.hypotheses.find(
-        (h) => h.type === 'stripped' && h.query.includes('GATSBY')
+        (h) => h.type === 'stripped' && h.query.toUpperCase().includes('GATSBY')
       );
       expect(stripped).toBeDefined();
     });
@@ -383,9 +384,9 @@ describe('queryHypotheses', () => {
 
       const result = generateBoostHypotheses(lines, new Set());
 
-      // Should have split variants like "UN TANTOS"
+      // "UNTANTOS" is split into "UN TANTOS"; query normalization then drops the short "un"
       const splitHypotheses = result.hypotheses.filter(
-        (h) => h.query.includes('UN ') || h.query.includes('EN ')
+        (h) => h.explanation.startsWith('Word split') && h.query.toUpperCase() === 'TANTOS'
       );
       expect(splitHypotheses.length).toBeGreaterThan(0);
     });
@@ -412,7 +413,7 @@ describe('queryHypotheses', () => {
 
       // Should have variants like "NTANTOS" or "TANTOS"
       const dropStartHypotheses = result.hypotheses.filter(
-        (h) => h.query === 'NTANTOS' || h.query === 'TANTOS'
+        (h) => ['NTANTOS', 'TANTOS'].includes(h.query.toUpperCase())
       );
       expect(dropStartHypotheses.length).toBeGreaterThan(0);
     });
@@ -572,16 +573,14 @@ describe('queryHypotheses', () => {
       expect(hasFullAuthor).toBe(true);
     });
 
-    it('handles AGATHA CHRISTIE pattern from corrupted PIRA ACIA', () => {
-      // Book 2: Contains "PIRA ACIA" which might be corrupted "AGATHA CHRISTIE"
-      // While not a perfect match, we should try famous author patterns
+    it('corrects PIRA ACIA and MUKDERS in the same corrupted line', () => {
+      // Book 2: "PIRA ACIA" has no letter-level resemblance to a known author, so it is
+      // corrected via the PATRICIA confusion entry rather than guessed as a famous name.
       const lines = ['THE GOOD LUCK MUKDERS PIRA ACIA OKIE'];
       const result = generateBoostHypotheses(lines, new Set());
       const queries = result.hypotheses.map(h => h.query.toUpperCase());
 
-      // Should try AGATHA CHRISTIE as a known author pattern
-      const hasAgatha = queries.some(q => q.includes('AGATHA') || q.includes('CHRISTIE'));
-      expect(hasAgatha).toBe(true);
+      expect(queries.some(q => q.includes('GOOD LUCK MURDERS') && q.includes('PATRICIA'))).toBe(true);
     });
 
     // Tests for the specific rejected books from the issue

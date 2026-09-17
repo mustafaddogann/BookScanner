@@ -9,6 +9,15 @@ import type { ResolvedBook } from '../../types';
 const mockFetch = jest.fn();
 global.fetch = mockFetch;
 
+// These tests cover the Open Library API path; the Supabase catalog is off unless a test enables it.
+let mockSupabaseConfigured = false;
+jest.mock('../../config/supabase', () => ({
+  ...jest.requireActual('../../config/supabase'),
+  isSupabaseConfigured: () => mockSupabaseConfigured,
+  getSupabaseBaseUrl: () => 'https://catalog.test',
+  getSupabaseAnonKey: () => 'anon-key',
+}));
+
 // Mock useDebugStore
 jest.mock('../../store/useDebugStore', () => ({
   useDebugStore: {
@@ -48,6 +57,7 @@ function createMockBooksApiResponse(data: Record<string, any>) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockFetch.mockReset();
+  mockSupabaseConfigured = false;
 });
 
 // ============================================================================
@@ -165,6 +175,40 @@ describe('OpenLibraryProvider.searchByText', () => {
     const result = await provider.searchByText('a');
     expect(result).toEqual([]);
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+
+  it('returns catalog results without calling Open Library when the catalog has enough matches', async () => {
+    mockSupabaseConfigured = true;
+    const row = (id: string, title: string) => ({
+      id,
+      provider: 'openLibrary',
+      provider_id: id,
+      isbn13: null,
+      isbn10: null,
+      title,
+      authors: ['Stephen King'],
+      publisher: null,
+      publish_year: null,
+      cover_url: null,
+      resolver_key: `openlibrary:${id}`,
+      similarity_score: 0.9,
+    });
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve([
+          row('OL1M', 'The Shining'),
+          row('OL2M', 'The Shining (Anchor)'),
+          row('OL3M', 'Doctor Sleep'),
+        ]),
+    });
+
+    const result = await provider.searchByText('The Shining Stephen King');
+
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+    expect(mockFetch.mock.calls[0][0]).toBe('https://catalog.test/rest/v1/rpc/search_books_fuzzy');
+    expect(result.map((b) => b.title)).toEqual(['The Shining', 'The Shining (Anchor)', 'Doctor Sleep']);
+    expect(result[0].sourceId).toBe('openlibrary:OL1M');
   });
 
   it('searches and enriches results with ISBNs', async () => {

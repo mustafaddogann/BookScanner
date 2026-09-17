@@ -126,8 +126,9 @@ describe('candidateScoring', () => {
 
       expect(scoreWith.isbnMatched).toBe(true);
       expect(scoreWith.isbnBonus).toBeGreaterThan(0);
-      // ISBN match adds 0.15 bonus to score
-      expect(scoreWith.score).toBeGreaterThan(scoreWithout.score);
+      // Both can clamp to 1.0, so the bonus shows up in the pre-clamp score
+      expect(scoreWith.rawScore).toBeGreaterThan(scoreWithout.rawScore);
+      expect(scoreWith.score).toBeGreaterThanOrEqual(scoreWithout.score);
     });
 
     it('penalizes generic titles without author signal', () => {

@@ -1381,7 +1381,14 @@ function collectBoundaryBridgeQueries(evidenceLines: string[]): string[] {
     if (!leftTail || !rightHead) continue;
 
     // Recover line-break OCR splits like "FI" + "ACE".
-    if (leftTail.length <= 3 && rightHead.length >= 2 && rightHead.length <= 5) {
+    const isAlpha = (token: string) => /^[a-z]+$/.test(token);
+    if (
+      isAlpha(leftTail) &&
+      isAlpha(rightHead) &&
+      leftTail.length <= 3 &&
+      rightHead.length >= 2 &&
+      rightHead.length <= 5
+    ) {
       addQuery(`${leftRaw} ${rightRaw}`);
 
       const mergedBoundaryToken = `${leftTail}${rightHead}`;
@@ -1467,10 +1474,21 @@ function scoreLineForTitleQuery(line: string): number {
   const separatorCount = countMatches(line, /[-•]/g);
   const likelyAuthorListLine = separatorCount >= 2 && words.length >= 4;
 
+  // Known OCR corruptions can turn a name-shaped line into a title
+  // ("ILSOE VICTORY" -> "city of victory"); trust the corrected shape.
+  const correctedWords = (normalizeOcrQueryText(line) ?? '').split(/\s+/).filter(Boolean);
+  const correctionAddsConnector =
+    !hasConnector && correctedWords.some((word) => TITLE_CONNECTOR_WORDS.has(word));
+  const allNoise =
+    correctedWords.length === 0 ||
+    words.every((word) => OCR_QUERY_NOISE_TOKENS.has(word.toLowerCase()));
+
   let score = normalizedTokens.length * 2 + longWordCount;
-  if (looksLikeTitle(line)) score += 4;
-  if (hasConnector) score += 2;
-  if (looksLikePersonName(line)) score -= 5;
+  if (looksLikeTitle(line) || correctionAddsConnector) score += 4;
+  if (hasConnector || correctionAddsConnector) score += 2;
+  // Names don't contain "and"/"of"; title-cased titles often trip the name detector.
+  if (looksLikePersonName(line) && !correctionAddsConnector && !hasConnector) score -= 5;
+  if (allNoise) score -= 10;
   if (shortHeavy) score -= 5;
   // Favor strong one-line title anchors ("CARNIEPUNK"), and demote author/editor lists.
   if (words.length === 1 && words[0].length >= 8 && !mergedAuthorTokens) score += 6;
@@ -1553,14 +1571,16 @@ function pickDistinctiveTitleToken(normalizedTitle: string | null): string | nul
 
 function pickStandaloneTitleAnchor(
   evidence: EvidenceTokens,
-  sortedPhrases: string[]
+  sortedPhrases: string[],
+  authorLine: string | null
 ): string | null {
   const candidates = new Set<string>();
+  const normalizedAuthorLine = normalizeOcrQueryText(authorLine);
 
   const addCandidate = (line: string | null | undefined) => {
     if (!line) return;
     const normalizedLine = normalizeOcrQueryText(line);
-    if (!normalizedLine) return;
+    if (!normalizedLine || normalizedLine === normalizedAuthorLine) return;
 
     const tokens = normalizedLine.split(/\s+/).filter(Boolean);
     if (tokens.length === 0 || tokens.length > 3) return;
@@ -1651,10 +1671,19 @@ function pickBestTitleLine(
     addCandidate(line);
   }
 
+  // Merged lines like "THINKING, DANIEL KAHNEMAN R8R" carry a separate name line inside them.
+  const embeddedNames = evidence.personNameLines
+    .filter((line) => splitAlphaWords(line).length >= 2)
+    .map((line) => line.toLowerCase());
+  const embedsSeparateName = (candidate: string) => {
+    const lower = candidate.toLowerCase();
+    return embeddedNames.some((name) => name !== lower && lower.includes(name));
+  };
+
   let best: string | null = null;
   let bestScore = Number.NEGATIVE_INFINITY;
   for (const candidate of candidates) {
-    const score = scoreLineForTitleQuery(candidate);
+    const score = scoreLineForTitleQuery(candidate) - (embedsSeparateName(candidate) ? 8 : 0);
     if (score > bestScore || (score === bestScore && candidate.length > (best?.length ?? 0))) {
       best = candidate;
       bestScore = score;
@@ -1664,9 +1693,36 @@ function pickBestTitleLine(
   return best;
 }
 
-function pickBestAuthorLine(evidence: EvidenceTokens): string | null {
+// Title glue words that don't appear inside author names (unlike "de", "van", "ve").
+const AUTHOR_BLOCKING_WORDS = new Set(['the', 'a', 'an', 'of', 'and', 'in', 'on', 'to', 'for', 'with']);
+
+const alphaWordsLower = (line: string): string[] =>
+  line.toLowerCase().split(/[^a-z]+/).filter(Boolean);
+
+// A single title line split into "THE" + "GREAT GATSBY" is not a title/author pair.
+function authorRestatesTitle(title: string | null, author: string): boolean {
+  if (!title) return false;
+  const titleWords = alphaWordsLower(title);
+  const authorWords = alphaWordsLower(author).filter((w) => w.length > 1);
+  // Substring match also catches OCR-trimmed echoes ("GATSBY" -> "ATSBY").
+  const echoes = (a: string, b: string) => a.length >= 3 && b.includes(a);
+  if (
+    authorWords.length === 0 ||
+    !authorWords.every((aw) => titleWords.some((tw) => echoes(aw, tw)))
+  ) {
+    return false;
+  }
+  return titleWords.every(
+    (tw) => TITLE_CONNECTOR_WORDS.has(tw) || authorWords.some((aw) => echoes(aw, tw))
+  );
+}
+
+function pickBestAuthorLine(evidence: EvidenceTokens, bestTitle: string | null = null): string | null {
   const looksPlausibleAuthor = (line: string): boolean => {
     if (!line || /\d/.test(line)) return false;
+    const lineWords = alphaWordsLower(line);
+    if (lineWords.length === 0 || lineWords.some((w) => AUTHOR_BLOCKING_WORDS.has(w))) return false;
+    if (authorRestatesTitle(bestTitle, line)) return false;
 
     const mergedAuthorTokens = getMergedAuthorLikeTokens(line);
     if (mergedAuthorTokens) return true;
@@ -1692,8 +1748,20 @@ function pickBestAuthorLine(evidence: EvidenceTokens): string | null {
   }
 
   if (evidence.recoveredAuthorCandidates.length > 0) {
+    // On confidence ties prefer name-shaped lines ("Mitch Albom") over longer OCR junk
+    // ("You e tie percien") that the person detector also accepted.
+    const nameShape = (line: string) => {
+      const rawWords = line.split(/\s+/).filter(Boolean);
+      const strayLetters = rawWords.filter((w) => /^[A-Za-z]$/.test(w)).length;
+      return (rawWords.length === 2 || rawWords.length === 3 ? 1 : 0) - strayLetters;
+    };
     const recovered = [...evidence.recoveredAuthorCandidates]
-      .sort((a, b) => b.confidence - a.confidence || b.line.length - a.line.length)
+      .sort(
+        (a, b) =>
+          b.confidence - a.confidence ||
+          nameShape(b.line) - nameShape(a.line) ||
+          b.line.length - a.line.length
+      )
       .find((candidate) => candidate.confidence >= 0.55 && looksPlausibleAuthor(candidate.line));
     if (recovered?.line) {
       return recovered.line;
@@ -1705,17 +1773,20 @@ function pickBestAuthorLine(evidence: EvidenceTokens): string | null {
     if (plausiblePerson) {
       return plausiblePerson;
     }
-    return evidence.personNameLines[0];
+    if (!authorRestatesTitle(bestTitle, evidence.personNameLines[0])) {
+      return evidence.personNameLines[0];
+    }
   }
 
   for (const line of evidence.cleanedLines) {
     const mergedAuthorTokens = getMergedAuthorLikeTokens(line);
-    if (mergedAuthorTokens) {
+    if (mergedAuthorTokens && !authorRestatesTitle(bestTitle, mergedAuthorTokens.join(' '))) {
       return mergedAuthorTokens.join(' ');
     }
   }
 
-  return evidence.advancedExtraction?.author ?? null;
+  const extractedAuthor = evidence.advancedExtraction?.author;
+  return extractedAuthor && looksPlausibleAuthor(extractedAuthor) ? extractedAuthor : null;
 }
 
 /**
@@ -1792,7 +1863,7 @@ export function generateHypotheses(
   const sortedByLength = sortEvidencePhrasesByQuality(evidence.candidatePhrases);
 
   const bestTitle = pickBestTitleLine(evidence, sortedByLength);
-  const bestAuthor = pickBestAuthorLine(evidence);
+  const bestAuthor = pickBestAuthorLine(evidence, bestTitle);
 
   // OCR-normalized variants for typo-heavy spines (FAVE->FAYE, ACAID->NGAIO, etc.).
   const normalizedBestAuthor = normalizeOcrQueryText(bestAuthor);
@@ -1825,12 +1896,13 @@ export function generateHypotheses(
   const normalizedDistinctiveTitleToken = pickDistinctiveTitleToken(
     normalizedBestTitleCore ?? normalizedBestTitleSansAuthor ?? normalizedBestTitle
   );
-  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength);
+  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength, bestAuthor);
   const normalizedBestAuthorSurname = extractAuthorSurname(normalizedBestAuthor);
-  const supplementalRawSignalTokens = collectSupplementalRawSignalTokens(
-    evidenceLines,
-    evidence.tokensSet
-  );
+  // Raw tokens the cleaner dropped can recover a lost author; with an author in hand
+  // they are mostly publisher/badge noise ("ZEBRA", "NEW FORK").
+  const supplementalRawSignalTokens = bestAuthor
+    ? []
+    : collectSupplementalRawSignalTokens(evidenceLines, evidence.tokensSet);
   const boundaryBridgeQueries = collectBoundaryBridgeQueries(evidenceLines);
 
   const normalizedTitleChanged = queryChangedAfterNormalization(
@@ -1860,9 +1932,13 @@ export function generateHypotheses(
   }
 
   if (normalizedBestTitleSansAuthor && normalizedTitleChanged) {
+    const onlyArticleStripped =
+      bestTitle !== null &&
+      stripLeadingArticle(bestTitle) !== bestTitle &&
+      normalizeOcrQueryText(stripLeadingArticle(bestTitle)) === normalizedBestTitleSansAuthor;
     addHypothesis(
       normalizedBestTitleSansAuthor,
-      'title_only',
+      onlyArticleStripped ? 'stripped' : 'title_only',
       9.05,
       `OCR-normalized title-only: "${normalizedBestTitleSansAuthor}"`
     );
@@ -1893,9 +1969,13 @@ export function generateHypotheses(
     connectorReducedNormalizedTitle &&
     connectorReducedNormalizedTitle !== normalizedBestTitleSansAuthor
   ) {
+    const isArticleStrippedTitle =
+      bestTitle !== null &&
+      stripLeadingArticle(bestTitle) !== bestTitle &&
+      normalizeOcrQueryText(stripLeadingArticle(bestTitle)) === connectorReducedNormalizedTitle;
     addHypothesis(
       connectorReducedNormalizedTitle,
-      'title_only',
+      isArticleStrippedTitle ? 'stripped' : 'title_only',
       9.06,
       `Connector-reduced title variant: "${connectorReducedNormalizedTitle}"`
     );
@@ -2122,7 +2202,7 @@ export function generateHypotheses(
     addHypothesis(
       bestTitle,
       'title_only',
-      20,
+      12.5,
       `Title-only: "${bestTitle}"`
     );
   }
@@ -2173,14 +2253,14 @@ export function generateHypotheses(
         addHypothesis(
           `${stripped} ${bestAuthor}`,
           'stripped',
-          30,
+          11,
           `Stripped "${stripped}" + author "${bestAuthor}"`
         );
       } else {
         addHypothesis(
           stripped,
           'stripped',
-          31,
+          11.5,
           `Stripped title: "${stripped}"`
         );
       }
@@ -2399,7 +2479,7 @@ export function generateBoostHypotheses(
   const sortedByLength = sortEvidencePhrasesByQuality(evidence.candidatePhrases);
 
   const bestTitle = pickBestTitleLine(evidence, sortedByLength);
-  const bestAuthor = pickBestAuthorLine(evidence);
+  const bestAuthor = pickBestAuthorLine(evidence, bestTitle);
   const normalizedBestAuthor = normalizeOcrQueryText(bestAuthor);
   const normalizedBestTitle = normalizeOcrQueryText(bestTitle);
   const normalizedBestTitleSansAuthor = stripAuthorTailFromTitle(
@@ -2430,12 +2510,13 @@ export function generateBoostHypotheses(
   const normalizedDistinctiveTitleToken = pickDistinctiveTitleToken(
     normalizedBestTitleCore ?? normalizedBestTitleSansAuthor ?? normalizedBestTitle
   );
-  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength);
+  const standaloneTitleAnchor = pickStandaloneTitleAnchor(evidence, sortedByLength, bestAuthor);
   const normalizedBestAuthorSurname = extractAuthorSurname(normalizedBestAuthor);
-  const supplementalRawSignalTokens = collectSupplementalRawSignalTokens(
-    evidenceLines,
-    evidence.tokensSet
-  );
+  // Raw tokens the cleaner dropped can recover a lost author; with an author in hand
+  // they are mostly publisher/badge noise ("ZEBRA", "NEW FORK").
+  const supplementalRawSignalTokens = bestAuthor
+    ? []
+    : collectSupplementalRawSignalTokens(evidenceLines, evidence.tokensSet);
   const boundaryBridgeQueries = collectBoundaryBridgeQueries(evidenceLines);
   const normalizedTitleChanged = queryChangedAfterNormalization(
     bestTitle,
@@ -2741,7 +2822,7 @@ export function generateBoostHypotheses(
   // Use high-signal trailing title tokens (e.g., "DARKNESS") even when
   // full title extraction is noisy.
   {
-    const bestAuthorLine = pickBestAuthorLine(evidence);
+    const bestAuthorLine = pickBestAuthorLine(evidence, pickBestTitleLine(evidence, sortedByLength));
     const authorSurname = extractAuthorSurname(bestAuthorLine);
     if (authorSurname) {
       const seenTailTokens = new Set<string>();
@@ -2825,7 +2906,7 @@ export function generateBoostHypotheses(
   // =========================================================================
   // Strategy 4k: Split fused joiners (e.g., "STRAIGHIINTO" -> "STRAIGHI INTO")
   // =========================================================================
-  const fusedJoiners = ['INTO', 'AND', 'WITH', 'FROM', 'THE', 'OF'];
+  const fusedJoiners = ['INTO', 'AND', 'WITH', 'FROM', 'THE', 'OF', 'ILE', 'VE', 'IN'];
   for (const line of sortedByLength.slice(0, 4)) {
     const tokens = line.split(/\s+/).filter(Boolean);
     let madeChange = false;
@@ -2854,7 +2935,7 @@ export function generateBoostHypotheses(
       addHypothesis(
         splitTokens.join(' '),
         'boost_partial',
-        132.5,
+        99.05,
         `Fused joiner split: "${splitTokens.join(' ')}"`
       );
     }
@@ -2896,10 +2977,12 @@ export function generateBoostHypotheses(
     [/\bFIKST\b/gi, 'FIRST'],
   ];
 
-  for (const line of sortedByLength.slice(0, 5)) {
+  // Table-driven corrections are high-signal, so they rank right after the seeds;
+  // otherwise brute-force variants fill the PASS2 cap before they're reached.
+  for (const line of sortedByLength.slice(0, 8)) {
     const corrected = safeApplyReplacements(line, ocrConfusions);
     if (corrected !== line) {
-      addHypothesis(corrected, 'boost_partial', 138, `OCR confusion fix: "${corrected}"`);
+      addHypothesis(corrected, 'boost_partial', 99.02, `OCR confusion fix: "${corrected}"`);
     }
   }
 
@@ -2975,6 +3058,7 @@ export function generateBoostHypotheses(
     [/\bACAID\b/gi, 'NGAIO'],
     [/\bAGAID\b/gi, 'NGAIO'],
     [/\bJOH\b(?!\s+\w)/gi, 'JOHN'],
+    [/\bDEAN\s+KO(?:O|ON|ONT)?\b/gi, 'DEAN KOONTZ'],
     [/\bNGAI(O)?\b/gi, 'NGAIO'],
     [/\bMARS(H)?\b/gi, 'MARSH'],
     [/\bWARSH\b/gi, 'MARSH'],
@@ -2989,10 +3073,10 @@ export function generateBoostHypotheses(
     [/\bWOOL?\b/gi, 'WOOL'],
   ];
 
-  for (const line of sortedByLength.slice(0, 5)) {
+  for (const line of sortedByLength.slice(0, 8)) {
     const completed = safeApplyReplacements(line, nameCompletions);
     if (completed !== line) {
-      addHypothesis(completed, 'boost_partial', 148, `Name completion: "${completed}"`);
+      addHypothesis(completed, 'boost_partial', 99.03, `Name completion: "${completed}"`);
     }
   }
 
@@ -3003,6 +3087,8 @@ export function generateBoostHypotheses(
     [/\bONF\b/gi, 'ONE'],
     [/\bMUKDERS\b/gi, 'MURDERS'],
     [/\bTHF\b/gi, 'THE'],
+    [/\bTIE\b(?=\s+[A-Za-z])/gi, 'THE'],
+    [/\bQUI?C?K?OLER\b/gi, 'CUSSLER'],
     [/\bAHD\b/gi, 'AND'],
     [/\bFOR\b/gi, 'FOR'],
     [/\bYOUR\b/gi, 'YOUR'],
@@ -3041,10 +3127,10 @@ export function generateBoostHypotheses(
     [/\bPIRA ACIA\b/gi, 'PATRICIA'],
   ];
 
-  for (const line of sortedByLength.slice(0, 5)) {
+  for (const line of sortedByLength.slice(0, 8)) {
     const corrected = safeApplyReplacements(line, letterConfusions);
     if (corrected !== line && corrected.length >= MIN_QUERY_LENGTH) {
-      addHypothesis(corrected, 'boost_partial', 148.5, `OCR confusion fix: "${corrected}"`);
+      addHypothesis(corrected, 'boost_partial', 99.04, `OCR confusion fix: "${corrected}"`);
     }
   }
 

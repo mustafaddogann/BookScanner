@@ -194,8 +194,9 @@ describe('ISBN Token Filtering', () => {
     });
 
     it('detects mostly-numeric tokens', () => {
-      expect(isIsbnLikeToken('12345678')).toBe(true); // >70% digits
-      expect(isIsbnLikeToken('123abc45')).toBe(true); // 5/8 = 62.5% < 70%? Let's check...
+      expect(isIsbnLikeToken('12345678')).toBe(true); // 100% digits
+      expect(isIsbnLikeToken('1234567a')).toBe(true); // 87.5% digits
+      expect(isIsbnLikeToken('123abc45')).toBe(false); // 62.5% digits, under the 70% cutoff
     });
 
     it('does not flag normal text tokens', () => {

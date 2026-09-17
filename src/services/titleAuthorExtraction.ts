@@ -755,6 +755,11 @@ export function splitInlineTitleAuthor(line: string): InlineSplitResult {
     // Author must be 2-4 words
     if (authorWords.length < 2 || authorWords.length > 4) continue;
 
+    // A title can't be just articles/prepositions ("THE" + "GREAT GATSBY"),
+    // and an author name doesn't contain one ("A BRIEF" + "HISTORY OF TIME").
+    if (titleWords.every((w) => /^(the|a|an|of|and|in|on|to)$/i.test(w))) continue;
+    if (authorWords.some((w) => /^(the|a|an|of|and|in|on|to|for|with)$/i.test(w))) continue;
+
     // Check if author part looks like a person name
     const authorScore = scoreAsPersonName(authorPart);
     if (authorScore < 0.5) continue;

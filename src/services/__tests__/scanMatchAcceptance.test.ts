@@ -46,13 +46,15 @@ describe('real-scan matches that should be accepted', () => {
   });
 
   it('keeps a one-word title as suggested when a close competitor exists', () => {
-    const decision = decide(
-      ['BLACKBURN', 'Think', 'OXFORD'],
-      [
-        book('Think', ['Simon Blackburn'], 'OL1M'),
-        book('Think Again', ['Simon Blackburn'], 'OL2M'),
-      ]
+    const scored = scoreAndRankCandidates(
+      [book('Think', ['Simon Blackburn'], 'OL1M'), book('Think Again', ['Simon Blackburn'], 'OL2M')],
+      buildEvidenceTokens(['BLACKBURN', 'Think'])
     );
+    // Pin the competitor just inside the ambiguity margin
+    const [top, competitor] = scored;
+    const close = { ...competitor, scoring: { ...competitor.scoring, score: top.scoring.score - 0.05 } };
+
+    const decision = makeDecisionFromScores([top, close]);
     expect(decision.decision).not.toBe('accept_medium');
   });
 

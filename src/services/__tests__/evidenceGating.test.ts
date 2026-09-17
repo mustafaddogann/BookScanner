@@ -12,6 +12,7 @@ import {
   makeDecisionFromScores,
   scoreAndRankCandidates,
 } from '../candidateScoring';
+import type { ResolvedBook } from '../../types';
 
 describe('normalizeLine bracket stripping', () => {
   it('strips brackets from fully wrapped lines', () => {
@@ -92,12 +93,13 @@ describe('buildEvidenceTokens with brackets', () => {
 });
 
 describe('WEAK_TITLE_STRONG_AUTHOR gating', () => {
-  const mockBook = {
+  const mockBook: ResolvedBook = {
     title: 'The Guardian',
     authors: ['Nicholas Sparks'],
-    olid: 'OL123W',
-    source: 'openlibrary' as const,
+    source: 'openLibrary',
+    sourceId: 'OL123W',
   };
+  const oneWordBook: ResolvedBook = { ...mockBook, title: 'Guardian' };
 
   it('does NOT reject when title is weak but author evidence is strong', () => {
     // Evidence: FICTION, [NICHOLAS SPARKS], THE, GUARDIAN
@@ -109,21 +111,21 @@ describe('WEAK_TITLE_STRONG_AUTHOR gating', () => {
     const scored = scoreAndRankCandidates([mockBook], evidenceTokens);
     const decision = makeDecisionFromScores(scored);
 
-    // Should NOT be reject - should be suggested or suggested_weak
+    // "The Guardian" counts as a two-word title, so exact title + full author name is accepted
     expect(decision.decision).not.toBe('reject');
-    expect(['suggested', 'suggested_weak']).toContain(decision.decision);
+    expect(['accept_medium', 'suggested', 'suggested_weak']).toContain(decision.decision);
   });
 
-  it('uses WEAK_TITLE_STRONG_AUTHOR resolution mode', () => {
-    const lines = ['[NICHOLAS SPARKS]', 'GUARDIAN'];
-    const evidenceTokens = buildEvidenceTokens(lines);
+  it('uses WEAK_TITLE_STRONG_AUTHOR resolution mode for one-word titles', () => {
+    const evidenceTokens = buildEvidenceTokens(['[NICHOLAS SPARKS]', 'GUARDIAN']);
 
-    const score = scoreCandidate(mockBook, evidenceTokens);
+    expect(scoreCandidate(oneWordBook, evidenceTokens).resolutionMode).toBe('WEAK_TITLE_STRONG_AUTHOR');
+  });
 
-    // With only 1 title token but strong author, should use WEAK_TITLE_STRONG_AUTHOR
-    if (score.titleTokenCount < 2 && evidenceTokens.bestAuthorConfidence >= 0.75) {
-      expect(score.resolutionMode).toBe('WEAK_TITLE_STRONG_AUTHOR');
-    }
+  it('counts leading articles toward title length', () => {
+    const evidenceTokens = buildEvidenceTokens(['[NICHOLAS SPARKS]', 'GUARDIAN']);
+
+    expect(scoreCandidate(mockBook, evidenceTokens).resolutionMode).toBe('FULL_MATCH');
   });
 
   it('still rejects when both title AND author evidence are weak', () => {

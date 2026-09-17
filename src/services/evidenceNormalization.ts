@@ -322,6 +322,8 @@ const PUBLISHER_NOISE = new Set([
   'zebra', // Zebra Books imprint
   'jove', // Jove Books imprint
   'kensington', // Kensington Publishing
+  'oxford', // Oxford University Press spine mark
+  'wadsworth', // Wadsworth/Cengage spine mark
   // Truncated publisher names from OCR
   'berkl',  // Truncated BERKLEY
   'berkel', // Truncated BERKLEY variant
@@ -642,6 +644,24 @@ export function isNoiseLine(normalized: string): boolean {
 /**
  * Check if a line contains marketing content
  */
+const MARKETING_PHRASE_PATTERNS = [...MARKETING_PHRASES]
+  .sort((a, b) => b.length - a.length)
+  .map(
+    (phrase) =>
+      new RegExp(
+        `(^|[^a-z0-9])${phrase.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').replace(/\s+/g, '\\s+')}(?![a-z0-9])`,
+        'gi'
+      )
+  );
+
+export function removeMarketingPhrases(line: string): string {
+  let result = line;
+  for (const pattern of MARKETING_PHRASE_PATTERNS) {
+    result = result.replace(pattern, '$1 ');
+  }
+  return result.replace(/\s+/g, ' ').trim();
+}
+
 export function isMarketingLine(normalized: string): boolean {
   for (const phrase of MARKETING_PHRASES) {
     if (normalized.includes(phrase)) {
@@ -930,16 +950,24 @@ export function buildEvidenceTokens(
       continue;
     }
 
-    // Skip pure marketing
+    // Drop marketing phrases but keep whatever else shares the line
+    // ("HEAVI A FARGO ADV ... TIMES BESTSELLING AUTHOR" still carries the title).
+    let lineOriginal = original;
+    let lineNormalized = normalized;
     if (isMarketingLine(normalized)) {
-      continue;
+      const remainder = normalizeLine(removeMarketingPhrases(original));
+      if (!/[a-z]{3,}/.test(remainder.normalized) || isNoiseLine(remainder.normalized)) {
+        continue;
+      }
+      lineOriginal = remainder.original;
+      lineNormalized = remainder.normalized;
     }
 
-    cleanedLines.push(original);
+    cleanedLines.push(lineOriginal);
 
     // Tokenize - filter out stop tokens, numeric tokens, and ISBN-like tokens
     // This ensures ISBN-like strings from spine OCR don't affect scoring
-    const tokens = tokenize(normalized);
+    const tokens = tokenize(lineNormalized);
     for (const token of tokens) {
       // Skip stop tokens (genre words, common words)
       if (isStopToken(token)) {
@@ -958,16 +986,16 @@ export function buildEvidenceTokens(
     }
 
     // Check if this is a candidate phrase (has enough content)
-    const letterCount = (original.match(/[a-zA-Z]/g) || []).length;
+    const letterCount = (lineOriginal.match(/[a-zA-Z]/g) || []).length;
     if (letterCount >= 3 && tokens.length >= 1) {
-      candidatePhrases.push(original);
+      candidatePhrases.push(lineOriginal);
 
       // Classify as person name or title
-      if (looksLikePersonName(original)) {
-        personNameLines.push(original);
+      if (looksLikePersonName(lineOriginal)) {
+        personNameLines.push(lineOriginal);
       }
-      if (looksLikeTitle(original)) {
-        titleLikeLines.push(original);
+      if (looksLikeTitle(lineOriginal)) {
+        titleLikeLines.push(lineOriginal);
       }
     }
   }
@@ -1220,7 +1248,8 @@ export function recoverAuthorCandidates(
  * Strip common articles from beginning of line
  */
 export function stripLeadingArticle(line: string): string {
-  return line.replace(/^(the|a|an)\s+/i, '');
+  // "THE5 LOVE LANGUAGES": OCR can fuse a digit onto the article.
+  return line.replace(/^(the|a|an)\d*\s+/i, '');
 }
 
 /**
