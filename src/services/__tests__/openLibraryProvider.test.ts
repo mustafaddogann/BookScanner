@@ -211,6 +211,43 @@ describe('OpenLibraryProvider.searchByText', () => {
     expect(result[0].sourceId).toBe('openlibrary:OL1M');
   });
 
+  it('falls back to the catalog when Open Library finds nothing for any hypothesis', async () => {
+    mockSupabaseConfigured = true;
+    mockFetch.mockImplementation((url: string) => {
+      if (url.includes('search_books_fuzzy')) {
+        return Promise.resolve({
+          ok: true,
+          json: () =>
+            Promise.resolve([
+              {
+                id: 'c1',
+                provider: 'openLibrary',
+                provider_id: 'OL55667289M',
+                isbn13: null,
+                isbn10: null,
+                title: 'Hasir Risalesi',
+                authors: ['Said Nursi'],
+                publisher: null,
+                publish_year: '2012',
+                cover_url: null,
+                resolver_key: 'openlibrary:OL55667289M',
+                similarity_score: 0.5,
+              },
+            ]),
+        });
+      }
+      return Promise.resolve(createMockSearchResponse([]));
+    });
+
+    const result = await provider.searchByEvidence(['Hasir Misalest']);
+
+    expect(result.scoredCandidates.map((c) => c.book.title)).toContain('Hasir Risalesi');
+    // A title-only fuzzy catalog hit is shown for review, not auto-accepted
+    expect(result.decision).toBe('suggested');
+    expect(result.reason).toBe('catalog_fallback_unanchored');
+    expect(mockFetch.mock.calls.some(([url]) => String(url).includes('search.json'))).toBe(true);
+  });
+
   it('searches and enriches results with ISBNs', async () => {
     // Mock search API response
     const searchResponse = createMockSearchResponse([

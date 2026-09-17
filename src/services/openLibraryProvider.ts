@@ -286,6 +286,8 @@ function catalogRowToBook(row: CatalogRow): ResolvedBook {
  * Search the local Supabase books_catalog via pg_trgm fuzzy search.
  * Returns results quickly from the pre-populated catalog.
  */
+const CATALOG_FALLBACK_QUERY_LIMIT = 3;
+
 async function searchCatalog(query: string, limit: number = 5): Promise<ResolvedBook[]> {
   if (!isSupabaseConfigured()) return [];
 
@@ -860,6 +862,28 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
           error: e.message,
           pass,
         });
+      }
+    }
+
+    // Open Library can miss badly misread titles ("Hasir Misalest") that our own catalog
+    // still matches by trigram similarity; scoring and gates below still decide.
+    if (allCandidates.length === 0) {
+      const fallbackQueries = [
+        ...new Set(hypotheses.filter((h) => h.type !== 'isbn').map((h) => h.query)),
+      ].slice(0, CATALOG_FALLBACK_QUERY_LIMIT);
+      for (const query of fallbackQueries) {
+        const catalogResults = await searchCatalog(query, 5);
+        for (const result of catalogResults) {
+          if (result.sourceId && !seenOlids.has(result.sourceId)) {
+            seenOlids.add(result.sourceId);
+            allCandidates.push({ ...result, fromCatalogFallback: true });
+          }
+        }
+      }
+      if (allCandidates.length > 0) {
+        console.log(
+          `[OpenLibrary] Catalog fallback found ${allCandidates.length} candidates${candidateLabel}`
+        );
       }
     }
 

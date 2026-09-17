@@ -2111,6 +2111,24 @@ export function makeDecisionFromScores(
   isAfterBoostPass: boolean = false,
   debugContext?: GateDebugContext
 ): DecisionResult {
+  const result = decideFromScores(scoredCandidates, isAfterBoostPass, debugContext);
+  // Fuzzy catalog hits come back in small sets, which trips the "few candidates" signal;
+  // without an author surname they are shown for review instead of auto-accepted.
+  if (
+    result.decision === 'accept_medium' &&
+    result.topCandidate?.book.fromCatalogFallback &&
+    result.reason !== 'anchored_title_surname_match'
+  ) {
+    return { ...result, decision: 'suggested', reason: 'catalog_fallback_unanchored' };
+  }
+  return result;
+}
+
+function decideFromScores(
+  scoredCandidates: ScoredCandidate[],
+  isAfterBoostPass: boolean,
+  debugContext?: GateDebugContext
+): DecisionResult {
   // Note: Detailed instrumentation available via isMetadataVerboseDebug() in gate decision logs
 
   if (scoredCandidates.length === 0) {

@@ -954,6 +954,8 @@ export interface ResolvedBook {
    * Use as canonical reference for corrections linking.
    */
   bookId?: string;
+  /** Found only by the fuzzy catalog fallback after Open Library returned nothing */
+  fromCatalogFallback?: boolean;
 }
 
 /**

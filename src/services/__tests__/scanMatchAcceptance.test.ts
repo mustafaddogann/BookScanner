@@ -1,4 +1,4 @@
-import { buildEvidenceTokens, normalizeForScoring } from '../evidenceNormalization';
+import { buildEvidenceTokens, normalizeForScoring, splitJoinedWords } from '../evidenceNormalization';
 import { makeDecisionFromScores, scoreAndRankCandidates } from '../candidateScoring';
 import type { ResolvedBook } from '../../types';
 
@@ -18,6 +18,22 @@ describe('real-scan matches that should be accepted', () => {
     expect(normalizeForScoring('Ali Ünal')).toEqual(['ali', 'unal']);
     expect(normalizeForScoring('Öldürmek')).toEqual(['oldurmek']);
     expect(normalizeForScoring('Kısa')).toEqual(['kisa']);
+  });
+
+  it('splits words OCR joined at a case change, but not name prefixes', () => {
+    expect(splitJoinedWords('venderKahane')).toBe('vender Kahane');
+    expect(splitJoinedWords('yazarŞeker')).toBe('yazar Şeker');
+    for (const name of ['McDonald', 'MacDonald', 'DeLillo', 'LeBron', 'BALIKCIVE']) {
+      expect(splitJoinedWords(name)).toBe(name);
+    }
+  });
+
+  it('accepts a match whose author surname was joined to another word (Kahane)', () => {
+    const decision = decide(
+      ['venderKahane', 'Logic ans Contemporary Rhetoric'],
+      [book('Logic and contemporary rhetoric', ['Howard Kahane', 'Nancy Cavender'])]
+    );
+    expect(decision.decision).toBe('accept_medium');
   });
 
   it('accepts a full title with a surname-only author (Ünal)', () => {

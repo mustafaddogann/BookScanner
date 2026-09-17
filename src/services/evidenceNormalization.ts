@@ -409,6 +409,15 @@ export function extractIsbn(line: string): string | null {
  *
  * Returns wasWrapped: true if the line was fully wrapped in brackets (high-confidence author signal)
  */
+/**
+ * Split words OCR ran together at a lower-to-upper case change ("venderKahane" ->
+ * "vender Kahane"). Both halves need 3+ letters so names like McDonald, MacDonald
+ * and DeLillo stay intact.
+ */
+export function splitJoinedWords(line: string): string {
+  return line.replace(/([a-zà-öø-ÿğış]{3,})([A-ZÀ-ÖØ-ÞĞİŞ][a-zà-öø-ÿğış]{2,})/g, '$1 $2');
+}
+
 export function foldDiacritics(text: string): string {
   // JS \w is ASCII-only, so unfolded letters split or drop words ("Ünal" -> "nal").
   // ı/İ and the letters below have no NFD decomposition and need explicit mapping.
@@ -896,9 +905,10 @@ export interface BuildEvidenceTokensOptions {
  * @returns Processed evidence tokens
  */
 export function buildEvidenceTokens(
-  lines: string[],
+  rawLines: string[],
   options?: BuildEvidenceTokensOptions
 ): EvidenceTokens {
+  const lines = rawLines.map(splitJoinedWords);
   const sourceKind = options?.sourceKind ?? 'spine_crop';
 
   // Determine if ISBN extraction is allowed:
