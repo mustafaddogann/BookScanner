@@ -8,7 +8,9 @@
 
 ## 1. The idea in one sentence
 
-Point a phone at a bookshelf, take one photo, and get a structured list of every book on it (title, author, publisher, ISBN), without scanning barcodes one by one.
+Point a phone at a bookshelf, take one photo, and get a structured list of the visible books the system can resolve (title, author, publisher, ISBN), without scanning barcodes one by one.
+
+> **How to use this document.** Sections 1–8 are the talk, roughly one slide each. The appendices hold the technical detail for questions afterwards.
 
 ## 2. Why this problem
 
@@ -43,9 +45,17 @@ flowchart LR
 | Query generation | Builds up to 5 search queries, plus up to 25 in a second "boost" pass, correcting typical OCR errors (TIE→THE, joined words, missing letters) | TypeScript |
 | Search | Looks candidates up in public catalogs and in our own catalog | Open Library, Google Books, Supabase Postgres with trigram fuzzy search |
 | Decision | Scores each candidate and decides whether to auto-accept, suggest, or reject | Token-level F1 with OCR-aware fuzzy matching and ambiguity gates |
-| Learning loop | Accepted books are stored so future scans resolve faster and survive bad OCR | Supabase `books_catalog` |
+| Growing catalog | Accepted books are stored, so later scans have more to match against | Supabase `books_catalog` |
 
 Scans can run in the background while the user keeps shooting, and results are browsable per session and as an aggregated "My Shelf".
+
+**One real scan, stage by stage:**
+
+| The photo | What the detector found |
+|---|---|
+| ![A shelf photographed with the app](images/shelf-photo.jpg) | ![The same shelf with 18 detected spine boxes](images/shelf-detections.jpg) |
+
+Each box becomes its own straightened image, which is what the OCR reads.
 
 ## 4. Technical contributions
 
@@ -57,7 +67,7 @@ Scans can run in the background while the user keeps shooting, and results are b
    - Words joined by OCR ("venderKahane") are split.
    - Study guides ("William Golding's Lord of the Flies") and misspelled catalog records no longer count as competing matches.
    - Marketing badges are removed from a line instead of discarding the whole line.
-5. **Self-improving catalog.** When public catalogs return nothing for a badly read spine, the app searches our own catalog of previously accepted books with fuzzy matching, but only auto-accepts when an author surname confirms it.
+5. **A catalog that keeps expanding.** Every accepted book is stored, so the pool the app can search grows with use. This improves retrieval on later scans, especially for badly read spines; the model itself does not retrain.
 
 ## 5. Results so far
 
@@ -101,20 +111,18 @@ We photographed the same real bookshelf repeatedly while improving the resolver.
 | After query-generation fixes | 19 | 12 | 6 | 1 | 63% |
 | After threshold tuning | 19 | 12 | 5 | 2 | 63% |
 
-- **One wrong auto-accept in the scans we reviewed.** We checked the five most recent scans by hand; across them, 56 of 57 auto-accepted books were correct. The one error: only "Mitch Albom" was readable on a spine, and a catalog record titled "The live Albom" got title credit for the author's name. We fixed the scoring so a title word that is also the author's name no longer counts as title evidence, and added a regression test built from that spine.
+- **Precision of the auto-accepts: 56 of 57.** This is the share of *auto-accepted* books that were the right book, not the share of the shelf that was cataloged. Taking the most recent scan as an example: of 19 detected spines, 12 were auto-accepted, 5 were correct but needed one tap to confirm, and 2 were rejected. So 17 of 19 were resolved correctly, 12 of them with no user effort.
+- **The one wrong auto-accept.** Only "Mitch Albom" was readable on a spine, and a catalog record titled "The live Albom" got title credit for the author's name. We fixed the scoring so a title word that is also the author's name no longer counts as title evidence, and added a regression test built from that spine.
 - **Suggestions were mostly right, so we tuned the auto-accept rule on them.** Across 12 stored scans, 69 matches were only suggested. Suggestions scoring ≥ 0.65 with an author surname read from the spine were almost always correct. Applied to the stored scans, the new rule turns about 29 of the 69 into automatic accepts, and every one of them is a book that is actually on the shelf. One came from a crop that covered two spines, so it names the neighboring book.
 - **The two wrong high-scoring suggestions** we found are both still excluded, because neither had an author match.
 - **Not yet measured on a new scan:** the two most recent changes, fuzzy search in our own catalog and splitting joined words.
 
 ### 5.3 Engineering quality
 
-| Item | Value |
-|---|---|
-| Application code | ~53,500 lines of TypeScript (54 services, 9 screens, 11 components) |
-| Native iOS modules | ~2,600 lines of Objective-C |
-| Automated tests | 1,208 tests in 46 suites, all passing |
-| Static checks | 0 TypeScript errors, 0 lint errors |
-| Backend | Supabase (Postgres + edge function), 9 SQL migrations |
+- **Tested against real failures.** 1,208 automated tests in 46 suites, all passing. New tests are written from actual scans: the misspelled record, the joined author name, the wrong "Albom" match each have a regression test built from the spine text that caused them.
+- **Every change is checked.** Type checking and linting both run clean, so a refactor that breaks a contract fails immediately.
+- **Modular by pipeline stage.** Detection, rectification, OCR, evidence merging, query generation, scoring and decision each live in their own module with their own tests, so a stage can be swapped, for example a different OCR engine, without touching the rest.
+- **Reproducible.** Training, export and model inspection are scripted (`ml/scripts`, `tools/`), decision thresholds sit in one config file, and the database schema is versioned as 9 SQL migrations.
 
 ## 6. Honest limitations
 
@@ -153,8 +161,9 @@ Spine OCR lines: `THINKING,` / `FAST AND SLOW` / `DANIEL` / `KAHNEMAN`
 3. **Candidates:** "Thinking, fast and slow" (Kahneman), a misspelled catalog copy "thiking fast and slow", study guides and summaries.
 4. **Decision:** the misspelled copy and the study guides are recognized as the same work or derivatives, so they don't count as competitors. The title matches, the surname matches, and the score is high, so the book is **auto-accepted** and shown with the correctly spelled title.
 
-## Appendix B: Technology stack
+## Appendix B: Technology stack and project size
 
+- **Size:** about 53,500 lines of TypeScript across 54 services, 9 screens and 11 components, plus ~2,600 lines of native Objective-C and 9 SQL migrations.
 - **App:** React Native 0.83 (New Architecture, Hermes), TypeScript, Zustand, MMKV
 - **Vision:** react-native-vision-camera, react-native-fast-tflite, YOLO11n-OBB (Ultralytics), Apple Vision
 - **Backend:** Supabase (Postgres with `pg_trgm`, edge functions), Open Library and Google Books APIs
