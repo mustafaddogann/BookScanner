@@ -57,6 +57,13 @@ Scans can run in the background while the user keeps shooting, and results are b
 
 Each box becomes its own straightened image, which is what the OCR reads.
 
+**What the user sees.** Automatic matches are marked *Verified*; anything the app is unsure about waits as a suggestion the user confirms with one tap.
+
+| 17 September scan | 16 September scan |
+|---|---|
+| ![Results screen listing 16 books, all verified](images/results-screen.jpg) | ![Results screen listing 22 books, 19 verified](images/results-confirmed.jpg) |
+| 16 spines: 15 matched automatically, the last confirmed with one tap. | 22 spines: 14 automatic, 5 confirmed by the user, 1 left as a suggestion, 2 unresolved. |
+
 ## 4. Technical contributions
 
 1. **Spine detector trained for this task.** We trained an oriented-bounding-box model, because axis-aligned boxes overlap badly on tilted spines. We started from the public *Open Shelves* dataset and added our own annotated shelf photos (Section 5.1). The model runs on the phone, with no server needed for detection.
