@@ -51,17 +51,21 @@ Scans can run in the background while the user keeps shooting, and results are b
 
 **One real scan, stage by stage:**
 
-<img src="images/shelf-photo.jpg" alt="A shelf photographed with the app" width="320"> <img src="images/shelf-detections.jpg" alt="The same shelf with 18 detected spine boxes" width="320">
+![A shelf photographed with the app](images/shelf-photo.jpg)
 
-*Left: the photo, taken in the app. Right: the 18 spines the detector found. Each box becomes its own straightened image, which is what the OCR reads.*
+*The photo, taken in the app.*
+
+![The same shelf with 18 detected spine boxes](images/shelf-detections.jpg)
+
+*The 18 spines the detector found. Each box becomes its own straightened image, which is what the OCR reads.*
 
 **What the user sees.** Automatic matches are marked *Verified*; anything the app is unsure about waits as a suggestion the user confirms with one tap.
 
-<img src="images/results-screen.jpg" alt="Results screen listing 16 books, all verified" width="320">
+![Results screen listing 16 books, all verified](images/results-screen.jpg)
 
 *17 September: 16 spines. 15 matched automatically, the last confirmed with one tap.*
 
-<img src="images/results-confirmed.jpg" alt="Results screen listing 22 books, 19 verified" width="320">
+![Results screen listing 22 books, 19 verified](images/results-confirmed.jpg)
 
 *16 September: 22 spines. 14 automatic, 5 confirmed by the user, 1 left as a suggestion, 2 unresolved.*
 
@@ -139,11 +143,13 @@ We photographed the same real bookshelf repeatedly while improving the resolver.
 - **Evaluation scale:** our end-to-end numbers come from repeated scans of one real shelf. We do not yet have a large, labeled benchmark of shelves.
 - **A denser shelf is much harder.** On a bookstore shelf of mass-market paperbacks, an earlier build (February) resolved far less: of 19 detected spines, 7 were accepted, 10 were only suggested and 2 found nothing. We have not repeated this with the current build, so it is a warning sign rather than a measurement.
 
-<img src="images/bookstore-results.jpg" alt="Results for a bookstore shelf: 7 accepted, 10 suggested, 2 unresolved" width="320">
+![Results for a bookstore shelf: 7 accepted, 10 suggested, 2 unresolved](images/bookstore-results.jpg)
 
 *Tightly packed paperbacks, read at an angle: 7 accepted, 10 suggested, 2 unresolved. "DENTH OF A PEER / MONIG MARSH" is* Death of a Peer *by Ngaio Marsh; the misreadings defeated every query.*
 
-<img src="images/bookstore-collection-match.jpg" alt="A spine matched to Ngaio Marsh Collection instead of the individual title" width="320"> <img src="images/bookstore-omnibus-second.jpg" alt="Another spine matched to Stuart Woods Mixed" width="320">
+![A spine matched to Ngaio Marsh Collection instead of the individual title](images/bookstore-collection-match.jpg)
+
+![Another spine matched to Stuart Woods Mixed](images/bookstore-omnibus-second.jpg)
 
 *The same trap twice: catalogs carry omnibus records, so single spines matched "Ngaio Marsh Collection" and "Stuart Woods Mixed" instead of the individual novels. Study guides are already excluded this way; omnibus records are not, yet.*
 - **Platform:** the full pipeline is iOS-only today. Android lacks perspective correction.
