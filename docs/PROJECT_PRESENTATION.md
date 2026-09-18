@@ -36,7 +36,7 @@ flowchart LR
 
 | Stage | What it does | Technology |
 |---|---|---|
-| Detection | Finds every spine as a rotated box | YOLO11n-OBB trained by us, TFLite on device |
+| Detection | Finds every spine as a rotated box | YOLO11n-OBB fine-tuned by us, TFLite on device |
 | Rectification | Straightens each spine into its own image | Native iOS (CoreImage / OpenCV) |
 | OCR | Reads the spine text in several orientations | Apple Vision |
 | Evidence merging | Separates title, author, publisher and badge text ("NEW YORK TIMES BESTSELLER") | Rule-based classifier with person/title scoring |
@@ -49,7 +49,7 @@ Scans can run in the background while the user keeps shooting, and results are b
 
 ## 4. Technical contributions
 
-1. **Custom spine detector.** We annotated our own dataset and trained an oriented-bounding-box model, because axis-aligned boxes overlap badly on tilted spines. The model runs on the phone, with no server needed for detection.
+1. **Spine detector trained for this task.** We trained an oriented-bounding-box model, because axis-aligned boxes overlap badly on tilted spines. We started from the public *Open Shelves* dataset and added our own annotated shelf photos (Section 5.1). The model runs on the phone, with no server needed for detection.
 2. **Evidence-based metadata resolution.** Instead of trusting one OCR "title" guess, the app treats all recognized lines as evidence. It generates several search hypotheses and scores every returned book against the evidence.
 3. **Explicit decision gates with measured thresholds.** Every match is labeled *accept*, *suggest*, or *reject*, with a stated reason (for example `anchored_title_surname_match`). Thresholds live in one config file and were tuned against real scans (Section 5).
 4. **Handling real-world noise.** Examples we found in real scans and fixed:
@@ -63,7 +63,16 @@ Scans can run in the background while the user keeps shooting, and results are b
 
 ### 5.1 Spine detection model
 
-Trained for 100 epochs on 640×640 images with a single class (`book`).
+Fine-tuned from Ultralytics' YOLO11n-OBB checkpoint for 100 epochs on 640×640 images with a single class (`book`).
+
+**Data.** Two datasets, both annotated and exported with Roboflow, merged by our own script (`ml/merge_datasets.py`), which also converts the YOLOv5-OBB label format to YOLOv8-OBB:
+
+| Source | Images | Origin |
+|---|---|---|
+| [Open Shelves v9](https://universe.roboflow.com/capjamesg/open-shelves) | 496 | Public dataset by Roboflow user *capjamesg*, CC BY 4.0 |
+| [Book Spine Detection v1](https://universe.roboflow.com/mustafas-workspace-qkrgv/book-spine-detection-wbfbq) | 51 | **Ours:** 24 photos of our own shelves, annotated by us, augmented ×3 |
+
+Image counts are after Roboflow's preprocessing and augmentation (resize to 640×640, small rotations, brightness/exposure jitter, salt-and-pepper noise).
 
 | Split | Images | Annotated spines |
 |---|---|---|
@@ -161,3 +170,9 @@ npm run ios
 ```
 
 Model training and export steps are in `README.md`. Architecture details are in `docs/pipeline.md` and `docs/project_plan.md`.
+
+## Appendix D: Credits
+
+- Training data: *Open Shelves* by Roboflow user **capjamesg** (CC BY 4.0), extended with our own *Book Spine Detection* set (CC BY 4.0). Annotation and dataset management: Roboflow.
+- Detector architecture and training: **YOLO11n-OBB**, Ultralytics (AGPL-3.0) — relevant if the app is ever distributed.
+- Book metadata: Open Library and Google Books APIs.
