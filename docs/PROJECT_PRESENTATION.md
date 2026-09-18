@@ -136,6 +136,12 @@ We photographed the same real bookshelf repeatedly while improving the resolver.
 - **Matching speed:** metadata resolution for a full shelf currently takes about 100–125 seconds, because many catalog queries run one after another.
 - **OCR is the bottleneck:** most remaining misses come from unreadable spines (small fonts, decorative typefaces, glare), not from the matching logic.
 - **Evaluation scale:** our end-to-end numbers come from repeated scans of one real shelf. We do not yet have a large, labeled benchmark of shelves.
+- **A denser shelf is much harder.** On a bookstore shelf of mass-market paperbacks, an earlier build (February) resolved far less: of 19 detected spines, 7 were accepted, 10 were only suggested and 2 found nothing. We have not repeated this with the current build, so it is a warning sign rather than a measurement.
+
+| A bookstore shelf | A failure worth naming |
+|---|---|
+| ![Results for a bookstore shelf: 7 accepted, 10 suggested, 2 unresolved](images/bookstore-results.jpg) | ![A spine matched to "Ngaio Marsh Collection" instead of the individual title](images/bookstore-collection-match.jpg) |
+| Tightly packed paperbacks, read at an angle. "DENTH OF A PEER / MONIG MARSH" is *Death of a Peer* by Ngaio Marsh; the misreadings defeated every query. | Catalogs also carry omnibus records. Here a single spine matched "Ngaio Marsh Collection" rather than the individual novel — the same trap as study guides, which we already exclude. |
 - **Platform:** the full pipeline is iOS-only today. Android lacks perspective correction.
 - **Model generalization:** the detector was trained on a few hundred images and has not been tested across many shelf styles or lighting conditions.
 
