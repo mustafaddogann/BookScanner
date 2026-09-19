@@ -121,15 +121,39 @@ We photographed the same real bookshelf repeatedly while improving the resolver.
 | After fixing cross-scan result mixing | 18 | 11 | 6 | 1 | 61% |
 | After same-work and author-scoring fixes (2 scans) | 17–22 | 8–14 | 6 | 2–3 | 47–64% |
 | After query-generation fixes | 19 | 12 | 6 | 1 | 63% |
-| After threshold tuning | 19 | 12 | 5 | 2 | 63% |
+| After threshold tuning (2 scans) | 17–19 | 12 | 2–5 | 2–3 | 63–71% |
+| After catalog fallback and word splitting | 16 | 15 | 1 | 0 | 94% |
 
-- **Precision of the auto-accepts: 56 of 57.** This is the share of *auto-accepted* books that were the right book, not the share of the shelf that was cataloged. Taking the most recent scan as an example: of 19 detected spines, 12 were auto-accepted, 5 were correct but needed one tap to confirm, and 2 were rejected. So 17 of 19 were resolved correctly, 12 of them with no user effort.
-- **The one wrong auto-accept.** Only "Mitch Albom" was readable on a spine, and a catalog record titled "The live Albom" got title credit for the author's name. We fixed the scoring so a title word that is also the author's name no longer counts as title evidence, and added a regression test built from that spine.
+- **Precision of the auto-accepts: 82 of 84** across the seven most recent home-shelf scans. This is the share of *auto-accepted* books that were the right book, not the share of the shelf that was cataloged. In the latest scan, 15 of 16 detected spines were auto-accepted and the 16th was a correct suggestion; nothing was rejected.
+- **The two wrong auto-accepts.** First, only "Mitch Albom" was readable on a spine, and a catalog record titled "The live Albom" got title credit for the author's name; we fixed the scoring and added a regression test built from that spine. Second, one detected box covered two spines at once (*Lord of the Flies* with *Forrest Gump* along its edge), and the matcher picked *Forrest Gump*. That one is a detection problem, not a matching one.
 - **Suggestions were mostly right, so we tuned the auto-accept rule on them.** Across 12 stored scans, 69 matches were only suggested. Suggestions scoring ≥ 0.65 with an author surname read from the spine were almost always correct. Applied to the stored scans, the new rule turns about 29 of the 69 into automatic accepts, and every one of them is a book that is actually on the shelf. One came from a crop that covered two spines, so it names the neighboring book.
 - **The two wrong high-scoring suggestions** we found are both still excluded, because neither had an author match.
-- **Not yet measured on a new scan:** the two most recent changes, fuzzy search in our own catalog and splitting joined words.
+- **The two latest changes worked on the next scan.** Splitting joined words let "avender|Kahane" and "NoahHarari" match their authors, and fuzzy search in our own catalog found *Tuhafiyedeki Hafiye* from the misread "TUHAFIVEDEKI HAFIVE" when Open Library returned nothing.
 
-### 5.3 Engineering quality
+### 5.3 A second, harder shelf: a bookstore
+
+To check that these numbers aren't specific to one home shelf, we ran an archive photo of a bookstore's crime section through the app's photo import with the current build. It holds two shelves of tightly packed mass-market paperbacks, many with "New York Times Bestseller" badges on the spine.
+
+![Two bookstore shelves of crime paperbacks](images/bookstore2-shelf.jpg)
+
+*The archive photo: two shelves, about 50 spines.*
+
+![Results screen for the bookstore photo: 50 spines](images/bookstore2-results.jpg)
+
+*The results screen after review. The app auto-accepted 32; the user then confirmed 6 suggestions, giving the 38 shown.*
+
+| What happened to the 50 detected spines | Count | Checked by hand |
+|---|---|---|
+| Auto-accepted | 32 | **31 correct**, 1 wrong |
+| Suggested for the user to confirm | 12 | 6 point to the right book (one under its Swedish original title), 6 are wrong |
+| Unresolved | 6 | 3 of these crops had no readable text |
+
+- **Auto-accept precision held up: 31 of 32**, similar to the home shelf. Without any user effort, 31 of the 50 spines (62%) were cataloged correctly; with one tap on the right suggestions, 37 (74%).
+- **Suggestions are much less reliable here:** only half of them were right, against most of them on the home shelf.
+- **The one wrong auto-accept shows two separate bugs.** The spine read "JOHN GRISHAM / SYCAMORE ROW", but the query generator took the truncated badge word "ESTSELLER" as the title, so "Sycamore Row" was never searched. Then the word "TIMES" from the "New York Times" badge matched "time" in *A Time to Kill*, another Grisham novel, which was accepted. Both are fixable: finish filtering truncated badge words, and stop badge words from counting as title evidence.
+- **Compared with the same kind of shelf on an earlier build** (Section 6), where 7 of 19 spines were auto-accepted, this is a large improvement, though the two photos differ.
+
+### 5.4 Engineering quality
 
 - **Tested against real failures.** 1,208 automated tests in 46 suites, all passing. New tests are written from actual scans: the misspelled record, the joined author name, the wrong "Albom" match each have a regression test built from the spine text that caused them.
 - **Every change is checked.** Type checking and linting both run clean, so a refactor that breaks a contract fails immediately.
@@ -140,12 +164,12 @@ We photographed the same real bookshelf repeatedly while improving the resolver.
 
 - **Matching speed:** metadata resolution for a full shelf currently takes about 100–125 seconds, because many catalog queries run one after another.
 - **OCR is the bottleneck:** most remaining misses come from unreadable spines (small fonts, decorative typefaces, glare), not from the matching logic.
-- **Evaluation scale:** our end-to-end numbers come from repeated scans of one real shelf. We do not yet have a large, labeled benchmark of shelves.
-- **A denser shelf is much harder.** On a bookstore shelf of mass-market paperbacks, an earlier build (February) resolved far less: of 19 detected spines, 7 were accepted, 10 were only suggested and 2 found nothing. We have not repeated this with the current build, so it is a warning sign rather than a measurement.
+- **Evaluation scale:** our end-to-end numbers come from repeated scans of one home shelf plus one bookstore photo. We do not yet have a large, labeled benchmark of shelves.
+- **Dense shelves still expose weaknesses.** With the current build, a bookstore shelf reached the same auto-accept precision as the home shelf (Section 5.3), but its suggestions were right only half the time, and badge text ("New York Times Bestseller") still leaks into queries and scoring. An earlier build (February) did much worse on a similar shelf: of 19 detected spines, 7 were accepted, 10 were only suggested and 2 found nothing.
 
 ![Results for a bookstore shelf: 7 accepted, 10 suggested, 2 unresolved](images/bookstore-results.jpg)
 
-*Tightly packed paperbacks, read at an angle: 7 accepted, 10 suggested, 2 unresolved. "DENTH OF A PEER / MONIG MARSH" is* Death of a Peer *by Ngaio Marsh; the misreadings defeated every query.*
+*The February build on a bookstore shelf: 7 accepted, 10 suggested, 2 unresolved. "DENTH OF A PEER / MONIG MARSH" is* Death of a Peer *by Ngaio Marsh; the misreadings defeated every query.*
 
 ![A spine matched to Ngaio Marsh Collection instead of the individual title](images/bookstore-collection-match.jpg)
 
