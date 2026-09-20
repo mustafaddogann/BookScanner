@@ -1,8 +1,32 @@
 /**
- * ISBN Utilities
+ * ISBN Utilities - STRICT layer, for noisy spine OCR
  *
- * Provides ISBN extraction, validation, and checksum verification.
- * Implements source-aware ISBN policy for evidence-driven resolution.
+ * ISBN extraction, validation and checksum verification, plus the source-aware ISBN
+ * policy used by evidence-driven resolution.
+ *
+ * WHY THIS EXISTS ALONGSIDE src/utils/isbnUtils.ts
+ * ------------------------------------------------
+ * The two modules are NOT redundant, despite both implementing the ISBN-10/13
+ * checksums (the arithmetic is identical). They differ in their NORMALISATION
+ * CONTRACT, and that difference is deliberate:
+ *
+ *   this module            normalizeIsbn() strips ONLY hyphens and whitespace, then
+ *                          rejects any remaining non-digit. Strict: "ISBN0306406152"
+ *                          is REJECTED.
+ *   src/utils/isbnUtils.ts normalizeIsbn() strips everything outside [0-9X], so
+ *                          letters silently vanish. Lenient: "ISBN0306406152" is
+ *                          ACCEPTED as 0306406152.
+ *
+ * Use THIS module for anything derived from spine OCR, where digit runs are unreliable
+ * and a lenient parse invents ISBNs that were never on the book (see
+ * ENABLE_ISBN_FROM_SPINE in config/metadataResolutionConfig.ts). Use the utils module
+ * for well-formed input: API responses, catalog records, user entry.
+ *
+ * Do NOT merge them into one without first deciding which contract each call site
+ * needs; collapsing to the lenient one would loosen validation on exactly the noisy
+ * input this layer was written to reject.
+ *
+ * Consumers: openLibraryProvider, candidateScoring, evidenceNormalization.
  */
 
 // ============================================================================

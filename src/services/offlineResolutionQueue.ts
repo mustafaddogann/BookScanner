@@ -1,13 +1,29 @@
 /**
- * Offline Resolution Queue
+ * Offline Resolution Queue - LOCAL provider path
  *
- * Persists unresolved metadata lookups for retry when online.
- * Uses MMKV for fast, synchronous storage.
+ * Persists unresolved metadata lookups (searchCandidates) for retry when online.
+ * Enqueued from metadataResolutionOrchestrator when the local provider is disabled.
+ *
+ * ## STATUS: incomplete - do not enable the flag without finishing it
+ *
+ * Gated on METADATA_OFFLINE_QUEUE_ENABLED (config/debug.ts), currently false.
+ *
+ * processOfflineQueue() below is NEVER CALLED from anywhere in src/. There is no app-
+ * start hook, no connectivity listener and no timer that drains this queue. The header
+ * previously claimed it "automatically processes on app start"; it does not.
+ * Enabling the flag as-is would accumulate items in MMKV that are never retried,
+ * which is worse than having no queue.
+ *
+ * To finish it: call processOfflineQueue() on a connectivity regain (or at app start
+ * in App.tsx, next to loadSessions) and assert in a test that items drain.
+ *
+ * NOTE: there is a second queue, offlineResolverQueue.ts, for the SUPABASE resolver
+ * path. They are not interchangeable - that one queues BookCandidates and retries via
+ * the Edge Function; this one queues searchCandidates for the local provider.
  *
  * Queue features:
  * - Max 50 items (oldest removed when exceeded)
  * - Dedupe by sessionId
- * - Automatically processes on app start when provider is available
  */
 
 import type { EvidenceTier, SearchCandidate } from '../types';

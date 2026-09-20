@@ -1,8 +1,18 @@
 /**
- * ISBN Utilities
+ * ISBN Utilities - LENIENT layer, for well-formed input
  *
- * Provides ISBN-10 and ISBN-13 validation, normalization, and conversion.
- * Used for parsing ISBNs from OCR text and matching against metadata.
+ * ISBN-10/13 validation, normalisation, conversion (10<->13) and display formatting.
+ *
+ * normalizeIsbn() here strips everything outside [0-9X], so surrounding letters and
+ * punctuation silently disappear: "ISBN 0-306-40615-2" parses cleanly. That is right
+ * for API responses, catalog records and user entry, and WRONG for raw spine OCR,
+ * where it will happily manufacture an ISBN out of a noisy digit run.
+ *
+ * For spine OCR use the strict layer, src/services/isbnUtils.ts, which keeps its own
+ * normalisation contract on purpose. See that file's header before merging the two.
+ *
+ * Consumers: searchCandidateService, matchVerificationService, metadataResolverService,
+ * hypothesisGenerationService, spineFieldExtractionService.
  */
 
 // ============================================================================

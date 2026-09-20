@@ -1,9 +1,28 @@
 /**
- * Offline Resolver Queue
+ * Offline Resolver Queue - SUPABASE resolver path
  * Gate 9: Resolver + Scoring + Verification + Acceptance
  *
- * Queues unresolved candidates for retry when the device comes back online.
- * Uses MMKV for persistent storage.
+ * Queues unresolved BookCandidates for retry via the Supabase Edge Function.
+ * Enqueued from metadataResolutionOrchestrator's Supabase path.
+ *
+ * ## STATUS: incomplete, and double-gated - do not enable without finishing it
+ *
+ * Two flags must both be on for anything here to run:
+ *   METADATA_OFFLINE_QUEUE_ENABLED     (false) - gates enqueueing
+ *   METADATA_USE_SUPABASE_RESOLVER     (false) - gates the path that enqueues
+ *
+ * startAutoProcessing() and processQueue() are NEVER CALLED from anywhere in src/.
+ * The AppState and NetInfo listeners this module defines are therefore never
+ * registered, so enabling the flags as-is would accumulate items in MMKV that are
+ * never retried. This module is also the ONLY consumer of
+ * @react-native-community/netinfo - that dependency exists solely for code that does
+ * not currently run.
+ *
+ * To finish it: call startAutoProcessing() once at app start and assert in a test that
+ * items drain on a connectivity regain.
+ *
+ * NOTE: offlineResolutionQueue.ts is a separate queue for the LOCAL provider path.
+ * They are not interchangeable.
  */
 
 import { MMKV } from 'react-native-mmkv';
