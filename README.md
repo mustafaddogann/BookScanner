@@ -2,6 +2,13 @@
 
 A React Native application for detecting book spines using YOLOv8 Oriented Bounding Boxes (OBB).
 
+> **Platform status: iOS only.** The full scan pipeline runs end to end on iOS. On
+> Android, OCR (ML Kit) is implemented but image preprocessing and rectification are
+> stubs in `ImagePreprocessorModule.kt`, so detection cannot run. The app now fails
+> with an explicit "not supported on android" message instead of an opaque
+> `getImageDecodeStats is not a function`. See
+> [Android status](#android-status).
+
 ## Features
 
 - **Camera Capture**: High-quality still image capture using VisionCamera
@@ -54,9 +61,10 @@ BookScanner/
 │   ├── pipeline.md       # Pipeline stage documentation
 │   ├── gates.md          # Stop-the-line gate checklist (0-5)
 │   └── build.md          # Build and environment setup
-├── backend/              # FastAPI rectification service
+├── scripts/              # syncModel.js + the local dev automation loop
+├── tools/                # Python parity tools for the TFLite decode logic
 ├── ios/                  # iOS native project
-└── android/              # Android native project
+└── android/              # Android native project (scan pipeline not implemented)
 ```
 
 ## Documentation
@@ -147,10 +155,16 @@ See `docs/gates.md` for the full checklist. Summary:
 | 6 | OCR + Post-Processing | ✅ PASS |
 | 7 | Book Candidate Grouping | ✅ PASS (conservative algorithm, 19 tests) |
 | 8 | Hypothesis Generation | ✅ PASS (NOT canonical, 82 tests) |
-| 9 | Resolver (Supabase Edge Function) | 🔄 In Progress (services implemented, feature-flagged OFF) |
-| 10 | Corrections Memory | ⏳ Not Started |
+| 9 | Resolver | ✅ PASS via the **local evidence-driven** resolver (Open Library, then Google Books for rejects). The Supabase Edge Function resolver is implemented but `METADATA_USE_SUPABASE_RESOLVER` is OFF; Supabase is still used for the books catalog and resolver attempts. |
+| 10 | Corrections Memory | ✅ PASS (applied in the pipeline, editable from Results) |
 
-**Test Coverage:** 506 tests passing
+**Test Coverage:** 1098 tests passing across 45 suites.
+
+Note: `npm run test:coverage` currently FAILS its own gate - `jest.config.js` sets a
+70% global threshold and actual coverage is ~48%. The untested modules are the big
+orchestration ones (`pipelineService`, `inferenceService`,
+`metadataResolutionOrchestrator`); the resolution logic underneath them is well
+covered. Either add those tests or re-baseline the threshold to match reality.
 
 **IMPORTANT**: Do NOT proceed past a failed gate.
 
@@ -172,24 +186,47 @@ npm install
 cd ios && bundle install && bundle exec pod install && cd ..
 npm run ios
 
-# Android
+# Android - builds and runs, but scanning is not implemented (see below)
 npm run android
 ```
 
+## Android status
+
+OCR is done (`TextRecognizerModule.kt`, ML Kit). Detection is not, for two reasons:
+
+1. `ImagePreprocessorModule.kt` implements only `isRectificationAvailable` and
+   `rectifyPerspective` (the latter returns `skipped`). The pipeline also needs
+   `getImageDecodeStats`, `preprocessForTFLite` and `savePreviewImage` — port them
+   from `ios/ImagePreprocessor.m`. `Bitmap` + `Matrix` is enough for the perspective
+   transform; OpenCV is not required.
+2. The model asset is now placed at
+   `android/app/src/main/assets/models/yolov8_obb.tflite` by `npm run sync:model`,
+   so that half is solved.
+
+`pipelineService` probes for those three methods by name, so an unsupported platform
+fails early with a message naming what is missing rather than a `TypeError` mid-run.
+
 ## Model Bundling
 
-After exporting `yolov8_obb.tflite` to `src/models/`:
+`src/models/yolov8_obb.tflite` is the **single authoritative copy** and the only one
+tracked in git. The platform copies are generated and gitignored:
 
-### iOS
-1. Open `ios/BookScanner.xcworkspace` in Xcode
-2. Drag `src/models/yolov8_obb.tflite` into project
-3. Ensure "Copy Bundle Resources" includes the file
+| Generated path | Used by |
+|---|---|
+| `ios/yolov8_obb.tflite` | Xcode "Copy Bundle Resources"; loaded by absolute bundle path via `ModelPathResolver` |
+| `android/app/src/main/assets/models/yolov8_obb.tflite` | `asset://models/...` in `inferenceService` |
 
-### Android
+They are produced by `scripts/syncModel.js`, which runs automatically on
+`npm install` (postinstall), before `npm run ios` / `npm run android`, and at the end
+of `ml/scripts/export_tflite.sh`. To refresh them by hand:
+
 ```bash
-mkdir -p android/app/src/main/assets/models
-cp src/models/yolov8_obb.tflite android/app/src/main/assets/models/
+npm run sync:model
 ```
+
+The script compares SHA-256 and copies only when a destination is missing or stale, so
+it is cheap to re-run. Nothing needs to be dragged into Xcode: the project already
+references `ios/yolov8_obb.tflite`.
 
 ## Debug Artifacts
 
@@ -203,16 +240,6 @@ Each pipeline run creates `Documents/sessions/{sessionId}/`:
 - `angle_test.json` - Angle convention check
 - `crops/crop_*.jpg` - Rectified crops
 - `grouping_assignments.json` - How detections were grouped into candidates (includes merge decisions, IoU values, OCR similarity)
-
-## Backend Rectification
-
-Fallback when native OpenCV unavailable:
-
-```bash
-cd backend
-pip install -r requirements.txt
-python main.py  # Runs on http://localhost:8000
-```
 
 ## Verification
 
@@ -277,6 +304,9 @@ npm test -- --testPathPattern="letterbox"  # Specific test
 - react-native-svg - SVG overlay
 - react-native-mmkv - Storage
 - react-native-fs - File system
+- react-native-image-picker - Importing an existing photo
+- @react-navigation/native + native-stack - Navigation
+- @supabase/supabase-js - Books catalog + resolver attempts persistence
 - zustand - State management
 - ultralytics - Training (Python)
 - tensorflow - TFLite inspection (Python)
