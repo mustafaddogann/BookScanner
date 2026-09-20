@@ -11,7 +11,12 @@ import type {
   BookEvidence,
   BookEvidenceLine,
 } from '../types';
-import { extractTitleAndAuthor } from './titleAuthorExtraction';
+import {
+  extractTitleAndAuthor,
+  isOrgLikeLine,
+  isPublisherOrMarketing,
+} from './titleAuthorExtraction';
+import { getRoleScore } from './roleScoring';
 
 // ============================================================================
 // Configuration Constants
@@ -299,10 +304,6 @@ function extractFieldHints(
 ): { titleHints: string[]; authorHints: string[] } {
   const titleHints: string[] = [];
   const authorHints: string[] = [];
-
-  // Import helpers for filtering native OCR candidates
-  const { isOrgLikeLine, isPublisherOrMarketing } = require('./titleAuthorExtraction');
-  const { getRoleScore } = require('./roleScoring');
 
   // Extract text lines for advanced processing
   const textLines = lines.map(l => l.text);

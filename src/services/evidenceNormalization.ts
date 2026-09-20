@@ -15,6 +15,7 @@ import {
   type ValidatedIsbn,
   type EvidenceSourceKind,
 } from './isbnUtils';
+import { extractTitleAndAuthor } from './titleAuthorExtraction';
 import { ENABLE_ISBN_FROM_SPINE } from '../config/metadataResolutionConfig';
 
 // Re-export ISBN utilities for convenience
@@ -1014,8 +1015,7 @@ export function buildEvidenceTokens(
   const recoveredAuthorCandidates = recoverAuthorCandidates(lines, personNameLines, wrappedLines);
 
   // Run advanced extraction (multi-line reconstruction, colon patterns, all-caps detection)
-  const { extractTitleAndAuthor: extract } = require('./titleAuthorExtraction');
-  const advancedExtraction = extract(lines);
+  const advancedExtraction = extractTitleAndAuthor(lines);
 
   // Merge advanced extraction author into recovered candidates
   // IMPORTANT: If already present with lower confidence, UPDATE to higher confidence
