@@ -52,8 +52,13 @@ import { autoExportRejects } from './autoExportService';
 import {
   OpenLibraryProvider,
   buildResolverKey,
+  resetSessionQueryBudget,
 } from './openLibraryProvider';
-import { executeTitleMatchFallbackWithGoogleBooks } from './titleMatchFallback';
+import {
+  executeTitleMatchFallbackWithGoogleBooks,
+  executeTitleMatchFallbackWithProvider,
+} from './titleMatchFallback';
+import { GoogleBooksProvider } from './googleBooksProvider';
 import { getQuerySet } from './queryHypotheses';
 import { shouldAutoPersist, makeDecisionFromScores } from './candidateScoring';
 import { AUTO_BOOST_ENABLED } from '../config/metadataResolutionConfig';
@@ -216,6 +221,10 @@ export async function runMetadataResolution(
 ): Promise<MetadataResolutionOutput> {
   const { sessionId, rectificationResults, ocrResultsByCropIndex, bookCandidates } = input;
   const verbose = isMetadataVerboseDebug();
+
+  // Each scan gets its own network budget (MAX_TOTAL_QUERIES_PER_SESSION), so a
+  // previous scan's traffic cannot starve this one.
+  resetSessionQueryBudget();
 
   if (verbose) {
     console.log('[MetadataOrchestrator] Starting resolution...');
@@ -1041,35 +1050,43 @@ export async function resolveBookCandidateByEvidence(
 
       case 'reject':
       default:
-        // Open Library rejected - try Google Books fallback before giving up
-        // This helps find books that aren't in Open Library
+        // Open Library rejected this candidate - try Google Books before giving up,
+        // since the two catalogues have genuinely different coverage.
+        //
+        // This calls Google Books DIRECTLY rather than going through
+        // executeTitleMatchFallbackWithGoogleBooks, which would first repeat an Open
+        // Library title search. That was wrong on two counts: the passes above have
+        // already exhausted Open Library with up to 30 hypotheses, so the extra
+        // request is pure latency; and Google Books was only attempted when that
+        // repeat search came back with reason 'no_api_results' or
+        // 'no_full_match_results'. Its other outcomes - 'no_valid_candidate' and
+        // 'fallback_search_error' - fell outside that allowlist, so a transient Open
+        // Library network error silently suppressed the Google Books attempt.
         if (effectiveTitle) {
-          console.log(`[EvidenceResolver] Rejected by Open Library - trying Google Books fallback for "${effectiveTitle}"`);
+          console.log(`[EvidenceResolver] Rejected by Open Library - trying Google Books for "${effectiveTitle}"`);
           try {
-            const googleBooksFallbackResult = await executeTitleMatchFallbackWithGoogleBooks(
+            const googleBooksFallbackResult = await executeTitleMatchFallbackWithProvider(
               effectiveTitle,
-              effectiveAuthor
+              effectiveAuthor,
+              new GoogleBooksProvider()
             );
 
             if (googleBooksFallbackResult.triggered && googleBooksFallbackResult.decision === 'suggest') {
-              const isGoogleBooks = googleBooksFallbackResult.reason.startsWith('google_books_');
-              const source = isGoogleBooks ? 'googleBooks' : 'openLibrary';
-
-              console.log(`[EvidenceResolver] Google Books fallback SUCCESS (${source}): ` +
+              console.log(`[EvidenceResolver] Google Books SUCCESS: ` +
                 `title="${googleBooksFallbackResult.suggestedTitle}", author="${googleBooksFallbackResult.suggestedAuthor}"`);
 
               resolverDecision = 'suggested';
               resolvedBook = {
                 title: googleBooksFallbackResult.suggestedTitle || effectiveTitle,
                 authors: googleBooksFallbackResult.suggestedAuthor ? [googleBooksFallbackResult.suggestedAuthor] : [],
-                source,
+                source: 'googleBooks',
                 sourceId: googleBooksFallbackResult.debug.chosenCandidate?.title || 'fallback',
               };
               resolvedConfidence = googleBooksFallbackResult.confidence;
               resolverDecisionReason = `google_books_fallback: ${googleBooksFallbackResult.reason}`;
               break;
             } else {
-              console.log(`[EvidenceResolver] Google Books fallback did not find match: ${googleBooksFallbackResult.reason}`);
+              console.log(`[EvidenceResolver] Google Books did not find a match: ${googleBooksFallbackResult.reason}`);
             }
           } catch (e: any) {
             console.warn(`[EvidenceResolver] Google Books fallback error: ${e.message}`);

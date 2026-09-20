@@ -41,6 +41,7 @@ import {
 import {
   MAX_RESULTS_PER_HYPOTHESIS as CONFIG_MAX_RESULTS,
   MAX_ENRICH_CALLS_PER_SESSION as CONFIG_MAX_ENRICH,
+  MAX_TOTAL_QUERIES_PER_SESSION as CONFIG_MAX_QUERIES,
   SESSION_CACHE_TTL_MS as CONFIG_CACHE_TTL,
 } from '../config/metadataResolutionConfig';
 
@@ -61,6 +62,17 @@ const MAX_RESULTS_PER_HYPOTHESIS = CONFIG_MAX_RESULTS;
 /** Maximum total enrichment calls per session */
 const MAX_ENRICHMENT_CALLS = CONFIG_MAX_ENRICH;
 
+/**
+ * Maximum uncached network queries per session, across ALL candidates.
+ *
+ * This cap was declared in config but never read, so nothing bounded total traffic:
+ * candidates resolve sequentially and each may issue up to 5 (pass 1) + 25 (boost)
+ * hypothesis queries, so a 30-spine shelf could fire several hundred sequential
+ * requests at a 10s timeout each - slow, and a good way to get rate-limited.
+ * Cache hits do not count; only requests that actually leave the device.
+ */
+const MAX_TOTAL_QUERIES = CONFIG_MAX_QUERIES;
+
 // ============================================================================
 // In-Memory Query Cache (session-scoped)
 // ============================================================================
@@ -75,6 +87,27 @@ const queryCache = new Map<string, CachedQueryResult>();
 
 /** Session-level enrichment call counter */
 let sessionEnrichmentCalls = 0;
+
+/** Session-level uncached query counter, checked against MAX_TOTAL_QUERIES */
+let sessionQueryCount = 0;
+
+/** True once the session budget is spent (logged once, not per hypothesis) */
+let sessionBudgetExhaustedLogged = false;
+
+/**
+ * Reset the per-session network budget. Called at the start of each resolver run so
+ * one scan's traffic does not eat into the next scan's allowance.
+ */
+export function resetSessionQueryBudget(): void {
+  sessionQueryCount = 0;
+  sessionEnrichmentCalls = 0;
+  sessionBudgetExhaustedLogged = false;
+}
+
+/** Remaining uncached queries in this session (for diagnostics). */
+export function getSessionQueryBudget(): { used: number; max: number } {
+  return { used: sessionQueryCount, max: MAX_TOTAL_QUERIES };
+}
 
 /** Cache TTL in milliseconds (from config) */
 const SESSION_CACHE_TTL_MS = CONFIG_CACHE_TTL;
@@ -112,7 +145,7 @@ function cacheResults(queryHash: string, results: ResolvedBook[]): void {
  */
 export function clearQueryCache(): void {
   queryCache.clear();
-  sessionEnrichmentCalls = 0;
+  resetSessionQueryBudget();
 }
 
 /**
@@ -801,8 +834,26 @@ export class OpenLibraryProvider implements MetadataLookupProvider {
           if (verbose) {
             console.log(`[OpenLibrary] CACHE HIT for "${hypothesis.query}": ${results.length} results`);
           }
+        } else if (sessionQueryCount >= MAX_TOTAL_QUERIES) {
+          // Session budget spent - stop issuing network queries. Candidates already
+          // resolved keep their results; the rest fall through to reject/Google Books.
+          if (!sessionBudgetExhaustedLogged) {
+            sessionBudgetExhaustedLogged = true;
+            console.warn(
+              `[OpenLibrary] Session query budget exhausted (${MAX_TOTAL_QUERIES}); ` +
+                'skipping further uncached queries for this scan'
+            );
+          }
+          hypothesisResults.push({
+            hypothesis,
+            resultCount: 0,
+            error: 'session_query_budget_exhausted',
+            pass,
+          });
+          continue;
         } else {
           // Cache miss - make API call
+          sessionQueryCount++;
           if (hypothesis.type === 'isbn') {
             // Direct ISBN search
             results = await this.searchByIsbn(hypothesis.query);
