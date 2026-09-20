@@ -18,12 +18,9 @@ import type {
   LetterboxParams,
   ModelIOContract,
   OBBDetection,
-  OBBModelSpace,
   RectifyResult,
   PipelineTimings,
   RawModelOutput,
-  InferenceContextManifest,
-  PostprocessStatsManifest,
   InputTensorMeta,
 } from '../types';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
@@ -870,99 +867,6 @@ export async function readDebugManifest(sessionId: string): Promise<DebugManifes
   }
 }
 
-/**
- * Delete a session and all its artifacts
- */
-export async function deleteSession(sessionId: string): Promise<void> {
-  const sessionDir = getSessionDir(sessionId);
-  const exists = await RNFS.exists(sessionDir);
-  if (exists) {
-    await RNFS.unlink(sessionDir);
-    console.log(`[DebugArtifacts] Deleted session ${sessionId}`);
-  }
-}
-
-/**
- * Build comprehensive capture debug manifest (GATE 6)
- * Includes all coordinate spaces and inference context
- */
-export function buildCaptureDebugManifest(params: {
-  sessionId: string;
-  source: 'camera' | 'fixture';
-  fixtureName?: string;
-  imageMeta: ImageMeta;
-  letterboxParams: LetterboxParams;
-  modelIO: ModelIOContract | string;
-  detectionsModelSpace: OBBModelSpace[];
-  detectionsFrameSpace: OBBDetection[];
-  detectionsViewSpace?: OBBDetection[];
-  inferenceContext: InferenceContextManifest;
-  postprocessStats: PostprocessStatsManifest;
-  rectification?: RectifyResult[];
-  timings: PipelineTimings;
-  errors: string[];
-}): DebugManifest {
-  return {
-    sessionId: params.sessionId,
-    createdAt: new Date().toISOString(),
-    source: params.source,
-    fixtureName: params.fixtureName,
-    imageMeta: params.imageMeta,
-    rotationPolicy: params.imageMeta.isNormalized
-      ? 'EXIF rotation applied to normalize upright'
-      : 'No rotation normalization needed',
-    letterboxParams: params.letterboxParams,
-    modelIO: params.modelIO,
-
-    // All coordinate spaces (GATE 6)
-    detectionsModelSpace: params.detectionsModelSpace,
-    detectionsFrameSpace: params.detectionsFrameSpace,
-    detectionsViewSpace: params.detectionsViewSpace,
-    detectionsOriginal: params.detectionsFrameSpace, // Legacy compatibility
-
-    // Full inference context (GATE 6)
-    inferenceContext: params.inferenceContext,
-    postprocessStats: params.postprocessStats,
-
-    rectification: params.rectification,
-    timings: params.timings,
-    errors: params.errors,
-    angleConvention: 'radians, counter-clockwise from positive x-axis',
-  };
-}
-
-/**
- * Write capture debug manifest with all details (GATE 6)
- * Logs the path for verification - uses atomic write
- */
-export async function writeCaptureDebugManifest(
-  sessionId: string,
-  manifest: DebugManifest
-): Promise<string> {
-  const sessionDir = getSessionDir(sessionId);
-  const manifestPath = `${sessionDir}/debug_manifest.json`;
-
-  // Ensure directory exists
-  await RNFS.mkdir(sessionDir);
-
-  const result = await writeJsonAtomic(manifestPath, manifest, sessionDir);
-
-  console.log('========================================');
-  console.log(`[DebugArtifacts] CAPTURE DEBUG MANIFEST SAVED`);
-  console.log(`[DebugArtifacts] Path: ${manifestPath}`);
-  console.log(`[DebugArtifacts] Bytes: ${result.bytes}`);
-  console.log(`[DebugArtifacts] Success: ${result.success}`);
-  console.log(`[DebugArtifacts] Detections (model space): ${manifest.detectionsModelSpace?.length ?? 0}`);
-  console.log(`[DebugArtifacts] Detections (frame space): ${manifest.detectionsFrameSpace?.length ?? 0}`);
-  console.log('========================================');
-
-  if (!result.success) {
-    console.error(`[DebugArtifacts] Failed to write debug_manifest.json: ${result.error}`);
-  }
-
-  return manifestPath;
-}
-
 // ============================================================================
 // COMPREHENSIVE ARTIFACT WRITING
 // ============================================================================
@@ -1434,32 +1338,6 @@ export async function writeSourceDecodeStats(
   console.log('========================================');
 
   return writeJsonAtomic(statsPath, stats, sessionDir);
-}
-
-/**
- * Write letterbox_640_preview.jpg - the 640x640 image BEFORE float normalization
- */
-export async function writeLetterbox640Preview(
-  sessionId: string,
-  jpegBase64: string
-): Promise<WriteResult> {
-  const sessionDir = getSessionDir(sessionId);
-  const previewPath = `${sessionDir}/letterbox_640_preview.jpg`;
-
-  await RNFS.mkdir(sessionDir);
-
-  try {
-    await RNFS.writeFile(previewPath, jpegBase64, 'base64');
-    const stats = await RNFS.stat(previewPath);
-    const size = typeof stats.size === 'string' ? parseInt(stats.size, 10) : stats.size;
-
-    console.log(`[DebugArtifacts] Wrote letterbox_640_preview.jpg: ${size} bytes`);
-
-    return { path: previewPath, success: true, bytes: size };
-  } catch (error: any) {
-    console.error(`[DebugArtifacts] Failed to write letterbox_640_preview.jpg: ${error.message}`);
-    return { path: previewPath, success: false, bytes: 0, error: error.message };
-  }
 }
 
 // ============================================================================

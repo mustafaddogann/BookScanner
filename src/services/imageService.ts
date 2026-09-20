@@ -9,14 +9,10 @@
 import { Image } from 'react-native';
 import RNFS from 'react-native-fs';
 import type { PhotoFile } from 'react-native-vision-camera';
-import type { ImageMeta, ScanSession } from '../types';
-import { generateSessionId, createSessionDir, copyOriginalImage } from './debugArtifacts';
-import { useAppStore } from '../store/useAppStore';
+import type { ImageMeta } from '../types';
 import {
-  type FrameGeo,
   normalizeFileUri,
   uriToPath,
-  buildFrameGeo,
   getDisplayDimensions,
 } from '../utils/frameGeo';
 
@@ -85,26 +81,6 @@ export async function buildImageMeta(photo: PhotoFile): Promise<ImageMeta> {
 }
 
 /**
- * Build FrameGeo from captured photo - SINGLE SOURCE OF TRUTH
- *
- * This creates the geometry object that should be used for ALL coordinate
- * mapping in the session. Do not re-read image dimensions after this.
- */
-export function buildFrameGeoFromPhoto(photo: PhotoFile, modelSize: number = 640): FrameGeo {
-  const orientation = photo.metadata
-    ? getOrientationFromMetadata(photo.metadata)
-    : 1;
-
-  return buildFrameGeo(
-    photo.path,
-    photo.width,
-    photo.height,
-    orientation,
-    modelSize
-  );
-}
-
-/**
  * Build ImageMeta from a fixture or existing image file
  */
 export async function buildImageMetaFromUri(uri: string): Promise<ImageMeta> {
@@ -138,82 +114,6 @@ export async function buildImageMetaFromUri(uri: string): Promise<ImageMeta> {
 }
 
 /**
- * Create a new scan session from a captured photo
- */
-export async function createSessionFromCapture(
-  photo: PhotoFile
-): Promise<{ session: ScanSession; imageMeta: ImageMeta }> {
-  const sessionId = generateSessionId();
-
-  console.log(`[ImageService] Creating session ${sessionId} from capture`);
-
-  // Create session directory
-  const sessionDir = await createSessionDir(sessionId);
-
-  // Build image metadata
-  const imageMeta = await buildImageMeta(photo);
-
-  // Copy original image to session directory
-  const imagePath = await copyOriginalImage(sessionId, photo.path);
-
-  // Create session object
-  const session: ScanSession = {
-    sessionId,
-    createdAt: new Date().toISOString(),
-    source: 'camera',
-    imagePath,
-    sessionDir,
-    detectionCount: 0,
-    status: 'pending',
-  };
-
-  // Store session
-  useAppStore.getState().addSession(session);
-
-  console.log(`[ImageService] Session created: ${sessionId}`);
-  return { session, imageMeta };
-}
-
-/**
- * Create a new scan session from a fixture
- */
-export async function createSessionFromFixture(
-  fixtureUri: string,
-  fixtureName: string
-): Promise<{ session: ScanSession; imageMeta: ImageMeta }> {
-  const sessionId = generateSessionId();
-
-  console.log(`[ImageService] Creating session ${sessionId} from fixture: ${fixtureName}`);
-
-  // Create session directory
-  const sessionDir = await createSessionDir(sessionId);
-
-  // Build image metadata
-  const imageMeta = await buildImageMetaFromUri(fixtureUri);
-
-  // Copy fixture image to session directory
-  const imagePath = await copyOriginalImage(sessionId, fixtureUri);
-
-  // Create session object
-  const session: ScanSession = {
-    sessionId,
-    createdAt: new Date().toISOString(),
-    source: 'fixture',
-    fixtureName,
-    imagePath,
-    sessionDir,
-    detectionCount: 0,
-    status: 'pending',
-  };
-
-  // Store session
-  useAppStore.getState().addSession(session);
-
-  console.log(`[ImageService] Session created: ${sessionId}`);
-  return { session, imageMeta };
-}
-
-/**
  * Get app's private images directory
  */
 export function getPrivateImagesDir(): string {
@@ -230,19 +130,4 @@ export async function ensurePrivateImagesDir(): Promise<string> {
     await RNFS.mkdir(dir);
   }
   return dir;
-}
-
-/**
- * Copy a captured photo to private storage
- */
-export async function copyToPrivateStorage(sourcePath: string): Promise<string> {
-  const imagesDir = await ensurePrivateImagesDir();
-  const filename = `capture_${Date.now()}.jpg`;
-  const destPath = `${imagesDir}/${filename}`;
-
-  const cleanSource = sourcePath.startsWith('file://') ? sourcePath.slice(7) : sourcePath;
-  await RNFS.copyFile(cleanSource, destPath);
-
-  console.log(`[ImageService] Copied to private storage: ${destPath}`);
-  return destPath;
 }

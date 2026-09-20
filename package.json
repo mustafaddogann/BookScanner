@@ -3,8 +3,10 @@
   "version": "0.0.1",
   "private": true,
   "scripts": {
-    "android": "react-native run-android",
-    "ios": "react-native run-ios",
+    "android": "npm run sync:model && react-native run-android",
+    "ios": "npm run sync:model && react-native run-ios",
+    "sync:model": "node scripts/syncModel.js",
+    "postinstall": "node scripts/syncModel.js",
     "lint": "eslint .",
     "start": "react-native start",
     "test": "jest",
@@ -21,11 +23,9 @@
   },
   "dependencies": {
     "@react-native-community/netinfo": "^11.4.1",
-    "@react-native/new-app-screen": "0.83.1",
     "@react-navigation/native": "^7.1.7",
     "@react-navigation/native-stack": "^7.3.11",
     "@supabase/supabase-js": "^2.91.1",
-    "axios": "^1.9.0",
     "react": "19.2.0",
     "react-native": "0.83.1",
     "react-native-fast-tflite": "^1.6.1",
@@ -36,7 +36,6 @@
     "react-native-safe-area-context": "^5.5.2",
     "react-native-screens": "^4.10.0",
     "react-native-svg": "^15.11.2",
-    "react-native-toast-message": "^2.3.3",
     "react-native-url-polyfill": "^3.0.0",
     "react-native-vision-camera": "^4.6.3",
     "zustand": "^5.0.5"

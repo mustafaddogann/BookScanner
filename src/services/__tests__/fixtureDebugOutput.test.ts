@@ -6,7 +6,6 @@
  */
 
 import { classifyLines, getExcludedBadgeIndices } from '../lineClassification';
-import { prepareResolverQuery } from '../resolverQueryPrep';
 import { extractTitleAndAuthor } from '../titleAuthorExtraction';
 
 describe('Sample Debug Output', () => {
@@ -56,18 +55,9 @@ describe('Sample Debug Output', () => {
       console.log(`  author: "${extraction.author}" (confidence: ${extraction.authorConfidence.toFixed(2)})`);
       console.log(`  excludedBadgeLines: ${extraction.debug.excludedBadgeLines?.map(l => l.text).join(', ')}`);
 
-      // Query prep
-      const query = prepareResolverQuery(extraction.title, extraction.author);
-      console.log('');
-      console.log('Query Preparation:');
-      console.log(`  queryTitle: "${query.queryTitle}"`);
-      console.log(`  queryAuthor: "${query.queryAuthor}"`);
-      console.log(`  shouldQuery: ${query.shouldQuery}`);
-
       // Assertions
       expect(extraction.title).toContain('GUARDIANS');
       expect(extraction.author).toContain('GRISHAM');
-      expect(query.shouldQuery).toBe(true);
     });
   });
 
@@ -160,14 +150,6 @@ describe('Sample Debug Output', () => {
       console.log(`  title: "${extraction.title}"`);
       console.log(`  author: "${extraction.author}"`);
       console.log(`  inlineSplits: ${JSON.stringify(extraction.debug.inlineSplits, null, 2)}`);
-
-      const query = prepareResolverQuery(extraction.title, extraction.author);
-      console.log('');
-      console.log('Query Preparation:');
-      console.log(`  queryTitle: "${query.queryTitle}"`);
-      console.log(`  queryAuthor: "${query.queryAuthor}"`);
-      console.log(`  didInlineSplitForQuery: ${query.debug.didInlineSplitForQuery}`);
-      console.log(`  sanitizationReasons: ${query.debug.sanitizationReasons.join(', ')}`);
 
       expect(extraction.title).toContain('POISON');
       expect(extraction.author).toContain('Wentworth');

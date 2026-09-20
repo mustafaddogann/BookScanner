@@ -83,12 +83,3 @@ export function computeEvidenceHash(evidence: BookEvidence): string {
   // Compute hash
   return fnv1aHash(combined);
 }
-
-/**
- * Compute hash of multiple evidence objects.
- * Used for batch deduplication.
- */
-export function computeBatchEvidenceHash(evidences: BookEvidence[]): string {
-  const hashes = evidences.map(computeEvidenceHash).sort();
-  return fnv1aHash(hashes.join(':'));
-}

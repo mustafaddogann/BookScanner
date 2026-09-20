@@ -74,3 +74,11 @@ else
     echo "✗ Gate 2 FAIL: TFLite file not created"
     exit 1
 fi
+
+# Fan the single source of truth out to the platform bundle locations.
+# src/models/yolov8_obb.tflite is the only copy tracked in git; ios/ and
+# android/app/src/main/assets/models/ are generated and gitignored.
+echo ""
+echo "Syncing model into platform bundles..."
+cd "$PROJECT_ROOT"
+node scripts/syncModel.js

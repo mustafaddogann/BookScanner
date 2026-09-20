@@ -128,31 +128,3 @@ export class PipelineTimer {
     console.log('===============================\n');
   }
 }
-
-/**
- * Measure execution time of an async function
- */
-export async function measureAsync<T>(
-  name: string,
-  fn: () => Promise<T>
-): Promise<{ result: T; durationMs: number }> {
-  const start = Date.now();
-  const result = await fn();
-  const durationMs = Date.now() - start;
-  console.log(`[Measure] ${name}: ${durationMs}ms`);
-  return { result, durationMs };
-}
-
-/**
- * Measure execution time of a sync function
- */
-export function measureSync<T>(
-  name: string,
-  fn: () => T
-): { result: T; durationMs: number } {
-  const start = Date.now();
-  const result = fn();
-  const durationMs = Date.now() - start;
-  console.log(`[Measure] ${name}: ${durationMs}ms`);
-  return { result, durationMs };
-}

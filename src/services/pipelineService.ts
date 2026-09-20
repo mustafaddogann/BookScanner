@@ -24,22 +24,10 @@ import type {
   DebugManifest,
   RawModelOutput,
   InputTensorMeta,
-  PipelineOptions,
-  SavedTensor,
   NativeLetterboxTruth,
   OCRResult,
   OCRSummary,
 } from '../types';
-import type { ImageSource } from './imageSource';
-import {
-  CameraSource,
-  FixtureSource,
-  createReplaySource,
-} from './imageSource';
-import {
-  setArtifactWritingEnabled,
-  isArtifactWritingEnabled,
-} from './debugArtifacts';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 
 // Native image preprocessor module.
@@ -88,7 +76,6 @@ import {
   isMockModel,
   runPostprocess,
   getPostprocessConfig,
-  setPostprocessConfig,
   computeTensorStats,
   extractRawSampleAnchors,
   getDecodeModeComparison,
@@ -98,8 +85,6 @@ import {
   getDecodeMode,
   isSigmoidEnabled,
   DEBUG_ALIGNMENT_PRESET,
-  SPINE_PRESET,
-  LIVE_PREVIEW_PRESET,
 } from './inferenceService';
 import { rectifyAll, computeCorners } from './rectificationService';
 import {
@@ -138,7 +123,6 @@ import {
   writeModelSpaceOverlays,
   validateLetterboxConsistency,
   writeLetterboxInconsistent,
-  writeJsonAtomic,
   writeRectificationDebugOverlay,
   writeCropQualityAnalysis,
   writeGroupingAssignments,
@@ -157,10 +141,6 @@ import {
 } from './pipelineStoreAdapter';
 import { useBackgroundScanStore } from '../store/useBackgroundScanStore';
 import { generateCoordinateTestArtifact } from '../utils/letterbox';
-
-// DEBUG FLAG: Set to true ONLY to bypass model requirement during UI development
-// MUST be false for any real testing or production
-const DEBUG_GENERATE_FAKE_DETECTIONS = false;
 
 /**
  * Base64 decode helper (atob may not be available in React Native)
@@ -390,11 +370,6 @@ export async function runPipeline(
         const msg = 'Pipeline using MOCK MODEL - no real detections possible';
         console.warn(`[Pipeline] ${msg}`);
         errors.push(msg);
-
-        if (DEBUG_GENERATE_FAKE_DETECTIONS) {
-          console.warn('[Pipeline] DEBUG_GENERATE_FAKE_DETECTIONS=true, generating fake detections');
-          detections = generateDebugDetections(imageMeta.width, imageMeta.height);
-        }
       } else {
         // Real model inference
         store.setProcessing(true, 'inference');
@@ -1601,44 +1576,6 @@ export async function runPipeline(
 }
 
 /**
- * Generate DEBUG-ONLY fake detections
- * ONLY used when DEBUG_GENERATE_FAKE_DETECTIONS=true
- */
-function generateDebugDetections(
-  imageWidth: number,
-  imageHeight: number
-): OBBDetection[] {
-  console.warn('========================================');
-  console.warn('GENERATING FAKE DETECTIONS - DEBUG ONLY');
-  console.warn('This is NOT real model output!');
-  console.warn('========================================');
-
-  const numDetections = 3;
-  const detections: OBBDetection[] = [];
-
-  for (let i = 0; i < numDetections; i++) {
-    const cx = imageWidth * (0.25 + (i / numDetections) * 0.5);
-    const cy = imageHeight * 0.5;
-    const height = imageHeight * 0.4;
-    const width = height * 0.12;
-    const angle = (i - 1) * 0.1; // Slight rotation variation
-
-    detections.push({
-      cx,
-      cy,
-      width,
-      height,
-      angle,
-      score: 0.85 - i * 0.1,
-      classId: 0,
-      className: 'book',
-    });
-  }
-
-  return detections;
-}
-
-/**
  * Run pipeline on a fixture
  */
 export async function runPipelineOnFixture(
@@ -1646,13 +1583,6 @@ export async function runPipelineOnFixture(
   fixtureName: string
 ): Promise<PipelineResult> {
   return runPipeline(fixtureUri, 'fixture', fixtureName);
-}
-
-/**
- * Run pipeline on a camera capture
- */
-export async function runPipelineOnCapture(imageUri: string): Promise<PipelineResult> {
-  return runPipeline(imageUri, 'camera');
 }
 
 /**
@@ -1690,210 +1620,4 @@ export async function runPipelineBackground(imageUri: string): Promise<void> {
     // failScan keeps the slot visible but releases the concurrency permit.
     useBackgroundScanStore.getState().failScan(sessionId, error.message);
   }
-}
-
-// ============================================================================
-// PIPELINE OPTIONS - Preview vs Capture Mode
-// ============================================================================
-
-/**
- * Default options for preview mode (fast path for live camera)
- * - No artifact writing (skip disk I/O)
- * - AABB NMS for speed
- * - Skip rectification
- * - Don't save tensor for replay
- */
-export const PREVIEW_OPTIONS: PipelineOptions = {
-  mode: 'preview',
-  writeArtifacts: false,
-  skipRectification: true,
-  saveTensorForReplay: false,
-};
-
-/**
- * Default options for capture mode (full pipeline)
- * - Write artifacts only if DEBUG_ARTIFACTS_ENABLED (default: false for performance)
- * - OBB NMS for accuracy
- * - Full rectification
- * - Save tensor for replay capability (only if debugging)
- */
-export const CAPTURE_OPTIONS: PipelineOptions = {
-  mode: 'capture',
-  writeArtifacts: DEBUG_ARTIFACTS_ENABLED,
-  skipRectification: false,
-  saveTensorForReplay: DEBUG_ARTIFACTS_ENABLED,
-};
-
-// ============================================================================
-// TENSOR SAVING FOR REPLAY
-// ============================================================================
-
-/**
- * Encode ArrayBuffer to base64 string
- */
-function arrayBufferToBase64(buffer: ArrayBuffer | SharedArrayBuffer): string {
-  const bytes = new Uint8Array(buffer as ArrayBuffer);
-  const base64Chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-  let result = '';
-  let i = 0;
-
-  while (i < bytes.length) {
-    const b0 = bytes[i++];
-    const b1 = i < bytes.length ? bytes[i++] : 0;
-    const b2 = i < bytes.length ? bytes[i++] : 0;
-
-    result += base64Chars[b0 >> 2];
-    result += base64Chars[((b0 & 0x03) << 4) | (b1 >> 4)];
-    result += base64Chars[((b1 & 0x0f) << 2) | (b2 >> 6)];
-    result += base64Chars[b2 & 0x3f];
-  }
-
-  // Add padding
-  const padding = bytes.length % 3;
-  if (padding === 1) {
-    result = result.slice(0, -2) + '==';
-  } else if (padding === 2) {
-    result = result.slice(0, -1) + '=';
-  }
-
-  return result;
-}
-
-/**
- * Save preprocessed tensor to disk for replay capability
- * Creates saved_tensor.json (metadata) and input_tensor.bin (tensor data)
- */
-export async function saveTensorForReplay(
-  sessionId: string,
-  tensor: Float32Array,
-  letterboxParams: LetterboxParams,
-  nativeTruth: NativeLetterboxTruth
-): Promise<void> {
-  const sessionDir = getSessionDir(sessionId);
-
-  // Save tensor as binary file (base64 encoded)
-  const tensorPath = `${sessionDir}/input_tensor.bin`;
-  const tensorBase64 = arrayBufferToBase64(tensor.buffer);
-  await RNFS.writeFile(tensorPath, tensorBase64, 'base64');
-
-  // Save metadata
-  const savedTensor: SavedTensor = {
-    sessionId,
-    tensorPath,
-    tensorShape: [1, 640, 640, 3],
-    letterboxParams,
-    nativeTruth: {
-      decodedW: nativeTruth.decodedW,
-      decodedH: nativeTruth.decodedH,
-      modelSize: nativeTruth.modelSize,
-      scale: nativeTruth.scale,
-      newW: nativeTruth.newW,
-      newH: nativeTruth.newH,
-      padX: nativeTruth.padX,
-      padY: nativeTruth.padY,
-    },
-    createdAt: new Date().toISOString(),
-  };
-
-  // Write metadata using atomic write
-  await writeJsonAtomic(`${sessionDir}/saved_tensor.json`, savedTensor, sessionDir);
-  console.log(`[Pipeline] Saved tensor for replay: ${tensorPath}`);
-}
-
-// ============================================================================
-// UNIFIED PIPELINE ENTRY POINT WITH OPTIONS
-// ============================================================================
-
-/**
- * Run pipeline with explicit options controlling behavior
- *
- * This is the new unified entry point that supports:
- * - Preview mode (fast, no artifacts)
- * - Capture mode (full pipeline)
- * - Replay mode (uses cached tensor)
- *
- * @param source ImageSource instance (CameraSource, FixtureSource, or ReplaySource)
- * @param options PipelineOptions controlling execution behavior
- */
-export async function runPipelineWithOptions(
-  source: ImageSource,
-  options: PipelineOptions
-): Promise<PipelineResult> {
-  const mode = options.mode;
-
-  console.log(`[Pipeline] Running with options: mode=${mode}, writeArtifacts=${options.writeArtifacts}, skipRectification=${options.skipRectification}`);
-
-  // Set postprocess config based on mode
-  if (mode === 'preview') {
-    setPostprocessConfig(LIVE_PREVIEW_PRESET);
-    console.log('[Pipeline] Using LIVE_PREVIEW_PRESET (AABB NMS, fast)');
-  } else {
-    setPostprocessConfig(SPINE_PRESET);
-    console.log('[Pipeline] Using SPINE_PRESET (OBB NMS, accurate)');
-  }
-
-  // Control artifact writing based on options
-  const previousArtifactState = isArtifactWritingEnabled();
-  setArtifactWritingEnabled(options.writeArtifacts);
-
-  try {
-    // Get image URI and source type
-    const imageUri = source.getImageUri();
-    const sourceType = source.getType();
-
-    // Run the main pipeline
-    // Note: For replay sources, the existing pipeline will still work
-    // because it uses the imageUri for display, and we're not yet
-    // implementing full tensor replay (that would require more extensive changes)
-    const result = await runPipeline(
-      imageUri,
-      sourceType === 'camera' ? 'camera' : 'fixture',
-      sourceType === 'fixture' ? (source as FixtureSource).getFixtureInfo().name : undefined
-    );
-
-    // Restore artifact writing state
-    setArtifactWritingEnabled(previousArtifactState);
-
-    return result;
-  } catch (error) {
-    // Restore artifact writing state on error
-    setArtifactWritingEnabled(previousArtifactState);
-    throw error;
-  }
-}
-
-/**
- * Run preview-mode pipeline for fast live camera feedback
- * - Skips artifact writing for performance
- * - Uses AABB NMS for speed
- * - Skips rectification
- */
-export async function runPreviewPipeline(imageUri: string): Promise<PipelineResult> {
-  const source = new CameraSource(imageUri);
-  return runPipelineWithOptions(source, PREVIEW_OPTIONS);
-}
-
-/**
- * Run replay pipeline from a saved session
- * Uses cached tensor data to produce identical results
- *
- * @param sessionId The session ID to replay
- * @returns Pipeline result or null if session has no replay data
- */
-export async function runReplayPipeline(sessionId: string): Promise<PipelineResult | null> {
-  const source = await createReplaySource(sessionId);
-  if (!source) {
-    console.error(`[Pipeline] No replay data found for session ${sessionId}`);
-    return null;
-  }
-
-  console.log(`[Pipeline] Replaying session ${sessionId}`);
-
-  // Run with capture options but generate new session ID
-  const options: PipelineOptions = {
-    ...CAPTURE_OPTIONS,
-    sessionIdOverride: `replay_${sessionId}_${Date.now()}`,
-  };
-
-  return runPipelineWithOptions(source, options);
 }

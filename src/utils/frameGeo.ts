@@ -312,28 +312,6 @@ export function mapImageToModel(
 }
 
 /**
- * Map OBB from model space to image space
- */
-export function mapOBBModelToImage(
-  cx: number,
-  cy: number,
-  width: number,
-  height: number,
-  angle: number,
-  frameGeo: FrameGeo
-): { cx: number; cy: number; width: number; height: number; angle: number } {
-  const { scale, padX, padY } = frameGeo.letterbox;
-
-  return {
-    cx: (cx - padX) / scale,
-    cy: (cy - padY) / scale,
-    width: width / scale,
-    height: height / scale,
-    angle, // Angle unchanged
-  };
-}
-
-/**
  * Round-trip coordinate test
  * Maps 20 image-space points through image->model->image and checks error
  *

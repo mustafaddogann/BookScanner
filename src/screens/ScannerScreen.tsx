@@ -52,10 +52,12 @@ export function ScannerScreen(): React.JSX.Element {
   const route = useRoute<ScannerRouteProp>();
   const camera = useRef<Camera>(null);
   const [isCapturing, setIsCapturing] = useState(false);
-  const [scanMode, setScanMode] = useState<'shelf' | 'single'>('shelf');
   const [railExpanded, setRailExpanded] = useState(false);
-  const [qualityMode, setQualityMode] = useState<'speed' | 'accuracy'>('accuracy');
   const [gridEnabled, setGridEnabled] = useState(false);
+  // NOTE: there used to be Shelf/Single and Speed/Accuracy pickers here. Neither
+  // value ever reached the pipeline - there is one detection path (SPINE_PRESET) and
+  // no single-book mode - so they were controls that promised behaviour the app does
+  // not have. Re-add them together with the code that actually varies.
 
   const { hasPermission, requestPermission } = useCameraPermission();
   const device = useCameraDevice('back');
@@ -271,23 +273,8 @@ export function ScannerScreen(): React.JSX.Element {
       {/* Bottom controls — minimal when not expanded */}
       {!isCapturing && (
         <View style={styles.bottomControls}>
-          {/* Mode + options row */}
+          {/* Options row */}
           <View style={styles.controlsTopRow}>
-            <View style={styles.modePill}>
-              <TouchableOpacity
-                style={[styles.modeOption, scanMode === 'shelf' && styles.modeOptionActive]}
-                onPress={() => setScanMode('shelf')}
-              >
-                <Text style={[styles.modeText, scanMode === 'shelf' && styles.modeTextActive]}>Shelf</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.modeOption, scanMode === 'single' && styles.modeOptionActive]}
-                onPress={() => setScanMode('single')}
-              >
-                <Text style={[styles.modeText, scanMode === 'single' && styles.modeTextActive]}>Single</Text>
-              </TouchableOpacity>
-            </View>
-
             <TouchableOpacity
               style={styles.optionsButton}
               onPress={handleToggleRail}
@@ -321,24 +308,6 @@ export function ScannerScreen(): React.JSX.Element {
           {railExpanded && (
             <View style={styles.expandedRail}>
               <View style={styles.railDivider} />
-
-              <View style={styles.optionRow}>
-                <Text style={styles.optionLabel}>Quality</Text>
-                <View style={styles.optionPill}>
-                  <TouchableOpacity
-                    style={[styles.optionChoice, qualityMode === 'speed' && styles.optionChoiceActive]}
-                    onPress={() => setQualityMode('speed')}
-                  >
-                    <Text style={[styles.optionChoiceText, qualityMode === 'speed' && styles.optionChoiceTextActive]}>Speed</Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.optionChoice, qualityMode === 'accuracy' && styles.optionChoiceActive]}
-                    onPress={() => setQualityMode('accuracy')}
-                  >
-                    <Text style={[styles.optionChoiceText, qualityMode === 'accuracy' && styles.optionChoiceTextActive]}>Accuracy</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
 
               <View style={styles.optionRow}>
                 <Text style={styles.optionLabel}>Grid</Text>
@@ -498,28 +467,6 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     marginBottom: spacing.lg,
   },
-  modePill: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(245, 240, 232, 0.08)',
-    borderRadius: radii.pill,
-    padding: 3,
-  },
-  modeOption: {
-    paddingHorizontal: 16,
-    paddingVertical: 7,
-    borderRadius: radii.pill,
-  },
-  modeOptionActive: {
-    backgroundColor: colors.primary,
-  },
-  modeText: {
-    color: colors.textSecondary,
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  modeTextActive: {
-    color: colors.bgDeep,
-  },
   optionsButton: {
     width: 36,
     height: 36,
@@ -573,28 +520,6 @@ const styles = StyleSheet.create({
   optionLabel: {
     color: colors.textSecondary,
     fontSize: 13,
-  },
-  optionPill: {
-    flexDirection: 'row',
-    backgroundColor: 'rgba(245, 240, 232, 0.08)',
-    borderRadius: radii.pill,
-    padding: 2,
-  },
-  optionChoice: {
-    paddingHorizontal: 12,
-    paddingVertical: 5,
-    borderRadius: radii.pill,
-  },
-  optionChoiceActive: {
-    backgroundColor: colors.primary,
-  },
-  optionChoiceText: {
-    color: colors.textSecondary,
-    fontSize: 12,
-    fontWeight: '600',
-  },
-  optionChoiceTextActive: {
-    color: colors.bgDeep,
   },
   toggleChip: {
     backgroundColor: 'rgba(245, 240, 232, 0.08)',

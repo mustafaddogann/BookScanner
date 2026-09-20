@@ -101,10 +101,6 @@ interface AppState {
   // Session history
   sessions: ScanSession[];
 
-  // Rectifier configuration
-  rectifierUrl: string;
-  rectifierEnabled: boolean;
-
   // Actions
   setCurrentSession: (session: ScanSession | null) => void;
   setDetections: (detections: OBBDetection[]) => void;
@@ -116,17 +112,10 @@ interface AppState {
   updateSession: (sessionId: string, updates: Partial<ScanSession>) => void;
   loadSessions: () => void;
   clearCurrentSession: () => void;
-  setRectifierUrl: (url: string) => void;
-  setRectifierEnabled: (enabled: boolean) => void;
 }
 
 // Keys for MMKV storage
 const SESSIONS_KEY = 'sessions';
-const RECTIFIER_URL_KEY = 'rectifierUrl';
-const RECTIFIER_ENABLED_KEY = 'rectifierEnabled';
-
-// Default rectifier URL
-const DEFAULT_RECTIFIER_URL = 'http://localhost:8000';
 
 export const useAppStore = create<AppState>((set, get) => ({
   // Initial state
@@ -139,10 +128,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   error: null,
   sessionMeta: null,
   sessions: [],
-
-  // Rectifier configuration (loaded from MMKV)
-  rectifierUrl: storage.getString(RECTIFIER_URL_KEY) || DEFAULT_RECTIFIER_URL,
-  rectifierEnabled: storage.getString(RECTIFIER_ENABLED_KEY) !== 'false',
 
   // Actions
   setCurrentSession: (session) => {
@@ -261,19 +246,5 @@ export const useAppStore = create<AppState>((set, get) => ({
       error: null,
       sessionMeta: null,
     });
-  },
-
-  setRectifierUrl: (url) => {
-    set({ rectifierUrl: url });
-    storage.set(RECTIFIER_URL_KEY, url);
-    // Note: URL stored for future backend integration but native rectification
-    // does not use it - all rectification is on-device via CoreImage (iOS)
-    console.log(`[AppStore] Rectifier URL set to: ${url}`);
-  },
-
-  setRectifierEnabled: (enabled) => {
-    set({ rectifierEnabled: enabled });
-    storage.set(RECTIFIER_ENABLED_KEY, enabled ? 'true' : 'false');
-    console.log(`[AppStore] Rectification ${enabled ? 'enabled' : 'disabled'}`);
   },
 }));
