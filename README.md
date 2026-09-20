@@ -4,10 +4,7 @@ A React Native application for detecting book spines using YOLOv8 Oriented Bound
 
 > **Platform status: iOS only.** The full scan pipeline runs end to end on iOS. On
 > Android, OCR (ML Kit) is implemented but image preprocessing and rectification are
-> stubs in `ImagePreprocessorModule.kt`, so detection cannot run. The app now fails
-> with an explicit "not supported on android" message instead of an opaque
-> `getImageDecodeStats is not a function`. See
-> [Android status](#android-status).
+> stubs in `ImagePreprocessorModule.kt`, so detection cannot run.
 
 ## Features
 
