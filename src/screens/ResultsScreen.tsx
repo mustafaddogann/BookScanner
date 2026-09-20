@@ -34,6 +34,7 @@ import { recognizeCropText, isTextRecognitionAvailable } from '../services/textR
 import { ensureFileUri, getFilename } from '../utils/fileUri';
 import { isMetadataResolutionEnabled } from '../config/debug';
 import { retryMetadataResolution } from '../services/metadataResolutionOrchestrator';
+import { useDevAutoRetry } from '../hooks/useDevAutoRetry';
 import { BookCandidateCard } from '../components/BookCandidateCard';
 import { useDebugStore } from '../store/useDebugStore';
 import { BookCandidateDetailModal } from '../components/BookCandidateDetailModal';
@@ -41,12 +42,7 @@ import { EditCandidateFieldsModal } from '../components/EditCandidateFieldsModal
 import { saveCorrection, deleteCorrection, hasAppliedCorrection, hasStoredCorrection } from '../services/correctionsMemory';
 import { confirmUserSelection } from '../services/booksCatalogService';
 import RNFS from 'react-native-fs';
-import {
-  checkRescanStatus,
-  getLastScannedImageUri,
-  autoExportRejects,
-  getServerUrl,
-} from '../services/autoExportService';
+import { autoExportRejects } from '../services/autoExportService';
 import { colors, fonts, spacing, radii, shadows } from '../theme';
 
 // Tab options for switching between overlay, crops, and books views
@@ -74,9 +70,6 @@ export function ResultsScreen(): React.JSX.Element {
 
   // Diagnostics enabled from user settings
   const diagnosticsEnabled = useDebugStore((state) => state.diagnosticsEnabled);
-  const autoRetryEnabled = useDebugStore((state) => state.autoRetryEnabled);
-  const autoRetryInterval = useDebugStore((state) => state.autoRetryInterval);
-  const setAutoRetryEnabled = useDebugStore((state) => state.setAutoRetryEnabled);
   const showDiagnosticsUI = __DEV__ && diagnosticsEnabled;
 
   const [imageUri, setImageUri] = useState<string | null>(null);
@@ -200,94 +193,14 @@ export function ResultsScreen(): React.JSX.Element {
     });
   }, []);
 
-  // Auto-retry timer for automated testing
-  useEffect(() => {
-    if (!autoRetryEnabled || metadataRetrying) return;
-
-    const timer = setInterval(() => {
-      console.log('[AutoRetry] Triggering automatic retry...');
-      // Find and call the retry handler
-      const currentMeta = useAppStore.getState().sessionMeta;
-      // Count books that need fixing (everything except accept and suggested)
-      const rejectCount = currentMeta?.bookCandidates?.filter((c) => {
-        const decision = c.resolverDecision;
-        return decision !== 'accept' && decision !== 'suggested';
-      }).length || 0;
-
-      if (rejectCount > 0) {
-        console.log(`[AutoRetry] ${rejectCount} rejects found, retrying...`);
-        // Trigger retry via the handler (will be called below)
-        setMetadataRetrying(true);
-        retryMetadataResolution({
-          sessionId,
-          rectificationResults: currentMeta?.rectificationResults || [],
-          ocrResultsByCropIndex: currentMeta?.ocrResultsByCropIndex || {},
-          bookCandidates: currentMeta?.bookCandidates || [],
-        }).then((result) => {
-          console.log('[AutoRetry] Retry complete');
-          useAppStore.getState().setSessionMeta({
-            metadataResolution: result.resolutionState,
-            bookCandidates: result.resolutionState?.resolvedCandidates,
-          });
-          // Export rejects to Telegram for ClawdBot analysis
-          const candidates = result.resolutionState?.resolvedCandidates || [];
-          autoExportRejects(sessionId, candidates);
-        }).catch((err) => {
-          console.error('[AutoRetry] Retry failed:', err);
-        }).finally(() => {
-          setMetadataRetrying(false);
-        });
-      } else {
-        console.log('[AutoRetry] No rejects, disabling auto-retry');
-        setAutoRetryEnabled(false);
-      }
-    }, autoRetryInterval * 1000);
-
-    return () => clearInterval(timer);
-  }, [autoRetryEnabled, autoRetryInterval, metadataRetrying, sessionId, setAutoRetryEnabled]);
-
-  // Auto-rescan polling: Check server for rebuild signals
-  // When code changes are deployed, server signals the app to rescan
-  useEffect(() => {
-    if (!autoRetryEnabled) return;
-
-    const pollForRescan = async () => {
-      try {
-        const status = await checkRescanStatus();
-        if (status.rescan && status.auto_retry) {
-          console.log('[AutoRescan] Server signaled rescan:', status.reason);
-          const imageUri = getLastScannedImageUri();
-          if (imageUri) {
-            // Clear the rescan flag on server first
-            const serverUrl = getServerUrl();
-            if (serverUrl) {
-              try {
-                const baseUrl = serverUrl.replace(/\/upload$/, '');
-                await fetch(`${baseUrl}/clear-rescan`, { method: 'POST' });
-              } catch (e) {
-                console.warn('[AutoRescan] Failed to clear rescan flag:', e);
-              }
-            }
-            // Navigate directly to scanner - no alert blocking
-            console.log('[AutoRescan] Auto-navigating to rescan with:', imageUri);
-            navigation.navigate('Scanner', { importUri: imageUri });
-          }
-        }
-      } catch (error) {
-        console.warn('[AutoRescan] Poll error:', error);
-      }
-    };
-
-    // Poll every 30 seconds
-    const timer = setInterval(pollForRescan, 30000);
-    // Initial check after 5 seconds
-    const initialCheck = setTimeout(pollForRescan, 5000);
-
-    return () => {
-      clearInterval(timer);
-      clearTimeout(initialCheck);
-    };
-  }, [autoRetryEnabled, navigation]);
+  // Dev-only automation loops (auto-retry + auto-rescan polling).
+  // Hard-disabled outside __DEV__ - see src/hooks/useDevAutoRetry.ts.
+  useDevAutoRetry({
+    sessionId,
+    navigation,
+    isRetrying: metadataRetrying,
+    setIsRetrying: setMetadataRetrying,
+  });
 
   // TASK E: Defensive verification and fallback loader
   // If store has no rectificationResults but crops exist on disk, load them ONCE

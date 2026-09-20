@@ -26,7 +26,9 @@ export function TabsScreen(): React.JSX.Element {
   const [activeTab, setActiveTab] = useState<TabKey>('Scan');
   const indicatorX = useRef(new Animated.Value(0)).current;
   const unreviewedCount = useUnreviewedStore((s) => s.unreviewedIds.size);
-  const activeScanCount = useBackgroundScanStore((s) => Object.keys(s.scans).length);
+  const activeScanCount = useBackgroundScanStore(
+    (s) => Object.values(s.scans).filter((scan) => scan.isProcessing).length
+  );
 
   const handleSelectTab = useCallback((tab: TabKey) => {
     setActiveTab(tab);

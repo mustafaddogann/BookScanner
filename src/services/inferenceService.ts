@@ -1048,6 +1048,9 @@ export function getLastTimingBreakdown(): InferenceTimingBreakdown | null {
 /** Model filename constant */
 const MODEL_FILENAME = 'yolov8_obb.tflite';
 
+/** In-flight loadModel() promise, shared by concurrent callers */
+let loadModelPromise: Promise<void> | null = null;
+
 /** Resolved absolute model path (set during loading) */
 let resolvedModelPath: string | null = null;
 
@@ -1239,6 +1242,21 @@ export async function loadModel(): Promise<void> {
     return;
   }
 
+  // Concurrent scans (up to 3 background scans are allowed) can all reach this
+  // before the first load resolves. Without this guard each would allocate its own
+  // ~11 MB interpreter. Share the in-flight promise instead.
+  if (loadModelPromise) {
+    console.log('[InferenceService] Model load already in flight, awaiting it');
+    return loadModelPromise;
+  }
+
+  loadModelPromise = doLoadModel().finally(() => {
+    loadModelPromise = null;
+  });
+  return loadModelPromise;
+}
+
+async function doLoadModel(): Promise<void> {
   console.log('[InferenceService] Loading model...');
 
   try {

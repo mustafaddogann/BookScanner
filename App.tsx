@@ -59,10 +59,17 @@ const Stack = createNativeStackNavigator<RootStackParamList>();
 /**
  * Check for pending rescan signal on app startup.
  * Called when NavigationContainer is ready.
- * If Claude has fixed issues and the server has a rescan signal,
- * automatically navigate to Scanner to rescan the last image.
+ * If the local dev server has a rescan signal, navigate to Scanner to rescan the
+ * last image.
+ *
+ * DEV ONLY: this talks to scripts/rejectsServer.js over plain HTTP. A shipped build
+ * must not make a network call at launch, so it returns immediately outside __DEV__.
  */
 async function checkStartupRescan(): Promise<void> {
+  if (!__DEV__) {
+    return;
+  }
+
   // Only run once per app launch
   if (startupRescanDone) {
     return;

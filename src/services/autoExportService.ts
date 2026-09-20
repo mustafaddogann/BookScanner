@@ -1,9 +1,14 @@
 /**
  * Auto Export Service
  *
- * Automatically exports rejected books for analysis.
+ * DEVELOPMENT TOOLING. Exports unresolved book candidates so the local automation
+ * loop (scripts/rejectsServer.js + scripts/autoFixDaemon.js) can analyse them.
  * 1. Saves locally to Documents folder
- * 2. Uploads to Mac server if configured (for ClawdBot integration)
+ * 2. Uploads to Mac server if configured
+ *
+ * Every export and upload entry point is gated on __DEV__. These functions write OCR
+ * text and, for image upload, the user's own shelf photo to a plain-HTTP dev server -
+ * a shipped build must never do that silently. In release builds they no-op.
  */
 
 import RNFS from 'react-native-fs';
@@ -22,15 +27,18 @@ const AUTO_RESCAN_MIGRATED_KEY = 'auto_rescan_migrated_v2';
 // MMKV storage instance
 const storage = new MMKV({ id: 'bookscanner-autoexport' });
 
-// Migration: Force auto-retry ON for existing users (runs once)
-try {
-  if (!storage.getBoolean(AUTO_RESCAN_MIGRATED_KEY)) {
-    storage.set(AUTO_RESCAN_ENABLED_KEY, true);
-    storage.set(AUTO_RESCAN_MIGRATED_KEY, true);
-    console.log('[AutoExport] Migrated: Auto-retry enabled by default');
+// Migration: opt existing dev installs into auto-rescan (runs once, dev only).
+// Never force this on in a release build.
+if (__DEV__) {
+  try {
+    if (!storage.getBoolean(AUTO_RESCAN_MIGRATED_KEY)) {
+      storage.set(AUTO_RESCAN_ENABLED_KEY, true);
+      storage.set(AUTO_RESCAN_MIGRATED_KEY, true);
+      console.log('[AutoExport] Migrated: Auto-retry enabled by default');
+    }
+  } catch (e) {
+    console.warn('[AutoExport] Migration failed:', e);
   }
-} catch (e) {
-  console.warn('[AutoExport] Migration failed:', e);
 }
 
 // Minimum rejects to trigger auto-export
@@ -80,6 +88,9 @@ export async function autoExportRejects(
   sessionId: string,
   candidates: BookCandidate[]
 ): Promise<void> {
+  if (!__DEV__) {
+    return;
+  }
   try {
     // Export everything that's NOT accept or suggested
     // This matches the Results screen "Reject" filter exactly
@@ -202,6 +213,9 @@ async function uploadToServer(serverUrl: string, data: object): Promise<void> {
  * Upload scan image to Mac server for persistence across app rebuilds.
  */
 export async function uploadScanImageToServer(sessionId: string): Promise<boolean> {
+  if (!__DEV__) {
+    return false;
+  }
   const serverUrl = getServerUrl();
   if (!serverUrl) {
     console.log('[AutoExport] No server URL, skipping image upload');
@@ -310,6 +324,9 @@ export async function checkRescanStatus(): Promise<{
     fixable: boolean;
   };
 }> {
+  if (!__DEV__) {
+    return { rescan: false, reason: null };
+  }
   const serverUrl = getServerUrl();
   if (!serverUrl) {
     return { rescan: false, reason: null };

@@ -13,7 +13,7 @@
  * 7. rectification - Generate crop images
  */
 
-import { NativeModules } from 'react-native';
+import { NativeModules, Platform } from 'react-native';
 import RNFS from 'react-native-fs';
 import type {
   ImageMeta,
@@ -42,11 +42,34 @@ import {
 } from './debugArtifacts';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 
-// Native image preprocessor module
+// Native image preprocessor module.
+//
+// Checking for the module object is NOT enough: Android registers an
+// ImagePreprocessor that only implements isRectificationAvailable/rectifyPerspective
+// as stubs. `!!ImagePreprocessor` was therefore true on Android and the pipeline ran
+// on to call getImageDecodeStats, failing with an opaque
+// "getImageDecodeStats is not a function". Probe for the methods the pipeline
+// actually needs so an unsupported platform fails with a message that explains itself.
 const { ImagePreprocessor } = NativeModules;
-const hasNativePreprocessor = !!ImagePreprocessor;
 
-console.log(`[Pipeline] Native ImagePreprocessor available: ${hasNativePreprocessor}`);
+const REQUIRED_PREPROCESSOR_METHODS = [
+  'getImageDecodeStats',
+  'preprocessForTFLite',
+  'savePreviewImage',
+] as const;
+
+const missingPreprocessorMethods = ImagePreprocessor
+  ? REQUIRED_PREPROCESSOR_METHODS.filter(
+      (name) => typeof (ImagePreprocessor as Record<string, unknown>)[name] !== 'function'
+    )
+  : [...REQUIRED_PREPROCESSOR_METHODS];
+
+const hasNativePreprocessor = missingPreprocessorMethods.length === 0;
+
+console.log(
+  `[Pipeline] Native ImagePreprocessor available: ${hasNativePreprocessor}` +
+    (hasNativePreprocessor ? '' : ` (missing: ${missingPreprocessorMethods.join(', ')})`)
+);
 import { PipelineTimer } from '../utils/timing';
 import {
   type FrameGeo,
@@ -181,6 +204,13 @@ interface PipelineResult {
   errors: string[];
 }
 
+/**
+ * Generate a scan session id. Single definition so every caller agrees on the format.
+ */
+function generateScanSessionId(): string {
+  return `scan_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+}
+
 let activeForegroundSessionId: string | null = null;
 
 /**
@@ -190,11 +220,14 @@ export async function runPipeline(
   imageUri: string,
   source: 'camera' | 'fixture',
   fixtureName?: string,
-  storeAdapter?: PipelineStoreAdapter
+  storeAdapter?: PipelineStoreAdapter,
+  sessionIdOverride?: string
 ): Promise<PipelineResult> {
   const timer = new PipelineTimer();
   const errors: string[] = [];
-  const sessionId = `scan_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  // Callers that track the scan under their own id (runPipelineBackground) pass it in,
+  // so the background store slot, the session directory and the MMKV keys all agree.
+  const sessionId = sessionIdOverride ?? generateScanSessionId();
 
   console.log(`[Pipeline] Starting pipeline for session ${sessionId}`);
   console.log(`[Pipeline] Source: ${source}, Image: ${imageUri}`);
@@ -375,7 +408,12 @@ export async function runPipeline(
         // STEP 1: Decode source image and verify it has real pixels
         // ================================================================
         if (!hasNativePreprocessor) {
-          throw new Error('INPUT_TENSOR_EMPTY: Native ImagePreprocessor not available. Cannot decode image.');
+          throw new Error(
+            `Spine scanning is not supported on ${Platform.OS} in this build. ` +
+              `The native ImagePreprocessor is missing: ${missingPreprocessorMethods.join(', ')}. ` +
+              'Android needs these ported in ImagePreprocessorModule.kt plus the model at ' +
+              'android/app/src/main/assets/models/yolov8_obb.tflite.'
+          );
         }
 
         console.log('[Pipeline] STEP 1: Decoding source image...');
@@ -662,11 +700,12 @@ export async function runPipeline(
           // Write score_sanity.json
           await writeScoreSanity(sessionId, scoreSanityStats);
 
-          // HARD GATE: Check score sanity
+          // Score sanity is a DIAGNOSTIC, not a gate. It inspects the raw score channel
+          // distribution; a warning here does not mean the scan failed. Pushing it into
+          // `errors` used to flip session.status to 'error' and show a red "Error" chip
+          // in My Shelf for scans that produced perfectly good detections.
           if (!scoreSanityStats.valid) {
-            errors.push(`SCORE_SANITY_FAILED: ${scoreSanityStats.failureReason}`);
-            console.error(`[Pipeline] ⚠️  ${scoreSanityStats.failureReason}`);
-            // Note: We continue despite failure to write artifacts for debugging
+            console.warn(`[Pipeline] Score sanity warning: ${scoreSanityStats.failureReason}`);
           } else {
             console.log('[Pipeline] ✓ Score sanity check passed');
           }
@@ -1628,28 +1667,28 @@ export async function runPipelineBackground(imageUri: string): Promise<void> {
     throw new Error('Maximum background scans reached (3). Wait for one to finish.');
   }
 
-  const sessionId = `scan_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
+  const sessionId = generateScanSessionId();
   bgStore.startScan(sessionId);
   const adapter = createBackgroundAdapter(sessionId);
 
   try {
-    const result = await runPipeline(imageUri, 'camera', undefined, adapter);
+    // Pass sessionId through: runPipeline must use the SAME id we registered above,
+    // otherwise the store slot, the session directory and the MMKV keys diverge.
+    const result = await runPipeline(imageUri, 'camera', undefined, adapter, sessionId);
 
     // Persist sessionMeta + detections to MMKV for later hydration
     const scan = useBackgroundScanStore.getState().scans[sessionId];
     if (scan?.sessionMeta) {
-      storage.set(`session_meta_${result.session.sessionId}`, JSON.stringify(scan.sessionMeta));
+      storage.set(`session_meta_${sessionId}`, JSON.stringify(scan.sessionMeta));
     }
     if (scan?.detections) {
-      storage.set(`session_detections_${result.session.sessionId}`, JSON.stringify(scan.detections));
+      storage.set(`session_detections_${sessionId}`, JSON.stringify(scan.detections));
     }
 
     bgStore.completeScan(sessionId, result.session);
   } catch (error: any) {
-    useBackgroundScanStore.getState().updateScan(sessionId, {
-      error: error.message,
-      isProcessing: false,
-    });
+    // failScan keeps the slot visible but releases the concurrency permit.
+    useBackgroundScanStore.getState().failScan(sessionId, error.message);
   }
 }
 

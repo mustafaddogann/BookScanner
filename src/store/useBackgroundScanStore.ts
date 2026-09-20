@@ -19,8 +19,11 @@ interface BackgroundScanState {
   startScan: (sessionId: string) => void;
   updateScan: (sessionId: string, updates: Partial<BackgroundScan>) => void;
   completeScan: (sessionId: string, session: ScanSession) => void;
+  /** Mark a scan as failed: keeps the slot so the error stays visible, but stops counting it as in-flight. */
+  failScan: (sessionId: string, error: string) => void;
   popCompletedSession: () => ScanSession | null;
   removeScan: (sessionId: string) => void;
+  /** Number of scans still running. Failed scans are NOT counted. */
   activeCount: () => number;
 }
 
@@ -68,6 +71,19 @@ export const useBackgroundScanStore = create<BackgroundScanState>((set, get) => 
     useUnreviewedStore.getState().addUnreviewed(session.sessionId);
   },
 
+  failScan: (sessionId, error) => {
+    set((state) => {
+      const existing = state.scans[sessionId];
+      if (!existing) return state;
+      return {
+        scans: {
+          ...state.scans,
+          [sessionId]: { ...existing, error, isProcessing: false, stage: null },
+        },
+      };
+    });
+  },
+
   popCompletedSession: () => {
     const { completedSessions } = get();
     if (completedSessions.length === 0) return null;
@@ -83,7 +99,10 @@ export const useBackgroundScanStore = create<BackgroundScanState>((set, get) => 
     });
   },
 
+  // Counts only scans still running. A failed scan keeps its slot so the user can
+  // read the error and dismiss it, but it must not hold a concurrency permit -
+  // otherwise three failures would block capture until the app restarts.
   activeCount: () => {
-    return Object.keys(get().scans).length;
+    return Object.values(get().scans).filter((scan) => scan.isProcessing).length;
   },
 }));

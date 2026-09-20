@@ -50,6 +50,7 @@ export function ScanningTab(): React.JSX.Element {
   const navigation = useNavigation<NavigationProp>();
   const sessions = useAppStore((s) => s.sessions);
   const scans = useBackgroundScanStore((s) => s.scans);
+  const removeScan = useBackgroundScanStore((s) => s.removeScan);
 
   const activeScans = useMemo(() => Object.values(scans), [scans]);
 
@@ -103,12 +104,22 @@ export function ScanningTab(): React.JSX.Element {
               <View style={styles.activeContent}>
                 <View style={styles.activeRow}>
                   <Text style={styles.activeStage} numberOfLines={1}>
-                    {scan.stage ?? 'Processing...'}
+                    {scan.isProcessing ? scan.stage ?? 'Processing...' : 'Scan failed'}
                   </Text>
-                  <ActivityIndicator size="small" color={colors.primary} />
+                  {/* A failed scan shows a dismiss control instead of a spinner that never stops. */}
+                  {scan.isProcessing ? (
+                    <ActivityIndicator size="small" color={colors.primary} />
+                  ) : (
+                    <AnimatedPressable
+                      style={styles.dismissButton}
+                      onPress={() => removeScan(scan.sessionId)}
+                    >
+                      <Text style={styles.dismissText}>{'\u2715'}</Text>
+                    </AnimatedPressable>
+                  )}
                 </View>
                 {scan.error && (
-                  <Text style={styles.activeError} numberOfLines={1}>
+                  <Text style={styles.activeError} numberOfLines={2}>
                     {scan.error}
                   </Text>
                 )}
@@ -229,6 +240,19 @@ const styles = StyleSheet.create({
     color: colors.rejected,
     fontSize: 12,
     marginTop: spacing.xs,
+  },
+  dismissButton: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: colors.bgNested,
+  },
+  dismissText: {
+    color: colors.textSecondary,
+    fontSize: 12,
+    fontWeight: '600',
   },
 
   // Session cards (completed)

@@ -95,17 +95,24 @@ function loadInitialValue(): boolean {
   }
 }
 
-// Load auto-retry initial value - DEFAULT IS TRUE
+// Load auto-retry initial value.
+//
+// DEFAULT IS FALSE, and it is forced off outside __DEV__. Auto-retry re-runs the
+// whole metadata resolver on an interval, which costs hundreds of Open Library
+// queries per pass - that belongs to the local dev/automation loop only, never to
+// a shipped build. Opt in from Settings while developing.
 function loadAutoRetryValue(): boolean {
+  if (!__DEV__) {
+    return false;
+  }
   try {
     const stored = debugStorage.getBoolean(AUTO_RETRY_KEY);
-    // Default to TRUE if not set
-    const value = stored ?? true;
+    const value = stored ?? false;
     console.log(`[AutoRetry] Loaded from storage: ${value}`);
     return value;
   } catch (error) {
     console.error('[AutoRetry] Failed to load from storage:', error);
-    return true; // Default to true on error
+    return false;
   }
 }
 

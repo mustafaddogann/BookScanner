@@ -61,8 +61,10 @@ export function ScannerScreen(): React.JSX.Element {
   const device = useCameraDevice('back');
 
   const { error, setError } = useAppStore();
+  // Count only scans still running. Failed scans keep their slot (so the error stays
+  // readable in My Shelf) but must not consume a concurrency permit.
   const backgroundActiveCount = useBackgroundScanStore(
-    (s) => Object.keys(s.scans).length
+    (s) => Object.values(s.scans).filter((scan) => scan.isProcessing).length
   );
   const captureDisabled = backgroundActiveCount >= 3;
 

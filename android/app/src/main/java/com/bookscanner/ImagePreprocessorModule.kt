@@ -8,13 +8,24 @@ import com.facebook.react.bridge.ReadableMap
 import com.facebook.react.bridge.WritableNativeMap
 
 /**
- * ImagePreprocessorModule - Android placeholder for native image preprocessing
+ * ImagePreprocessorModule - Android placeholder for native image preprocessing.
  *
- * Currently provides:
- * - isRectificationAvailable: Returns false (not yet implemented)
- * - rectifyPerspective: Returns skipped status
+ * STATUS: the spine-scanning pipeline does NOT run on Android. This module is a stub.
  *
- * TODO: Implement rectification using Android APIs (e.g., OpenCV, RenderScript, or Matrix transforms)
+ * Implemented:
+ * - isRectificationAvailable: returns false
+ * - rectifyPerspective: returns skipped status
+ *
+ * NOT implemented - the pipeline (src/services/pipelineService.ts) requires all three,
+ * and probes for them by name, so Android fails early with an explanatory message:
+ * - getImageDecodeStats(imagePath)     -> { width, height, byteLength, globalMin, globalMax }
+ * - preprocessForTFLite(path, size, pad) -> { tensorBase64, tensorStats, previewBase64RGBA, nativeTruth }
+ * - savePreviewImage(rgbaBase64, w, h, outPath)
+ *
+ * To bring Android up, port those from ios/ImagePreprocessor.m (Bitmap + Matrix is
+ * sufficient for the perspective transform; OpenCV is not required) AND bundle the
+ * model at android/app/src/main/assets/models/yolov8_obb.tflite - it is absent today,
+ * so loadModel() cannot succeed either. OCR (TextRecognizerModule) is already done.
  */
 class ImagePreprocessorModule(reactContext: ReactApplicationContext) :
     ReactContextBaseJavaModule(reactContext) {
