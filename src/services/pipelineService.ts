@@ -28,6 +28,7 @@ import type {
   OCRResult,
   OCRSummary,
 } from '../types';
+import { isArtifactWritingEnabled } from './debugArtifacts';
 import { DEBUG_ARTIFACTS_ENABLED } from '../config/debug';
 
 // Native image preprocessor module.
@@ -205,6 +206,10 @@ export async function runPipeline(
 ): Promise<PipelineResult> {
   const timer = new PipelineTimer();
   const errors: string[] = [];
+  // Whether to compute the diagnostic statistics whose only consumers are the
+  // artifact writers. When artifact writing is off (the production default) every
+  // write*() call below short-circuits, so computing the inputs is pure waste.
+  const writeDiagnostics = isArtifactWritingEnabled();
   // Callers that track the scan under their own id (runPipelineBackground) pass it in,
   // so the background store slot, the session directory and the MMKV keys all agree.
   const sessionId = sessionIdOverride ?? generateScanSessionId();
@@ -645,44 +650,42 @@ export async function runPipeline(
         // Get raw output for artifacts (don't write to session yet - we'll do comprehensive write later)
         rawOutput = await runInferenceRaw(inputTensor);
 
-        if (rawOutput.outputs.length > 0) {
-          // ANALYZE DECODE MODE: Log channel ranges for diagnostics
-          // Active mode: MODE_A (ch4=score probability, ch5=angle radians, sigmoid=false)
-          // This does NOT change the active mode - just produces diagnostic data
-          const activeMode = getDecodeMode();
-          console.log(`[Pipeline] Analyzing decode mode (diagnostic only; active=${activeMode.mode}, scoreChannel=${activeMode.channelMapping.score}, sigmoid=${isSigmoidEnabled()})...`);
-          analyzeDecodeMode(rawOutput.outputs[0], rawOutput.shapes[0]);
+        if (rawOutput.tensors.length > 0) {
+          // DIAGNOSTICS - skipped entirely unless artifacts are being written.
+          //
+          // Each of these makes a full pass over the model output (6 x 8400 values),
+          // and computeScoreSanityStats also sorts 8400 floats. They ran on every
+          // capture even though their only consumers are the artifact writers, which
+          // no-op when artifact writing is off (the default). That was a measurable
+          // amount of work per scan whose results were thrown away.
+          if (writeDiagnostics) {
+            const activeMode = getDecodeMode();
+            console.log(`[Pipeline] Analyzing decode mode (diagnostic only; active=${activeMode.mode}, scoreChannel=${activeMode.channelMapping.score}, sigmoid=${isSigmoidEnabled()})...`);
+            analyzeDecodeMode(rawOutput.outputs[0], rawOutput.shapes[0]);
 
-          // RUN DIAGNOSTIC DECODE: Prove candidates exist with very low threshold
-          // Uses active mode channel mapping (ch4=score, ch5=angle), threshold 0.01
-          // This is for ARTIFACTS ONLY - not for display
-          console.log('[Pipeline] Running diagnostic decode (artifacts only)...');
-          diagResult = runDiagnosticDecode(rawOutput.outputs[0], rawOutput.shapes[0]);
+            // Prove candidates exist with a very low threshold. ARTIFACTS ONLY -
+            // never used for display.
+            console.log('[Pipeline] Running diagnostic decode (artifacts only)...');
+            diagResult = runDiagnosticDecode(rawOutput.outputs[0], rawOutput.shapes[0]);
 
-          // ================================================================
-          // STEP 7: Score sanity check (HARD GATE)
-          // ================================================================
-          console.log('[Pipeline] STEP 7: Computing score sanity stats...');
-          const scoreChannel = getDecodeMode().channelMapping.score;
-          const applySigmoid = isSigmoidEnabled();
-          scoreSanityStats = computeScoreSanityStats(
-            rawOutput.outputs[0],
-            rawOutput.shapes[0],
-            scoreChannel,
-            applySigmoid
-          );
+            console.log('[Pipeline] Computing score sanity stats...');
+            scoreSanityStats = computeScoreSanityStats(
+              rawOutput.outputs[0],
+              rawOutput.shapes[0],
+              getDecodeMode().channelMapping.score,
+              isSigmoidEnabled()
+            );
+            await writeScoreSanity(sessionId, scoreSanityStats);
 
-          // Write score_sanity.json
-          await writeScoreSanity(sessionId, scoreSanityStats);
-
-          // Score sanity is a DIAGNOSTIC, not a gate. It inspects the raw score channel
-          // distribution; a warning here does not mean the scan failed. Pushing it into
-          // `errors` used to flip session.status to 'error' and show a red "Error" chip
-          // in My Shelf for scans that produced perfectly good detections.
-          if (!scoreSanityStats.valid) {
-            console.warn(`[Pipeline] Score sanity warning: ${scoreSanityStats.failureReason}`);
-          } else {
-            console.log('[Pipeline] ✓ Score sanity check passed');
+            // Score sanity is a DIAGNOSTIC, not a gate. It inspects the raw score
+            // channel distribution; a warning here does not mean the scan failed.
+            // Pushing it into `errors` used to flip session.status to 'error' and show
+            // a red "Error" chip in My Shelf for scans with good detections.
+            if (!scoreSanityStats.valid) {
+              console.warn(`[Pipeline] Score sanity warning: ${scoreSanityStats.failureReason}`);
+            } else {
+              console.log('[Pipeline] ✓ Score sanity check passed');
+            }
           }
 
           // RUN FINAL POSTPROCESS with production config (SPINE_PRESET)
@@ -692,7 +695,7 @@ export async function runPipeline(
           console.log(`[Pipeline]   Config: thr=${config.thr}, nmsIou=${config.nmsIou}, minAspect=${config.minAspect}, minScore=${config.minScore}`);
 
           postprocessResult = runPostprocess(
-            rawOutput.outputs[0],
+            rawOutput.tensors[0],
             rawOutput.shapes[0],
             letterboxParams,
             config
@@ -708,14 +711,15 @@ export async function runPipeline(
           console.log(`[Pipeline]   After NMS:       ${postprocessResult.stats.numAfterNms}`);
           console.log(`[Pipeline]   After geom:      ${postprocessResult.stats.numAfterGeom}`);
           console.log(`[Pipeline]   FINAL OUTPUT:    ${detections.length} detections`);
-          console.log('[Pipeline] (Diagnostic decode found ' + diagResult.diagDecodedCount + ' loose candidates for debugging)');
+          if (diagResult) {
+            console.log(`[Pipeline] (Diagnostic decode found ${diagResult.diagDecodedCount} loose candidates for debugging)`);
+          }
           console.log('========================================');
 
           // ================================================================
-          // STEP 8: Write NMS witness artifact
+          // NMS witness artifact (artifact-only: pairwise IoU over the decoded set)
           // ================================================================
-          console.log('[Pipeline] STEP 8: Writing NMS witness...');
-          if (postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
+          if (writeDiagnostics && postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
             const nmsWitnessData = buildNMSWitnessData(
               postprocessResult.detectionsAfterDecode,
               postprocessResult.detectionsAfterNMS.length,
@@ -726,10 +730,9 @@ export async function runPipeline(
           }
 
           // ================================================================
-          // STEP 9: Write model-space overlays
+          // Model-space overlays (artifact-only: renders and writes two JPEGs)
           // ================================================================
-          console.log('[Pipeline] STEP 9: Writing model-space overlays...');
-          if (postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
+          if (writeDiagnostics && postprocessResult.detectionsAfterDecode && postprocessResult.detectionsAfterNMS) {
             // Convert to overlay format
             const overlayDetectionsRaw = postprocessResult.detectionsAfterDecode.map(d => ({
               cx: d.cx,
@@ -1447,7 +1450,8 @@ export async function runPipeline(
       // Compute artifact data from raw output
       let tensorStats;
       let rawSampleAnchors;
-      if (rawOutput && rawOutput.outputs.length > 0) {
+      // Both are full passes over the model output consumed only by writeAllArtifacts.
+      if (writeDiagnostics && rawOutput && rawOutput.outputs.length > 0) {
         tensorStats = computeTensorStats(rawOutput.outputs[0], rawOutput.shapes[0]);
         rawSampleAnchors = extractRawSampleAnchors(
           rawOutput.outputs[0],

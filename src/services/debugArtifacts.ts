@@ -352,7 +352,9 @@ export async function writeRawModelOutput(
   // Ensure directory exists
   await RNFS.mkdir(sessionDir);
 
-  const result = await writeJsonAtomic(rawOutputPath, rawOutput, sessionDir);
+  // Drop `tensors` (Float32Array refs) - only `outputs` is JSON-serialisable.
+  const { tensors: _tensors, ...serialisableRaw } = rawOutput;
+  const result = await writeJsonAtomic(rawOutputPath, serialisableRaw, sessionDir);
   if (!result.success) {
     console.error(`[DebugArtifacts] Failed to write detections_raw.json: ${result.error}`);
   }
@@ -1135,7 +1137,10 @@ export async function writeAllArtifacts(data: AllArtifactsData): Promise<Artifac
   // 5. Write detections_raw.json
   if (data.detectionsRaw) {
     const rawPath = `${sessionDir}/detections_raw.json`;
-    const result = await writeJsonAtomic(rawPath, data.detectionsRaw, sessionDir);
+    // Drop `tensors`: they are Float32Array references, which JSON.stringify would
+    // emit as {"0":..,"1":..} objects. `outputs` holds the boxed, serialisable copy.
+    const { tensors: _tensors, ...serialisableRaw } = data.detectionsRaw;
+    const result = await writeJsonAtomic(rawPath, serialisableRaw, sessionDir);
     artifacts.push({
       name: 'detections_raw.json',
       path: result.path,
@@ -1146,6 +1151,7 @@ export async function writeAllArtifacts(data: AllArtifactsData): Promise<Artifac
     // Write empty raw output
     const emptyRaw: RawModelOutput = {
       outputs: [],
+      tensors: [],
       shapes: [],
       notes: 'No inference output available',
     };

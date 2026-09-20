@@ -325,7 +325,15 @@ export interface FixtureInfo {
  * Raw model output before mapping
  */
 export interface RawModelOutput {
+  /**
+   * Model outputs boxed as plain JS arrays, for JSON serialisation into debug
+   * artifacts. EMPTY unless artifact writing is enabled: boxing a 6x8400 Float32Array
+   * allocates ~50k heap numbers per inference, which is pure waste when the only
+   * consumers are artifact writers that no-op. Read `tensors` for computation.
+   */
   outputs: number[][];
+  /** Zero-copy references to the model's own output tensors. Always populated. */
+  tensors: Float32Array[];
   shapes: number[][];
   notes: string;
   rawTensorData?: any;

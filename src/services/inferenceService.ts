@@ -34,6 +34,7 @@ import type {
 } from '../types';
 import { mapModelToOriginalOBB } from '../utils/letterbox';
 import {
+  isArtifactWritingEnabled,
   writeModelIO,
   writeRawModelOutput,
   type TensorStats,
@@ -1483,13 +1484,22 @@ export async function runInferenceRaw(
   const outputReadStart = Date.now();
   const rawOutput: RawModelOutput = {
     outputs: [],
+    tensors: [],
     shapes: [],
     notes: isUsingMockModel ? 'MOCK MODEL OUTPUT' : 'Raw model output before postprocessing',
   };
 
+  // Keep zero-copy references for computation, and box into plain arrays ONLY when
+  // artifacts will actually consume them. Array.from() on a 6x8400 output allocates
+  // ~50k heap numbers, and it used to run on every single inference.
+  const boxForArtifacts = isArtifactWritingEnabled();
+
   for (let i = 0; i < outputs.length; i++) {
-    const output = outputs[i];
-    rawOutput.outputs.push(Array.from(output as Float32Array));
+    const output = outputs[i] as Float32Array;
+    rawOutput.tensors.push(output);
+    if (boxForArtifacts) {
+      rawOutput.outputs.push(Array.from(output));
+    }
     rawOutput.shapes.push(Array.from(modelIOContract!.outputTensors[i].shape));
   }
   const outputReadMs = Date.now() - outputReadStart;

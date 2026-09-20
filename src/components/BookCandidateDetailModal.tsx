@@ -63,25 +63,6 @@ type EvidenceSnapshot = {
   contributingCrops?: number[];
 };
 
-type ExtractedFieldsSnapshot = {
-  chosen?: {
-    title?: string | null;
-    author?: string | null;
-    isbn?: string | null;
-    publisher?: string | null;
-    edition?: string | null;
-  };
-  bestTitle?: string;
-  bestAuthor?: string;
-  bestPublisher?: string;
-  bestEdition?: string;
-  bestIsbn?: string;
-  titleCandidates?: Array<{ value?: string; confidence?: number }>;
-  authorCandidates?: Array<{ value?: string; confidence?: number }>;
-  publisherCandidates?: Array<{ value?: string; confidence?: number }>;
-  editionCandidates?: Array<{ value?: string; confidence?: number }>;
-};
-
 function formatConfidence(value?: number | null): string | null {
   if (typeof value !== 'number' || !Number.isFinite(value)) return null;
   if (value >= 0 && value <= 1) return `${Math.round(value * 100)}%`;
@@ -107,7 +88,6 @@ export function BookCandidateDetailModal({
     () => sessionMeta?.rectificationResults ?? [],
     [sessionMeta?.rectificationResults]
   );
-  const [showAlternatives, setShowAlternatives] = useState(false);
   const [showDebug, setShowDebug] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
@@ -122,14 +102,12 @@ export function BookCandidateDetailModal({
 
   useEffect(() => {
     if (!visible) {
-      setShowAlternatives(false);
       setShowDebug(false);
       setPreviewUri(null);
     }
   }, [visible, candidateId]);
 
   const evidence = candidate?.evidence as EvidenceSnapshot | undefined;
-  const extractedFields = (candidate as { extractedFields?: ExtractedFieldsSnapshot } | null)?.extractedFields;
   const mergedText = (evidence?.fullText ?? evidence?.mergedTextBlock ?? '').trim();
   const cropIndices = useMemo(() => {
     if (candidate?.cropIndices?.length) return candidate.cropIndices;
@@ -165,18 +143,6 @@ export function BookCandidateDetailModal({
     }
     return null;
   }, [rectificationResults]);
-
-  const chosenFields = useMemo(() => {
-    if (!extractedFields) return null;
-    const chosen = extractedFields.chosen || {};
-    return {
-      title: chosen.title ?? extractedFields.bestTitle ?? null,
-      author: chosen.author ?? extractedFields.bestAuthor ?? null,
-      isbn: chosen.isbn ?? extractedFields.bestIsbn ?? null,
-      publisher: chosen.publisher ?? extractedFields.bestPublisher ?? null,
-      edition: chosen.edition ?? extractedFields.bestEdition ?? null,
-    };
-  }, [extractedFields]);
 
   if (!candidate) {
     return (
@@ -377,74 +343,14 @@ export function BookCandidateDetailModal({
               </View>
             )}
 
-            {/* Extracted fields */}
-            {extractedFields && chosenFields && (
-              <View style={styles.fieldsSection}>
-                <Text style={styles.sectionLabel}>EXTRACTED FIELDS</Text>
-                <View style={styles.fieldsCard}>
-                  {chosenFields.title && (
-                    <View style={styles.fieldRow}>
-                      <Text style={styles.fieldLabel}>Title</Text>
-                      <Text style={styles.fieldValue}>{chosenFields.title}</Text>
-                    </View>
-                  )}
-                  {chosenFields.author && (
-                    <View style={styles.fieldRow}>
-                      <Text style={styles.fieldLabel}>Author</Text>
-                      <Text style={styles.fieldValue}>{chosenFields.author}</Text>
-                    </View>
-                  )}
-                  {chosenFields.isbn && (
-                    <View style={styles.fieldRow}>
-                      <Text style={styles.fieldLabel}>ISBN</Text>
-                      <Text style={styles.fieldValue}>{chosenFields.isbn}</Text>
-                    </View>
-                  )}
-                  {chosenFields.publisher && (
-                    <View style={styles.fieldRow}>
-                      <Text style={styles.fieldLabel}>Publisher</Text>
-                      <Text style={styles.fieldValue}>{chosenFields.publisher}</Text>
-                    </View>
-                  )}
-
-                  {extractedFields.titleCandidates && extractedFields.titleCandidates.length > 1 && (
-                    <TouchableOpacity
-                      onPress={() => setShowAlternatives((prev) => !prev)}
-                      style={styles.altToggle}
-                    >
-                      <Text style={styles.altToggleText}>
-                        {showAlternatives ? 'Hide alternatives' : 'Show alternatives'}
-                      </Text>
-                    </TouchableOpacity>
-                  )}
-
-                  {showAlternatives && (
-                    <View style={styles.altContainer}>
-                      {extractedFields.titleCandidates && extractedFields.titleCandidates.length > 0 && (
-                        <View style={styles.altGroup}>
-                          <Text style={styles.altGroupLabel}>Title candidates</Text>
-                          {extractedFields.titleCandidates.slice(0, 3).map((item, idx) => (
-                            <Text key={idx} style={styles.altItem} numberOfLines={1}>
-                              {item.value || '\u2014'}{item.confidence ? ` (${formatConfidence(item.confidence)})` : ''}
-                            </Text>
-                          ))}
-                        </View>
-                      )}
-                      {extractedFields.authorCandidates && extractedFields.authorCandidates.length > 0 && (
-                        <View style={styles.altGroup}>
-                          <Text style={styles.altGroupLabel}>Author candidates</Text>
-                          {extractedFields.authorCandidates.slice(0, 3).map((item, idx) => (
-                            <Text key={idx} style={styles.altItem} numberOfLines={1}>
-                              {item.value || '\u2014'}{item.confidence ? ` (${formatConfidence(item.confidence)})` : ''}
-                            </Text>
-                          ))}
-                        </View>
-                      )}
-                    </View>
-                  )}
-                </View>
-              </View>
-            )}
+            {/* The "Extracted fields" panel used to live here. It read
+                candidate.extractedFields, which NOTHING in src/ ever assigns - it is not
+                even declared in src/types - so the whole panel was permanently invisible.
+                Its producer is extractSpineFieldEvidence, gated behind
+                METADATA_FIELD_EXTRACTION_ENABLED (config/debug.ts), which is false.
+                To bring this back: enable that flag, populate candidate.extractedFields
+                in the pipeline, add it to BookCandidate in src/types, then restore this
+                panel from git history. */}
 
             {/* OCR evidence (collapsed by default) */}
             {mergedText.length > 0 && (

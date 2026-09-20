@@ -163,20 +163,30 @@ export function isSupabaseResolverEnabled(): boolean {
 // ============================================================================
 
 /**
- * Enable enhanced field extraction from OCR evidence
+ * Enable enhanced field extraction from OCR evidence.
  *
- * When false (default):
- * - Uses simple title/author extraction only
+ * STATUS as of 2026-09-19: OFF, deliberately. The implementation is complete and
+ * covered by 875 lines of passing tests (gate8FieldExtraction.test.ts), but it has
+ * not been validated against real shelf scans, so turning it on would change the
+ * resolver's query inputs with no evidence that match quality improves.
+ *
+ * KEEP the code. `unused` here means `not switched on`, not `unnecessary`. The
+ * cluster behind this flag is:
+ *   spineFieldExtractionService -> spineLineFilter, spineLineLabeler,
+ *   spineTitleAuthorAssembler, spineSwapGuard, mixedOrientationMerger
+ * Its only entry point is extractSpineFieldEvidence(), called from
+ * searchCandidateService and hypothesisGenerationService, both gated on this flag.
+ *
+ * When false (current):
+ * - Simple title/author extraction only, via titleAuthorExtraction.ts
  * - No ISBN/publisher/edition/year extraction
  *
  * When true:
- * - Enables structured field extraction:
- *   - ISBN (10/13) with validation
- *   - Publisher detection
- *   - Edition detection
- *   - Year extraction
- *   - Improved title/author splitting
- * - Feeds enhanced evidence into search candidates
+ * - Structured field extraction: validated ISBN-10/13, publisher, edition, year,
+ *   and improved title/author splitting, fed into the search candidates.
+ * - ALSO REQUIRED: populate candidate.extractedFields in the pipeline and declare it
+ *   on BookCandidate in src/types. The detail-modal panel that displayed it was
+ *   removed because nothing ever assigned that field; restore it from git history.
  */
 export const METADATA_FIELD_EXTRACTION_ENABLED = false;
 
